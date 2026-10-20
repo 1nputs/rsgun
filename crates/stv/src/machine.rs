@@ -79,6 +79,8 @@ pub struct Sys {
     access_log: [Vec<crate::compare::Access>; 2],
     /// Each CPU's native call gave the rest of its last turn back: it waits (FiberBus).
     idle: [bool; 2],
+    /// The instructions each CPU's interpreter has fetched (the SH-2 code still run as such).
+    pub interpreted: [u64; 2],
 }
 
 impl Sys {
@@ -138,6 +140,7 @@ impl Sys {
             log_depth: [0; 2],
             access_log: Default::default(),
             idle: [false; 2],
+            interpreted: [0; 2],
         }
     }
 }
@@ -682,6 +685,7 @@ impl Bus for CpuBus<'_> {
         self.sys.natives.interpreted_calls += 1;
     }
     fn fetch16(&mut self, a: u32) -> u16 {
+        self.sys.interpreted[self.cpu] += 1;
         if self.sys.spin[self.cpu].recording {
             self.sys.spin[self.cpu].fetch(a);
         }

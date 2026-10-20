@@ -206,6 +206,8 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
     if o.native {
         let n = &m.sys.natives;
         println!("native: {} functions, {} calls run natively, {} passed to the interpreter", n.len(), n.native_calls, n.interpreted_calls);
+        let [a, b] = m.sys.interpreted;
+        println!("SH-2 instructions still interpreted: master {a}, slave {b}");
     }
     if let (Some(p), Some(c)) = (&o.compare, &m.compare) {
         let report = c.report(&|e| m.sys.natives.name(e));
