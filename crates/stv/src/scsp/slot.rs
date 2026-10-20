@@ -15,6 +15,7 @@
 //!   64; send levels and pan are 6 dB and 3 dB steps (a 3 dB step is ×3/4).
 
 use crate::mem::rd16;
+use crate::state::saved;
 
 /// The envelope's phases (SGC, as the slot monitor shows them).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -24,6 +25,22 @@ pub enum Eg {
     Decay2 = 2,
     #[default]
     Release = 3,
+}
+
+impl crate::state::State for Eg {
+    fn save(&self, w: &mut Vec<u8>) {
+        w.push(*self as u8);
+    }
+    fn load(&mut self, r: &mut crate::state::Reader) -> Result<(), String> {
+        *self = match r.take(1)?[0] {
+            0 => Eg::Attack,
+            1 => Eg::Decay1,
+            2 => Eg::Decay2,
+            3 => Eg::Release,
+            b => return Err(format!("{b} where an envelope phase was saved")),
+        };
+        Ok(())
+    }
 }
 
 /// A slot's registers (0x20 bytes at 0x100000 + 0x20·n), decoded.
@@ -202,6 +219,8 @@ pub struct Slot {
     /// The release has ended: the slot stops after this sample.
     pub ending: bool,
 }
+
+saved!(Slot { active, phase, back, eg, state, lfo_pos, lfo_count, ending });
 
 /// Samples between the LFO's steps, by LFOF.
 const LFO_PERIOD: [u32; 32] = [

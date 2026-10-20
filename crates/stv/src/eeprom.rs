@@ -2,6 +2,8 @@
 //! instructions are clocked in on SK's rising edges while CS is high: a start bit, a two-bit opcode
 //! and a six-bit address (and, for WRITE and WRAL, sixteen data bits). From the 93C46 data sheet.
 
+use crate::state::saved;
+
 #[derive(Clone, Debug)]
 pub struct Eeprom {
     pub mem: [u16; 64],
@@ -16,6 +18,8 @@ pub struct Eeprom {
     out_addr: u8,
     pub dout: bool,
 }
+
+saved!(Eeprom { mem, cs, sk, shift, bits, write_enabled, out, out_addr, dout });
 
 impl Eeprom {
     pub fn new(image: Option<&[u8]>) -> Eeprom {

@@ -10,6 +10,7 @@ use crate::sh2::{Bus, Sh2};
 use crate::smpc::{Effect, Smpc};
 use crate::scsp::{Scsp, SoundBus};
 use crate::spin::SpinBus;
+use crate::state::{saved, Reader, State};
 use crate::video::{Vdp1, Vdp2};
 use corosensei::stack::DefaultStack;
 use corosensei::{Coroutine, CoroutineResult, Yielder};
@@ -82,6 +83,12 @@ pub struct Sys {
     /// The instructions each CPU's interpreter has fetched (the SH-2 code still run as such).
     pub interpreted: [u64; 2],
 }
+
+saved!(Sys {
+    wram_l, wram_h, backup, prot, prot_on, prot_counter, io, inputs, onchip, cache_data, scu, smpc,
+    vdp1, vdp2, scsp, m68k, sound_on, sound_reset_pending, sound_owed, sound_in_sample, sound_steps,
+    slave_on, clock352, line, frame, reset_pending, nmi_pending, slave_reset_pending, wait,
+} skip { bios, cart, trace, spin, natives, logging, log_depth, access_log, idle, interpreted });
 
 impl Sys {
     #[inline]
@@ -727,13 +734,25 @@ pub struct Machine {
     /// Play the loops the CPUs spin in instead of executing them (spin.rs); off, every instruction
     /// is executed (the checks compare the two).
     pub spin_enabled: bool,
+    /// A place to watch for (CPU, address): the frame in which the CPU first reached it (to run its
+    /// instruction, or to call native code there), in `reached`.
+    pub breakpoint: Option<(usize, u32)>,
+    pub reached: Option<u64>,
     watch: [Watch; 2],
     /// Each CPU's native call in progress (native.rs), with the stacks kept for the next, and the
     /// system's stand-in while a call runs (the call has the system: it is moved in and out).
     fibers: [Option<Fiber>; 2],
     stacks: [Option<DefaultStack>; 2],
     spare: Option<Box<Sys>>,
+    /// The ROMs' hashes, for save states (taken once: the cart is large).
+    roms: std::cell::OnceCell<(u64, u64)>,
 }
+
+saved!(Machine { cpu, sys, time, steps, picture } skip { coverage, evidence, compare, spin_enabled, breakpoint, reached, watch, fibers, stacks, spare, roms });
+
+/// A save state's start, and its format's version.
+const STATE_MAGIC: &[u8; 8] = b"STVSTATE";
+const STATE_VERSION: u32 = 1;
 
 /// A native call running on its own stack, so that it can wait for the machine: given the system
 /// and its turn, it runs until it has used it (and gives the system back) or returns (with the
@@ -943,10 +962,13 @@ impl Machine {
             evidence: None,
             compare: None,
             spin_enabled: true,
+            breakpoint: None,
+            reached: None,
             watch: Default::default(),
             fibers: Default::default(),
             stacks: Default::default(),
             spare: None,
+            roms: Default::default(),
         };
         let mut bus = CpuBus { sys: &mut m.sys, cpu: 0 };
         m.cpu[0].reset(&mut bus, 0);
@@ -1302,6 +1324,9 @@ impl Machine {
         if let Some(cov) = &mut self.coverage {
             cov[c].insert(cpu.pc);
         }
+        if self.breakpoint == Some((c, cpu.pc)) && self.reached.is_none() {
+            self.reached = Some(self.sys.frame);
+        }
         if self.evidence.is_some() {
             self.note_step(c);
         }
@@ -1466,6 +1491,80 @@ impl Machine {
             tvmr: s.vdp1.tvmr as u8,
         };
         self.picture = (frame.width(), frame.height(), frame.render());
+    }
+
+    fn roms(&self) -> (u64, u64) {
+        *self.roms.get_or_init(|| (fnv1a(&self.sys.bios), fnv1a(&self.sys.cart)))
+    }
+
+    /// The machine's state, between frames, for `load_state` to take back. Not while a native call
+    /// is in progress (its Rust stack is not state that can be saved).
+    pub fn save_state(&self) -> Result<Vec<u8>, String> {
+        let mut w = Vec::new();
+        self.save_state_into(&mut w)?;
+        Ok(w)
+    }
+
+    /// `save_state` into `w` (replacing what it held: its room is used again).
+    pub fn save_state_into(&self, w: &mut Vec<u8>) -> Result<(), String> {
+        if self.fibers.iter().any(Option::is_some) {
+            return Err("a native call is in progress".into());
+        }
+        w.clear();
+        w.extend_from_slice(STATE_MAGIC);
+        STATE_VERSION.save(w);
+        self.roms().save(w);
+        self.save(w);
+        Ok(())
+    }
+
+    /// Takes a state `save_state` made back (the same ROMs), dropping a native call in progress.
+    /// On an error the machine is as it was, unless a native call was in progress (then it is left
+    /// part loaded, to be made anew).
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        let before = self.save_state().ok();
+        let r = self.take_state(data);
+        if r.is_err()
+            && let Some(b) = before
+        {
+            self.take_state(&b).expect("the state just saved");
+        }
+        r
+    }
+
+    fn take_state(&mut self, data: &[u8]) -> Result<(), String> {
+        let mut r = Reader::new(data);
+        if r.take(8)? != STATE_MAGIC {
+            return Err("not a save state".into());
+        }
+        let (mut version, mut roms) = (0u32, (0u64, 0u64));
+        version.load(&mut r)?;
+        roms.load(&mut r)?;
+        if version != STATE_VERSION {
+            return Err(format!("a save state of version {version} (this machine's is {STATE_VERSION})"));
+        }
+        if roms != self.roms() {
+            return Err("a save state made with other ROMs".into());
+        }
+        self.fibers = Default::default();
+        self.load(&mut r)?;
+        if !r.done() {
+            return Err("a save state longer than this machine's".into());
+        }
+        self.watch = Default::default();
+        let s = &mut self.sys;
+        s.spin = Default::default();
+        s.natives.overlay_now = None;
+        s.logging = [false; 2];
+        s.log_depth = [0; 2];
+        s.access_log = Default::default();
+        s.idle = [false; 2];
+        s.scsp.out.clear();
+        if let Some(cmp) = &mut self.compare {
+            cmp.reset(0);
+            cmp.reset(1);
+        }
+        Ok(())
     }
 
     pub fn hashes(&self) -> FrameHashes {

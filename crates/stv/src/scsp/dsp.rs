@@ -7,6 +7,7 @@
 //! EWT sets EFREG, which keeps its value from sample to sample.
 
 use crate::mem::{rd16, wr16};
+use crate::state::saved;
 
 #[derive(Clone, Debug)]
 pub struct Dsp {
@@ -28,6 +29,8 @@ pub struct Dsp {
     pub rbp: u32,
     pub rbl: u32,
 }
+
+saved!(Dsp { mpro, coef, madrs, temp, mems, mixs, exts, efreg, dec, rbp, rbl });
 
 impl Default for Dsp {
     fn default() -> Dsp {

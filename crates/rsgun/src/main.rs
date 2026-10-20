@@ -2,17 +2,21 @@
 //! cabinet's controls, the settings EEPROM and backup RAM kept between runs.
 //!
 //!     rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute]
+//!           [--native] [--cold]
 //!     rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--evidence FILE]
-//!           [--dump F,F --dump-dir DIR] [--native | --compare REPORT] [--rom DIR] [--save DIR]
+//!           [--dump F,F --dump-dir DIR] [--native | --compare REPORT] [--cold] [--rom DIR] [--save DIR]
 //!
-//! `--rom`: the images tools/rom/mkcart.py makes (default build/rom). `--save`: where the EEPROM
-//! and backup RAM are kept (default $XDG_DATA_HOME/rsgun or ~/.local/share/rsgun). `--script`:
-//! an input script (controls.rs) played instead of the keyboard and pads. `--headless`: no window;
-//! runs N frames and writes the last picture (`--shot`), the sound (`--wav`) and the evidence of what
-//! code ran (`--evidence`, stv::evidence's text form), and the memories at frames (`--dump`, as
-//! stv-check boot writes them). `--native` runs the port's code (build/port, tools/port) in place of
-//! the SH-2 code it was made from; `--compare` runs the SH-2 code and checks each call the port has
-//! against it (stv::compare), writing what it found to REPORT.
+//! `--rom`: the images tools/rom/mkcart.py makes (default build/rom). `--save`: where the EEPROM,
+//! the backup RAM and the boot state (boot.rs) are kept (default $XDG_DATA_HOME/rsgun or
+//! ~/.local/share/rsgun). A run starts from the boot state, where the BIOS hands over to the game,
+//! unless `--cold` (or `--evidence`, `--compare`) has it go through the BIOS's boot from power on.
+//! `--script`: an input script (controls.rs) played instead of the keyboard and pads, its frames
+//! counted from power on. `--headless`: no window; runs to frame N and writes the last picture
+//! (`--shot`), the sound (`--wav`) and the evidence of what code ran (`--evidence`, stv::evidence's
+//! text form), and the memories at frames (`--dump`, as stv-check boot writes them). `--native` runs
+//! the port's code (build/port, tools/port) in place of the SH-2 code it was made from; `--compare`
+//! runs the SH-2 code and checks each call the port has against it (stv::compare), writing what it
+//! found to REPORT.
 //!
 //! Keys: arrows move; Z, X, C are buttons A, B, C; A, S, D are A+B, A+C, B+C; space is all three;
 //! 5 and 6 insert coins, 1 and 2 start; F2 test, 9 service; P pauses, Tab runs fast while held,
@@ -22,6 +26,7 @@
 //! keyboard is, then player 2.
 
 mod audio;
+mod boot;
 mod controls;
 
 // the port's generated code (crates/rsgun/build.rs)
@@ -38,6 +43,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use boot::Boot;
 use controls::Script;
 use stv::machine::Machine;
 
@@ -63,6 +69,7 @@ struct Options {
     dump_dir: PathBuf,
     native: bool,
     compare: Option<PathBuf>,
+    cold: bool,
 }
 
 fn default_save_dir() -> PathBuf {
@@ -91,6 +98,7 @@ fn parse_args() -> Result<Options, String> {
         dump_dir: PathBuf::from("out/machine"),
         native: false,
         compare: None,
+        cold: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut it = args.iter();
@@ -112,6 +120,7 @@ fn parse_args() -> Result<Options, String> {
             "--dump-dir" => o.dump_dir = PathBuf::from(value()?),
             "--native" => o.native = true,
             "--compare" => o.compare = Some(PathBuf::from(value()?)),
+            "--cold" => o.cold = true,
             "--mute" => o.mute = true,
             "-h" | "--help" => return Err(String::new()),
             _ => return Err(format!("unknown option {a}")),
@@ -121,14 +130,16 @@ fn parse_args() -> Result<Options, String> {
 }
 
 /// The machine from the ROM images, with the saved EEPROM and backup RAM (or, for the EEPROM, the
-/// one beside the images).
-fn load_machine(o: &Options) -> Result<Machine, String> {
+/// one beside the images), at the boot state unless the run is to be cold (and the boot state's
+/// watch, when there is none yet).
+fn load_machine(o: &Options) -> Result<(Machine, Option<Boot>), String> {
     let read = |p: PathBuf| {
         fs::read(&p).map_err(|e| format!("{}: {e} (make the images with tools/rom/mkcart.py, or pass --rom)", p.display()))
     };
     let bios = read(o.rom.join("bios-epr20091.bin"))?;
     let cart = read(o.rom.join("rsgun-cart.bin"))?;
     let eeprom = fs::read(o.save.join("eeprom.bin")).or_else(|_| fs::read(o.rom.join("eeprom.bin"))).ok();
+    let key = stv::mem::fnv1a(eeprom.as_deref().unwrap_or_default());
     let mut m = Machine::new(bios, cart, 1, eeprom.as_deref());
     if o.native || o.compare.is_some() {
         m.sys.natives.overlay = Some(overlay());
@@ -139,7 +150,9 @@ fn load_machine(o: &Options) -> Result<Machine, String> {
     {
         m.sys.backup = backup;
     }
-    Ok(m)
+    let cold = o.cold || o.evidence.is_some() || o.compare.is_some();
+    let boot = (!cold).then(|| Boot::start(&mut m, o.save.join("boot.state"), key));
+    Ok((m, boot))
 }
 
 fn save(m: &Machine, dir: &Path) -> Result<(), String> {
@@ -178,7 +191,7 @@ impl CoinPulse {
 }
 
 fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
-    let mut m = load_machine(o)?;
+    let (mut m, mut boot) = load_machine(o)?;
     let frames = if o.frames > 0 { o.frames } else { script.map_or(600, |s| s.last_frame() + 60) };
     if o.compare.is_some() {
         m.compare = Some(Default::default());
@@ -187,13 +200,18 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
         m.evidence = Some(Box::new(stv::evidence::Evidence { overlay: Some(overlay()), ..Default::default() }));
     }
     let t = Instant::now();
+    let first = m.sys.frame;
     let mut sound = Vec::new();
-    for f in 0..frames {
-        let held = script.map_or([0; 2], |s| s.held(f));
+    while m.sys.frame < frames {
+        let held = script.map_or([0; 2], |s| s.held(m.sys.frame));
         m.sys.inputs = controls::ports(held);
         m.run_frame();
-        if o.dumps.contains(&(f + 1)) {
-            let d = o.dump_dir.join(format!("f{:06}", f + 1));
+        if let Some(b) = &mut boot {
+            b.frame(&mut m, held == [0; 2]);
+        }
+        let f = m.sys.frame;
+        if o.dumps.contains(&f) {
+            let d = o.dump_dir.join(format!("f{f:06}"));
             m.dump(&d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
         let samples = std::mem::take(&mut m.sys.scsp.out);
@@ -201,8 +219,9 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
             sound.extend_from_slice(&samples);
         }
     }
-    let ms = t.elapsed().as_secs_f64() * 1000.0 / frames as f64;
-    println!("{frames} frames, {ms:.2} ms a frame");
+    let run = frames.saturating_sub(first);
+    let ms = t.elapsed().as_secs_f64() * 1000.0 / run.max(1) as f64;
+    println!("{run} frames (from frame {first}), {ms:.2} ms a frame");
     if o.native {
         let n = &m.sys.natives;
         println!("native: {} functions, {} calls run natively, {} passed to the interpreter", n.len(), n.native_calls, n.interpreted_calls);
@@ -244,7 +263,7 @@ fn windowed(o: &Options, script: Option<&Script>) -> Result<(), String> {
     use sdl2::rect::Rect;
     use sdl2::video::FullscreenType;
 
-    let mut m = load_machine(o)?;
+    let (mut m, mut boot) = load_machine(o)?;
     let sdl = sdl2::init()?;
     let video = sdl.video()?;
     let pads_sys = sdl.game_controller()?;
@@ -272,7 +291,8 @@ fn windowed(o: &Options, script: Option<&Script>) -> Result<(), String> {
     let period = Duration::from_secs_f64(1.0 / FRAME_HZ);
     let mut next = Instant::now();
     let mut presents: Vec<Instant> = Vec::new();
-    let (mut paused, mut frame, mut shots) = (false, 0u64, 0u32);
+    let (mut paused, mut frame, mut shots) = (false, m.sys.frame, 0u32);
+    let first = frame;
     let mut coins = [CoinPulse::default(), CoinPulse::default()];
     let started = Instant::now();
     let mut last_loop = started;
@@ -401,6 +421,9 @@ fn windowed(o: &Options, script: Option<&Script>) -> Result<(), String> {
             };
             m.sys.inputs = controls::ports(held);
             m.run_frame();
+            if let Some(b) = &mut boot {
+                b.frame(&mut m, held == [0; 2]);
+            }
             frame += 1;
         }
         let samples = std::mem::take(&mut m.sys.scsp.out);
@@ -455,7 +478,7 @@ fn windowed(o: &Options, script: Option<&Script>) -> Result<(), String> {
         }
     }
     let secs = started.elapsed().as_secs_f64();
-    eprintln!("{frame} frames in {secs:.1} s ({:.2} a second)", frame as f64 / secs);
+    eprintln!("{} frames in {secs:.1} s ({:.2} a second)", frame - first, (frame - first) as f64 / secs);
     save(&m, &o.save)
 }
 
@@ -466,8 +489,8 @@ fn main() -> ExitCode {
             if !e.is_empty() {
                 eprintln!("rsgun: {e}");
             }
-            eprintln!("usage: rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute]");
-            eprintln!("       rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--rom DIR] [--save DIR]");
+            eprintln!("usage: rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute] [--native] [--cold]");
+            eprintln!("       rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--native] [--cold] [--rom DIR] [--save DIR]");
             return ExitCode::from(2);
         }
     };

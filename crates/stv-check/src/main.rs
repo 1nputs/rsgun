@@ -885,9 +885,46 @@ fn spin(frames: u64, rom: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Save states: one machine runs from power on; at each frame in `at` its state is saved and a second
+/// machine made from it, and the two must stay equal to the end (their states, byte for byte, and
+/// their sound, every frame).
+fn state(frames: u64, at: &[u64], rom: &Path) -> Result<bool, String> {
+    let read = |p: PathBuf| fs::read(&p).map_err(|e| format!("{}: {e}", p.display()));
+    let (bios, cart) = (read(rom.join("bios-epr20091.bin"))?, read(rom.join("rsgun-cart.bin"))?);
+    let eeprom = fs::read(rom.join("eeprom.bin")).ok();
+    let new = || stv::machine::Machine::new(bios.clone(), cart.clone(), 1, eeprom.as_deref());
+    let mut a = new();
+    let mut b: Option<stv::machine::Machine> = None;
+    for f in 1..=frames {
+        a.run_frame();
+        if let Some(b) = &mut b {
+            b.run_frame();
+            let (sa, sb) = (a.save_state()?, b.save_state()?);
+            let (oa, ob) = (std::mem::take(&mut a.sys.scsp.out), std::mem::take(&mut b.sys.scsp.out));
+            if sa != sb || oa != ob {
+                let at = sa.iter().zip(&sb).position(|(x, y)| x != y);
+                println!("frame {f}: the machines differ (states of {} and {} bytes, first difference at {at:?}; sound {})",
+                    sa.len(), sb.len(), if oa == ob { "equal" } else { "differs" });
+                return Ok(false);
+            }
+        } else {
+            a.sys.scsp.out.clear();
+        }
+        if at.contains(&f) {
+            let saved = a.save_state()?;
+            let mut m = new();
+            m.load_state(&saved)?;
+            println!("frame {f}: state saved ({} bytes) and loaded", saved.len());
+            b = Some(m);
+        }
+    }
+    println!("{frames} frames: the machines made from states stayed equal");
+    Ok(true)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: stv-check trace DIR [--cpu m|s|k] [--rom DIR]\n       stv-check boot ORACLE.hashes [--frames N] [--rom DIR] [--dump F,F --dump-dir DIR]\n       stv-check vdp2 DUMP_DIR\n       stv-check vdp1 DUMP_DIR\n       stv-check spin [--frames N] [--rom DIR]\n       stv-check scsp WRITES.bin [SAMPLES.bin]";
+    let usage = "usage: stv-check trace DIR [--cpu m|s|k] [--rom DIR]\n       stv-check boot ORACLE.hashes [--frames N] [--rom DIR] [--dump F,F --dump-dir DIR]\n       stv-check vdp2 DUMP_DIR\n       stv-check vdp1 DUMP_DIR\n       stv-check spin [--frames N] [--rom DIR]\n       stv-check state [--frames N] [--at F,F] [--rom DIR]\n       stv-check scsp WRITES.bin [SAMPLES.bin]";
     let Some(cmd) = args.first() else {
         eprintln!("{usage}");
         return ExitCode::from(2);
@@ -896,6 +933,7 @@ fn main() -> ExitCode {
     let mut rom = PathBuf::from("build/rom");
     let mut frames = 600u64;
     let mut dumps: Vec<u64> = Vec::new();
+    let mut at: Vec<u64> = vec![1, 300, 1300];
     let mut dump_dir = PathBuf::from("out/machine");
     let mut dir = None;
     let mut extra: Option<PathBuf> = None;
@@ -906,6 +944,7 @@ fn main() -> ExitCode {
             "--rom" => rom = it.next().map(PathBuf::from).unwrap_or(rom),
             "--frames" => frames = it.next().and_then(|f| f.parse().ok()).unwrap_or(frames),
             "--dump" => dumps = it.next().map(|l| l.split(',').filter_map(|f| f.parse().ok()).collect()).unwrap_or_default(),
+            "--at" => at = it.next().map(|l| l.split(',').filter_map(|f| f.parse().ok()).collect()).unwrap_or_default(),
             "--dump-dir" => dump_dir = it.next().map(PathBuf::from).unwrap_or(dump_dir),
             _ if dir.is_some() => extra = Some(PathBuf::from(a)),
             _ => dir = Some(PathBuf::from(a)),
@@ -917,6 +956,7 @@ fn main() -> ExitCode {
         ("vdp2", Some(d)) => vdp2(&d),
         ("vdp1", Some(d)) => vdp1(&d),
         ("spin", None) => spin(frames, &rom),
+        ("state", None) => state(frames, &at, &rom),
         ("scsp", Some(d)) => scsp(&d, extra.as_deref()),
         _ => Err(usage.into()),
     };

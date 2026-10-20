@@ -4,6 +4,8 @@
 //! priority and vector registers, the watchdog, the bus controller and the cache control register.
 //! Written from the SH7604 hardware manual; behaviour the manual leaves open follows the oracle.
 
+use crate::state::saved;
+
 /// An interrupt an on-chip module asks for: its level and vector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Irq {
@@ -27,6 +29,8 @@ pub struct Frt {
     sub: u32,
 }
 
+saved!(Frt { tier, ftcsr, frc, ocra, ocrb, tcr, tocr, icr, temp, sub });
+
 #[derive(Clone, Debug, Default)]
 pub struct Divu {
     pub dvsr: u32,
@@ -35,6 +39,8 @@ pub struct Divu {
     pub dvcr: u32,
     pub vcrdiv: u32,
 }
+
+saved!(Divu { dvsr, dvdnth, dvdntl, dvcr, vcrdiv });
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DmaChannel {
@@ -45,6 +51,8 @@ pub struct DmaChannel {
     pub vcr: u32,
     pub drcr: u8,
 }
+
+saved!(DmaChannel { sar, dar, tcr, chcr, vcr, drcr });
 
 #[derive(Clone, Debug, Default)]
 pub struct OnChip {
@@ -71,6 +79,8 @@ pub struct OnChip {
     /// Registers with no model yet (SCI, the rest): kept so reads return what was written.
     other: Vec<(u32, u8)>,
 }
+
+saved!(OnChip { frt, divu, dma, dmaor, ipra, iprb, vcra, vcrb, vcrc, vcrd, vcrwdt, icr, wtcsr, wtcnt, rstcsr, sbycr, ccr, bsc, slave, other });
 
 /// FTCSR flags.
 const ICF: u8 = 0x80;

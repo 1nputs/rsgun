@@ -9,6 +9,7 @@ mod dsp;
 pub mod slot;
 
 use crate::mem::{rd16, wr16};
+use crate::state::saved;
 use dsp::Dsp;
 use slot::{Regs, Slot};
 
@@ -53,6 +54,8 @@ pub struct Scsp {
     /// The samples made (left, right) since the client last took them.
     pub out: Vec<[i16; 2]>,
 }
+
+saved!(Scsp { ram, regs, slots, samples, key_pending, stack, stack_pos, dsp, mixs_next, noise, prescale, main_irq_edge } skip { out });
 
 impl Default for Scsp {
     fn default() -> Scsp {

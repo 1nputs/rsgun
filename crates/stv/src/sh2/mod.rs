@@ -5,6 +5,8 @@
 //! oracle's traces. The on-chip modules (divider, timers, DMA, interrupt controller, cache) are not
 //! here: the CPU reaches them through the [`Bus`] like any other address.
 
+use crate::state::saved;
+
 #[cfg(test)]
 mod tests;
 
@@ -52,11 +54,13 @@ pub const VEC_NMI: u32 = 11;
 
 /// A delayed branch waiting for its slot: where it goes, and where the branch itself was (the PC a
 /// slot-illegal exception saves).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Delay {
     pub target: u32,
     pub branch: u32,
 }
+
+saved!(Delay { target, branch });
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Sh2 {
@@ -77,6 +81,8 @@ pub struct Sh2 {
     /// Set when the instruction being executed raised an exception (so a slot does not jump).
     trapped: bool,
 }
+
+saved!(Sh2 { r, pc, pr, sr, gbr, vbr, mach, macl, delay, sleeping, trapped });
 
 #[inline]
 fn sext8(v: u32) -> u32 {

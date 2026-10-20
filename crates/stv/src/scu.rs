@@ -3,6 +3,8 @@
 //! (the DSP itself is not modelled: the survey has not seen it used). From the SCU user's manual;
 //! where the manual is silent, the oracle.
 
+use crate::state::saved;
+
 /// The SCU's interrupt sources: (IST bit, vector, level).
 pub const VBLANK_IN: u32 = 0;
 pub const VBLANK_OUT: u32 = 1;
@@ -43,6 +45,8 @@ pub struct DmaLevel {
     pub start: bool,
 }
 
+saved!(DmaLevel { read, write, count, add, enable, mode, start });
+
 #[derive(Clone, Debug)]
 pub struct Scu {
     pub dma: [DmaLevel; 3],
@@ -60,6 +64,8 @@ pub struct Scu {
     pub t0_count: u32,
     pub t0_matched_line: bool,
 }
+
+saved!(Scu { dma, ims, ist, t0c, t1s, t1md, aiack, asr, aref, rsel, dsp, t0_count, t0_matched_line });
 
 impl Default for Scu {
     fn default() -> Scu {

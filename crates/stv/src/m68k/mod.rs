@@ -4,6 +4,8 @@
 //! instruction (or takes a pending interrupt); cycle counts are approximate (the sound driver keeps
 //! time by the SCSP's timers, not by instruction timing).
 
+use crate::state::saved;
+
 #[cfg(test)]
 mod tests;
 
@@ -109,6 +111,8 @@ pub struct M68k {
     /// The address of the instruction being executed.
     pub op_pc: u32,
 }
+
+saved!(M68k { d, a, other_sp, pc, sr, stopped, ipl, cycles, op_pc });
 
 #[inline]
 fn sext8(v: u32) -> u32 {

@@ -30,7 +30,8 @@ Needs curl, unzip, a C++ compiler, SDL2 and ALSA development headers.
 ## Playing
 
 ```
-cargo run --release -p rsgun            # a window; the BIOS takes about 17 seconds (hold Tab to hurry it)
+cargo run --release -p rsgun            # a window; the first time, the BIOS takes about 19 seconds (hold Tab to hurry it)
+cargo run --release -p rsgun -- --native   # the same, the game's code running as Rust (tools/port)
 ```
 
 | Keys | | Pad | |
@@ -44,7 +45,9 @@ cargo run --release -p rsgun            # a window; the BIOS takes about 17 seco
 | F2, 9 | test, service | | |
 | P, Tab, F11, F12, Esc | pause, fast while held, full screen, screenshot, quit | | |
 
-The settings EEPROM and backup RAM are kept in `~/.local/share/rsgun/` (`--save DIR`). `--script FILE`
+The settings EEPROM and backup RAM are kept in `~/.local/share/rsgun/` (`--save DIR`), and with them
+the boot state: the machine as the BIOS hands over to the game, saved the first time a run gets
+there, so later runs start at the game (`--cold` boots from power on). `--script FILE`
 plays an input script instead (`crates/rsgun/src/controls.rs`); `--headless --frames N --shot F.ppm
 --wav F.wav` runs without a window; `--mute` plays no sound. With a 59-61 Hz display the game runs a frame a refresh; otherwise by the clock
 at 59.94.
@@ -54,6 +57,8 @@ at 59.94.
 | Command | What it does |
 |---|---|
 | `cargo test` | the runtime's unit tests |
+| `tools/port/check.sh` | translates the game's functions to Rust (`tools/port/sh2rust.py`, into `build/port`) and checks every call the port has against the SH-2 code, over play1 and the attract mode |
+| `target/release/stv-check state --frames N --at F,F` | save states: a machine made from the state at each frame F must stay equal to the one it was saved from |
 | `tools/trace/check_spin.sh` | a machine that plays the CPUs' wait loops beside one that executes everything: equal after every frame |
 | `tools/scsp/probes.py` | crafted one-voice SCSP logs run on the oracle's SCSP (`tools/scsp/build.sh` builds it) and on ours: every sample must match |
 | `target/release/stv-check scsp LOG` | replays a sound log (`run.py --sound N`) through the SCSP against the oracle's samples |

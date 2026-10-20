@@ -7,6 +7,7 @@
 //! and the oracle's records.
 
 use crate::eeprom::Eeprom;
+use crate::state::saved;
 
 /// What a finished command asks the machine to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +57,8 @@ pub struct Smpc {
     pub rtc_seconds: u64,
     pub rtc_cycles: u64,
 }
+
+saved!(Smpc { ireg, comreg, oreg, sr, sf, data_out, data_dir, direct, exle, port_state, eeprom, sctrl, sctrl_events, bus_buffer, busy, intback_waiting, area, dotsel, reset_enabled, sound_on, smem, rtc_seconds, rtc_cycles });
 
 impl Smpc {
     pub fn new(area: u8, eeprom: Option<&[u8]>) -> Smpc {

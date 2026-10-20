@@ -3,6 +3,7 @@
 //! status and interrupt come as on the chip), and VDP2 composes nothing.
 
 use crate::mem::{merge16, rd16, wr16};
+use crate::state::saved;
 
 pub struct Vdp1 {
     pub vram: Vec<u8>,
@@ -21,6 +22,8 @@ pub struct Vdp1 {
     /// FBCR asked for a manual frame change at the next vertical blank.
     pub change_requested: bool,
 }
+
+saved!(Vdp1 { vram, fb, draw, tvmr, fbcr, ptmr, ewdr, ewlr, ewrr, edsr, lopr, copr, change_requested });
 
 impl Default for Vdp1 {
     fn default() -> Vdp1 {
@@ -155,6 +158,8 @@ pub struct Vdp2 {
     pub hblank: bool,
     pub odd: bool,
 }
+
+saved!(Vdp2 { vram, cram, regs, vblank, hblank, odd });
 
 impl Default for Vdp2 {
     fn default() -> Vdp2 {
