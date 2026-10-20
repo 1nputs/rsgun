@@ -61,6 +61,7 @@
  * records: u32 samples made before it; u8 tag; u8 size; u16 0; u32 a; u32 v
  *   'W' a write into the SCSP from either CPU or a DMA: a = the SCSP's address (RAM from 0, the
  *       registers from 0x100000), v = the value (size 1 or 2)
+ *   'R' the SCSP reset (by the SMPC's sound control, or the system's): a = 1 at power on
  *   'F' the end of a frame: a = the frame number
  */
 
@@ -154,7 +155,10 @@ static void Oracle_SoundRecord(uint64 samples, uint8 tag, uint8 size, uint32 a, 
 
 static void Oracle_SoundWrite(uint64 samples, unsigned size, uint32 a, uint32 v)
 {
- Oracle_SoundRecord(samples, 'W', size, a, size == 1 ? (uint8)v : (uint16)v);
+ if(!size)
+  Oracle_SoundRecord(samples, 'R', 0, a, 0);
+ else
+  Oracle_SoundRecord(samples, 'W', size, a, size == 1 ? (uint8)v : (uint16)v);
 }
 
 static void Oracle_SoundSample(const int16* lr)

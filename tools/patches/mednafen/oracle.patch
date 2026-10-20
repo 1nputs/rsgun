@@ -110,7 +110,21 @@
  #include "scsp.inc"
  
  //
-@@ -221,6 +228,20 @@
+@@ -207,6 +214,8 @@
+ 
+ void SOUND_Reset(bool powering_up)
+ {
++ if(MDFN_UNLIKELY(SOUND_OracleWrite))
++  SOUND_OracleWrite(SOUND_OracleSamples, 0, powering_up, 0);
+  SCSP.Reset(powering_up);
+  SoundCPU.Reset(powering_up);
+ }
+@@ -218,9 +227,25 @@
+ 
+ void SOUND_ResetSCSP(void)
+ {
++ if(MDFN_UNLIKELY(SOUND_OracleWrite))
++  SOUND_OracleWrite(SOUND_OracleSamples, 0, 0, 0);
   SCSP.Reset(false);
  }
  
@@ -131,7 +145,7 @@
  void SOUND_Kill(void)
  {
   if(resampler)
-@@ -261,6 +282,9 @@
+@@ -261,6 +286,9 @@
   //
   int16* const bp = IBuffer[IBufferCount];
   SCSP.RunSample(bp, MIDI_Out);
@@ -141,7 +155,7 @@
   //bp[0] = rand();
   //bp[1] = rand();
   bp[0] = (bp[0] * 27 + 16) >> 5;
-@@ -449,6 +473,8 @@
+@@ -449,6 +477,8 @@
    RunSCSP();
  
   SCSP.RW<T, false>(A & 0x1FFFFF, ret);
@@ -150,7 +164,7 @@
  
   SoundCPU.timestamp += 2;
  
-@@ -518,6 +544,8 @@
+@@ -518,6 +548,8 @@
  
   SoundCPU.timestamp += 2;
  
@@ -159,7 +173,7 @@
   SCSP.RW<T, true>(A & 0x1FFFFF, V);
   SoundCPU.timestamp += 2;
  }
-@@ -561,11 +589,15 @@
+@@ -561,11 +593,15 @@
    RunSCSP();
  
   SCSP.RW<uint8, false>(A & 0x1FFFFF, tmp);
