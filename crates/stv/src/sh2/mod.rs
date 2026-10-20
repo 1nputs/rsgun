@@ -24,6 +24,9 @@ pub trait Bus {
     }
     /// Native code's cost in cycles, for the machine's clock (the machine may run on meanwhile).
     fn tick(&mut self, _cycles: u32) {}
+    /// Native code ran the block that starts at `at` (and charged it): where it can tell it is
+    /// going round a loop that waits.
+    fn pass(&mut self, _cpu: &Sh2, _at: u32) {}
     /// Takes the interrupt due, if one is (between instructions): SR and the CPU's PC pushed, PC at
     /// the handler.
     fn take_interrupt(&mut self, _cpu: &mut Sh2) -> bool {

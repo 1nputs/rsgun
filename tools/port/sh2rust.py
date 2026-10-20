@@ -428,12 +428,12 @@ class Function:
                 count += 1
                 slot_target = None
                 slot = (sa, self.img.word(sa))
-            lines.append(f"tick(c, m, {count});")
+            lines.append(f"tick(c, m, {h(addrs[0])}, {count});")
             lines.extend(self.transfer(kind, target, a, op, slot))
             return lines
         # fell into the next block
         nxt = addrs[-1] + 2
-        lines.append(f"tick(c, m, {count});")
+        lines.append(f"tick(c, m, {h(addrs[0])}, {count});")
         lines.append(f"pc = {h(nxt)};")
         return lines
 

@@ -77,6 +77,8 @@ pub struct Sys {
     logging: [bool; 2],
     log_depth: [u8; 2],
     access_log: [Vec<crate::compare::Access>; 2],
+    /// Each CPU's native call gave the rest of its last turn back: it waits (FiberBus).
+    idle: [bool; 2],
 }
 
 impl Sys {
@@ -135,6 +137,7 @@ impl Sys {
             logging: [false; 2],
             log_depth: [0; 2],
             access_log: Default::default(),
+            idle: [false; 2],
         }
     }
 }
@@ -729,9 +732,16 @@ pub struct Machine {
 }
 
 /// A native call running on its own stack, so that it can wait for the machine: given the system
-/// and the cycles its CPU may run, it runs until it has used them (and gives the system back) or
-/// returns (with the CPU's state).
-type Fiber = Coroutine<(Box<Sys>, u32), Box<Sys>, (Sh2, Box<Sys>)>;
+/// and its turn, it runs until it has used it (and gives the system back) or returns (with the
+/// CPU's state).
+type Fiber = Coroutine<(Box<Sys>, Turn), Box<Sys>, (Sh2, Box<Sys>)>;
+
+/// A native call's turn: the cycles it runs, and how far it may go if it is only waiting.
+#[derive(Clone, Copy)]
+struct Turn {
+    budget: u32,
+    idle: u32,
+}
 
 /// The stack a native call runs on (reserved, not committed until used).
 const FIBER_STACK: usize = 64 << 20;
@@ -741,8 +751,40 @@ const FIBER_STACK: usize = 64 << 20;
 struct FiberBus<'y> {
     sys: Option<Box<Sys>>,
     cpu: usize,
-    budget: u32,
-    yielder: &'y Yielder<(Box<Sys>, u32), Box<Sys>>,
+    turn: Turn,
+    yielder: &'y Yielder<(Box<Sys>, Turn), Box<Sys>>,
+    probe: Probe,
+}
+
+/// Native code going round a loop that waits: within a CPU's turn nothing else in the machine moves
+/// (the other CPU, DMA, the timers and the beam move between turns), so a pass through a block
+/// that finds the CPU as the last pass left it, after the same reads and no writes, would be
+/// followed by the same passes to the turn's end. The rest of the turn is given back instead (as
+/// far as the machine lets a waiting CPU go: Turn::idle). What changed between turns, the reads
+/// show.
+#[derive(Default)]
+struct Probe {
+    /// The block watched, the CPU's state when it was last passed, and the passes since then
+    /// through other blocks.
+    head: Option<u32>,
+    state: Sh2,
+    others: u32,
+    /// The reads since that pass (a hash of addresses and values), the last pass's, and whether
+    /// anything was written.
+    reads: u64,
+    last: Option<u64>,
+    wrote: bool,
+}
+
+impl Probe {
+    #[inline]
+    fn read(&mut self, a: u32, v: u32) {
+        self.reads = (self.reads.rotate_left(7) ^ ((a as u64) << 32 | v as u64)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+
+    fn watch(&mut self, cpu: &Sh2, at: u32) {
+        *self = Probe { head: Some(at), state: cpu.clone(), ..Default::default() };
+    }
 }
 
 impl FiberBus<'_> {
@@ -750,25 +792,41 @@ impl FiberBus<'_> {
     fn bus(&mut self) -> CpuBus<'_> {
         CpuBus { sys: self.sys.as_mut().expect("a native call runs with the system"), cpu: self.cpu }
     }
+
+    /// Hands the system back to the machine until the CPU's next turn.
+    fn suspend(&mut self) {
+        let (sys, turn) = self.yielder.suspend(self.sys.take().expect("the system"));
+        self.sys = Some(sys);
+        self.turn = turn;
+    }
 }
 
 impl Bus for FiberBus<'_> {
     fn read8(&mut self, a: u32) -> u8 {
-        self.bus().read8(a)
+        let v = self.bus().read8(a);
+        self.probe.read(a, v as u32);
+        v
     }
     fn read16(&mut self, a: u32) -> u16 {
-        self.bus().read16(a)
+        let v = self.bus().read16(a);
+        self.probe.read(a, v as u32);
+        v
     }
     fn read32(&mut self, a: u32) -> u32 {
-        self.bus().read32(a)
+        let v = self.bus().read32(a);
+        self.probe.read(a, v);
+        v
     }
     fn write8(&mut self, a: u32, v: u8) {
+        self.probe.wrote = true;
         self.bus().write8(a, v)
     }
     fn write16(&mut self, a: u32, v: u16) {
+        self.probe.wrote = true;
         self.bus().write16(a, v)
     }
     fn write32(&mut self, a: u32, v: u32) {
+        self.probe.wrote = true;
         self.bus().write32(a, v)
     }
     fn fetch16(&mut self, a: u32) -> u16 {
@@ -780,11 +838,30 @@ impl Bus for FiberBus<'_> {
     fn tick(&mut self, cycles: u32) {
         let sys = self.sys.as_mut().expect("a native call runs with the system");
         sys.wait += cycles;
-        if sys.wait >= self.budget {
-            let (sys, budget) = self.yielder.suspend(self.sys.take().expect("the system"));
-            self.sys = Some(sys);
-            self.budget = budget;
+        if sys.wait >= self.turn.budget {
+            self.suspend();
         }
+    }
+    fn pass(&mut self, cpu: &Sh2, at: u32) {
+        let p = &mut self.probe;
+        if p.head != Some(at) {
+            p.others += 1;
+            if p.head.is_none() || p.others > 64 {
+                p.watch(cpu, at);
+            }
+            return;
+        }
+        if !p.wrote && p.last == Some(p.reads) && *cpu == p.state {
+            // waiting: the rest of the turn is the same passes
+            let sys = self.sys.as_mut().expect("the system");
+            sys.wait = sys.wait.max(self.turn.idle);
+            sys.idle[self.cpu] = true;
+            self.suspend();
+            return;
+        }
+        let reads = p.reads;
+        p.watch(cpu, at);
+        p.last = Some(reads);
     }
     fn take_interrupt(&mut self, cpu: &mut Sh2) -> bool {
         let c = self.cpu;
@@ -841,6 +918,9 @@ enum Watch {
     /// FRT reaches an event the loop could notice.
     Spinning { tape: Vec<(u32, Sh2)>, period: u32, max_cycles: u32, phase: usize, spent: u64, cap: u64 },
 }
+
+/// How far the master runs before the slave catches up (cycles).
+const SLICE: u32 = 32;
 
 /// The longest turn recorded (steps), and how far back a branch may go to start one (bytes).
 const SPIN_MAX_STEPS: usize = 64;
@@ -986,16 +1066,15 @@ impl Machine {
 
     /// Runs both CPUs to `until` cycles into the line, the slave following the master closely.
     fn run_cpus(&mut self, until: u32) {
-        const SLICE: u32 = 32;
         while self.time[0] < until {
             let mut slice_end = (self.time[0] + SLICE).min(until);
-            // both spinning (or the master, the slave off): neither can affect the other, so each
+            // both waiting (or the master, the slave off): neither can affect the other, so each
             // goes on alone as far as their timers allow
-            if let Some(h0) = self.spin_horizon(0) {
+            if let Some(h0) = self.wait_horizon(0) {
                 let far = if !self.sys.slave_on {
                     Some(h0)
                 } else {
-                    self.spin_horizon(1).map(|h1| h0.min(h1.saturating_sub(self.spin_max_cycles(0))))
+                    self.wait_horizon(1).map(|h1| h0.min(h1.saturating_sub(self.spin_max_cycles(0))))
                 };
                 if let Some(far) = far {
                     slice_end = slice_end.max(far.min(until));
@@ -1019,7 +1098,9 @@ impl Machine {
     }
 
     /// Runs CPU `c` to `target` cycles into the line: playing its loop while it spins, else
-    /// instruction by instruction, watching for a loop to spin in.
+    /// instruction by instruction, watching for a loop to spin in, or a native call's turns. The
+    /// master stops short of a target beyond a slice when its native call stops waiting (so the
+    /// slave catches up).
     fn advance(&mut self, c: usize, target: u32) {
         let watch = self.spin_enabled && self.sys.trace.is_none() && self.coverage.is_none() && self.evidence.is_none() && self.compare.is_none();
         while self.time[c] < target {
@@ -1032,9 +1113,14 @@ impl Machine {
                 continue;
             }
             let from = self.cpu[c].pc;
-            let cycles = self.step(c, target - self.time[c]);
+            let left = target - self.time[c];
+            let cycles = self.step(c, Turn { budget: left.min(SLICE), idle: left });
             self.time[c] += cycles;
-            if watch && self.fibers[c].is_none() {
+            if self.fibers[c].is_some() {
+                if c == 0 && left > SLICE && !self.sys.idle[0] {
+                    return;
+                }
+            } else if watch {
                 self.watch_step(c, from, cycles);
             }
         }
@@ -1141,6 +1227,16 @@ impl Machine {
         }
     }
 
+    /// While CPU `c` waits (spins, or its native call gave its last turn back): the time (into the
+    /// line) it can reach without stopping for its FRT.
+    fn wait_horizon(&self, c: usize) -> Option<u32> {
+        if self.fibers[c].is_some() && self.sys.idle[c] {
+            let left = self.sys.onchip[c].frt_cycles_to_event();
+            return Some(self.time[c].saturating_add(left.min(u32::MAX as u64) as u32));
+        }
+        self.spin_horizon(c)
+    }
+
     /// While CPU `c` spins: the time (into the line) it can reach without stopping for its FRT.
     fn spin_horizon(&self, c: usize) -> Option<u32> {
         match &self.watch[c] {
@@ -1169,12 +1265,12 @@ impl Machine {
         self.sys.spin[c].clear();
     }
 
-    /// One instruction (or an interrupt taken, or a native call's turn) on a CPU, which may run
-    /// `budget` cycles; returns the cycles it took.
-    fn step(&mut self, c: usize, budget: u32) -> u32 {
+    /// One instruction (or an interrupt taken, or a native call's turn) on a CPU; returns the cycles
+    /// it took.
+    fn step(&mut self, c: usize, turn: Turn) -> u32 {
         self.sys.wait = 0;
         if self.fibers[c].is_some() {
-            return self.resume_fiber(c, budget);
+            return self.resume_fiber(c, turn);
         }
         let cpu = &mut self.cpu[c];
         let (pc, sp, logged) = (cpu.pc, cpu.r[15], self.sys.access_log[c].len());
@@ -1218,14 +1314,14 @@ impl Machine {
                 // a ported function: it runs on its own stack, to its return, in turns
                 let state = cpu.clone();
                 let stack = self.stacks[c].take().unwrap_or_else(|| DefaultStack::new(FIBER_STACK).expect("a stack for native code"));
-                self.fibers[c] = Some(Coroutine::with_stack(stack, move |yielder, (sys, budget)| {
+                self.fibers[c] = Some(Coroutine::with_stack(stack, move |yielder, (sys, turn)| {
                     let mut cpu = state;
-                    let mut bus = FiberBus { sys: Some(sys), cpu: c, budget, yielder };
+                    let mut bus = FiberBus { sys: Some(sys), cpu: c, turn, yielder, probe: Probe::default() };
                     f(&mut cpu, &mut bus);
                     (cpu, bus.sys.take().expect("the system"))
                 }));
                 self.steps[c] += 1;
-                return self.resume_fiber(c, budget);
+                return self.resume_fiber(c, turn);
             }
         }
         let pc = cpu.pc;
@@ -1259,12 +1355,14 @@ impl Machine {
         self.sys.log_depth[c] = cmp.depth(c);
     }
 
-    /// CPU `c`'s native call runs its turn of `budget` cycles (or to its return).
-    fn resume_fiber(&mut self, c: usize, budget: u32) -> u32 {
+    /// CPU `c`'s native call runs its turn (or to its return).
+    fn resume_fiber(&mut self, c: usize, turn: Turn) -> u32 {
+        self.sys.idle[c] = false;
         let spare = self.spare.take().unwrap_or_else(|| Box::new(Sys::new(Vec::new(), Vec::new(), 0, None)));
         let sys = std::mem::replace(&mut self.sys, spare);
         let fiber = self.fibers[c].as_mut().expect("a native call");
-        let sys = match fiber.resume((sys, budget.max(1))) {
+        let turn = Turn { budget: turn.budget.max(1), idle: turn.idle.max(turn.budget).max(1) };
+        let sys = match fiber.resume((sys, turn)) {
             CoroutineResult::Yield(sys) => sys,
             CoroutineResult::Return((cpu, sys)) => {
                 self.cpu[c] = cpu;

@@ -123,10 +123,12 @@ pub fn call(cpu: &mut Sh2, bus: &mut dyn Bus, target: u32) {
 /// back to it, and the native code goes on.
 pub const NATIVE_PC: u32 = 0xFFFF_FFFF;
 
-/// Native code's cost: `cycles` more on the machine's clock (the machine runs on when the CPU's turn
-/// is spent), then the interrupt due, if one is, its handler run to its return.
-pub fn tick(cpu: &mut Sh2, bus: &mut dyn Bus, cycles: u32) {
+/// Native code's cost: the block starting at `at` ran, `cycles` more on the machine's clock (the
+/// machine runs on when the CPU's turn is spent), then the interrupt due, if one is, its handler run
+/// to its return.
+pub fn tick(cpu: &mut Sh2, bus: &mut dyn Bus, at: u32, cycles: u32) {
     bus.tick(cycles);
+    bus.pass(cpu, at);
     let (pc, sp) = (cpu.pc, cpu.r[15]);
     cpu.pc = NATIVE_PC;
     if bus.take_interrupt(cpu) {
