@@ -373,12 +373,13 @@ pub fn shot_b_set(cpu: &mut Cpu, p: u32) -> u32 {
         cpu.write32(s + SHIP, p);
         last = s;
     }
-    muzzle(cpu, p, 0x40);
+    muzzle(cpu, p, B_COLOUR, MUZZLE, 0);
     last
 }
 
-/// The muzzle flash at the ship (its scales and angle), kind 3's colour plus `colour`.
-fn muzzle(cpu: &mut Cpu, p: u32, colour: u16) {
+/// A muzzle flash at the ship (its scales, its angle turned by `turn`), kind 3's colour plus
+/// `colour`, `animation` (effect_set's).
+fn muzzle(cpu: &mut Cpu, p: u32, colour: u16, animation: u32, turn: u16) {
     let f = cpu.stack();
     for k in 0..3 {
         let v = cpu.read32(p + POSITION + 4 * k);
@@ -389,7 +390,7 @@ fn muzzle(cpu: &mut Cpu, p: u32, colour: u16) {
         cpu.write32(f + 0x0c + 4 * k, v);
     }
     cpu.write32(f + 0x14, 3);
-    let a = cpu.read16(p + ANGLE);
+    let a = cpu.read16(p + ANGLE).wrapping_add(turn);
     cpu.write16(f + 0x18, a);
     cpu.write16(f + 0x24, 0);
     cpu.write8(f + 0x26, 0);
@@ -399,7 +400,7 @@ fn muzzle(cpu: &mut Cpu, p: u32, colour: u16) {
     cpu.write16(f + 0x20, c);
     let n = cpu.read8(p + NUMBER);
     cpu.write8(f + 0x1e, n);
-    cpu.write32(f + 0x28, MUZZLE);
+    cpu.write32(f + 0x28, animation);
     cpu.write32(f + 0x3c, 0);
     nested!(cpu, 0x0604_e1cc, effects::effect_set(cpu, f));
 }
@@ -520,7 +521,7 @@ pub fn shot_a_set(cpu: &mut Cpu, p: u32) -> u32 {
         cpu.write32(s + SCALES + 4, h);
         cpu.write32(s + SHIP, p);
     }
-    muzzle(cpu, p, 0);
+    muzzle(cpu, p, 0, MUZZLE, 0);
     last
 }
 
@@ -1625,4 +1626,103 @@ pub fn beam_draw(cpu: &mut Cpu, s: u32) {
         cpu.write16(f + 0x20, r as u16);
         nested!(cpu, 0x0604_0960, sprites::draw(cpu, f));
     }
+}
+
+/// A+C's shot: kind 3 in the kind's colour, type 12, 8 pixels a frame along its angle (counted in
+/// its ship); ended off screen or where it hits (with a spark).
+const AC_ANIMATION: u32 = 0x0607_28e8;
+const AC_TYPE: u8 = 12;
+const AC_BOXES: u32 = 0x0607_284c;
+const AC_LINK: u32 = 0x70;
+/// The ship's A+C shots alive.
+const ALIVE_AC: u32 = 0x84;
+
+pub fn shot_ac_exec(cpu: &mut Cpu, s: u32) {
+    if cpu.read8(s + PHASE_LOW) == 0 {
+        cpu.write8(s + KIND, A_KIND);
+        nested!(cpu, 0x0604_6530, effects::link_init(cpu, s + AC_LINK, AC_ANIMATION));
+        let kind = cpu.read8(s + KIND) as i8 as i32;
+        let colour = cpu.read16(KIND_COLOURS.wrapping_add((kind * 16) as u32));
+        cpu.write16(s + OWN_COLOUR, colour);
+        cpu.write16(s + COLOUR, colour);
+        cpu.write8(s + LIFT, 0);
+        cpu.write8(s + SIDE, 0);
+        cpu.write8(s + TYPE, AC_TYPE);
+        cpu.write32(s + BOXES, AC_BOXES);
+        let f = cpu.stack();
+        cpu.write32(f, 0);
+        cpu.write32(f + 4, A_SPEED);
+        cpu.write32(f + 0x10, 0x1_0000);
+        cpu.write32(f + 0x0c, 0x1_0000);
+        cpu.write32(f + 0x14, 0);
+        let a = cpu.read16(s + ANGLE);
+        cpu.write16(f + 0x18, a);
+        cpu.call(SL_TURN, &[f]);
+        let (vx, vy) = (cpu.read32(f), cpu.read32(f + 4));
+        cpu.write32(s + SPEED, vx);
+        cpu.write32(s + SPEED + 4, vy);
+        cpu.write16(s + PHASE, 1);
+    }
+    let (x, y) = (cpu.read32(s + POSITION) as i32, cpu.read32(s + POSITION + 4) as i32);
+    if x.wrapping_abs() > WIDE_EDGE_X || y.wrapping_abs() > EDGE_Y || hit_here(cpu, s) {
+        end(cpu, s);
+        return;
+    }
+    let ship = cpu.read32(s + SHIP);
+    if cpu.read8(ship + OBJ_MODE) as i8 >= ENDING as i8 {
+        cpu.write32(s + SHIP, 0);
+    }
+    count_alive(cpu, s, ALIVE_AC);
+    if cpu.read8(s + PHASE_LOW) == 1 {
+        for k in 0..2 {
+            let p = cpu.read32(s + POSITION + 4 * k).wrapping_add(cpu.read32(s + SPEED + 4 * k));
+            cpu.write32(s + POSITION + 4 * k, p);
+        }
+        nested!(cpu, 0x0604_6558, effects::link_step(cpu, s + SPRITE, s + AC_LINK));
+    }
+}
+
+const AC_EXEC: u32 = 0x0604_a914;
+/// A+C's spreads (by C's level: 4 shots below 8, 6 below 24, else 8): each shot's angle and its
+/// place from the ship (x, y: words, 16.16).
+const AC_SPREADS: [(i8, u32, u32); 3] = [(7, 4, 0x0607_293e), (23, 6, 0x0607_2956), (i8::MAX, 8, 0x0607_297a)];
+
+/// A+C's shots from ship `p`: the spread, their size by A's level and power by A's and C's; a
+/// muzzle flash ahead and one behind. The last shot (or 0).
+pub fn shot_ac_set(cpu: &mut Cpu, p: u32) -> u32 {
+    let f = cpu.stack();
+    let n = number(cpu, p);
+    let level_c = cpu.read8(LEVEL_C.wrapping_add((n * 3) as u32)) as i8;
+    let &(_, count, table) = AC_SPREADS.iter().find(|&&(most, _, _)| level_c <= most).unwrap();
+    cpu.write32(f + 0x40, count);
+    let mut s = 0;
+    for i in 0..count {
+        s = shot_in(cpu);
+        if s == 0 {
+            break;
+        }
+        cpu.write32(s + BEHAVIOUR, AC_EXEC);
+        let e = table + 6 * i;
+        for k in 0..2 {
+            let v = cpu.read32(p + POSITION + 4 * k).wrapping_add(cpu.read16(e + 2 + 2 * k) as i16 as i32 as u32);
+            cpu.write32(s + POSITION + 4 * k, v);
+        }
+        let z = cpu.read32(p + POSITION + 8);
+        cpu.write32(s + POSITION + 8, z);
+        let a = cpu.read16(e);
+        cpu.write16(s + ANGLE, a);
+        let n = cpu.read8(p + NUMBER);
+        cpu.write8(s + NUMBER, n);
+        for k in 0..2 {
+            let size = (level_a(cpu, p) * 0x1f0 + 0xe000) as u32;
+            cpu.write32(s + SCALES + 4 * k, size);
+        }
+        let levels = LEVELS.wrapping_add((number(cpu, p) * 3) as u32);
+        let sum = cpu.read8(levels) as i8 as i32 + cpu.read8(levels + 2) as i8 as i32;
+        cpu.write16(s + POWER, (sum * 4 + 80) as u16);
+        cpu.write32(s + SHIP, p);
+    }
+    muzzle(cpu, p, 0, C_MUZZLE, 0);
+    muzzle(cpu, p, 0, MUZZLE, 0x8000);
+    s
 }
