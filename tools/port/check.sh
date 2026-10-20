@@ -27,7 +27,9 @@ done
 python3 -I tools/port/sh2rust.py --image out/evidence/dumps/f003000/wram-h.bin --evidence "$EVIDENCE" \
     --out build/port/generated.rs
 cargo build --release -q -p rsgun
-rm -rf out/port
+# its own outputs only (check_marathon.sh's, in out/port/marathon, may be in use)
+rm -rf out/port/save-attract out/port/save-play1
+rm -f out/port/play1.* out/port/attract.* out/port/backup.*
 mkdir -p out/port
 ./target/release/rsgun --headless --save out/port/save-attract --frames "$ATTRACT" --compare out/port/attract.txt \
     > out/port/attract.log 2>&1 &
