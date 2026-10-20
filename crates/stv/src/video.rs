@@ -191,21 +191,3 @@ impl Vdp2 {
         wr16(&mut self.regs, a, merge16(old, v, mask));
     }
 }
-
-/// The SCSP as the CPUs see it: its RAM and its registers. No 68000 and no sound yet.
-pub struct Scsp {
-    pub ram: Vec<u8>,
-    pub regs: Vec<u8>,
-}
-
-impl Default for Scsp {
-    fn default() -> Scsp {
-        Scsp::new()
-    }
-}
-
-impl Scsp {
-    pub fn new() -> Scsp {
-        Scsp { ram: vec![0; 0x8_0000], regs: vec![0; 0x1000] }
-    }
-}

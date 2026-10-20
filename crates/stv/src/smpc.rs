@@ -1,7 +1,12 @@
 //! The SMPC (System Manager and Peripheral Control) at 0x00100000, byte registers on odd addresses:
 //! commands (resets, the slave and sound CPUs' switches, the dot clock, INTBACK), the clock (RTC), the
-//! area code. On the ST-V the players' inputs come through the I/O chip, not the SMPC's ports, so
-//! INTBACK's peripheral phase returns nothing. From the SMPC user's manual and the oracle's records.
+//! area code, and the two parallel ports. On the ST-V the players' inputs come through the I/O chip,
+//! so INTBACK's peripheral phase returns nothing, and the ports are wired to the board: port 1's bits
+//! 2-4 to the settings EEPROM's CS, SK and DI; port 2's bit 0 from its DO, bits 3 and 4 to the SCSP's
+//! and the sound CPU's resets (the sound CPU runs while both are low). From the SMPC user's manual
+//! and the oracle's records.
+
+use crate::eeprom::Eeprom;
 
 /// What a finished command asks the machine to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,10 +31,17 @@ pub struct Smpc {
     pub oreg: [u8; 32],
     pub sr: u8,
     pub sf: u8,
-    pub pdr: [u8; 2],
-    pub ddr: [u8; 2],
-    pub iosel: u8,
-    pub exle: u8,
+    /// Each port's output data and direction, for SMPC control mode (0) and direct mode (1).
+    pub data_out: [[u8; 2]; 2],
+    pub data_dir: [[u8; 2]; 2],
+    pub direct: [bool; 2],
+    pub exle: [bool; 2],
+    /// What each port's pins read.
+    pub port_state: [u8; 2],
+    pub eeprom: Eeprom,
+    /// Port 2's sound control bits (3: SCSP reset, 4: sound CPU reset), and changes not yet acted on.
+    pub sctrl: u8,
+    pub sctrl_events: Vec<(u8, u8)>,
     bus_buffer: u8,
     /// The command under way and the cycles until it finishes.
     pub busy: Option<(u8, u32)>,
@@ -45,21 +57,22 @@ pub struct Smpc {
     pub rtc_cycles: u64,
 }
 
-/// The state of the ST-V's SMPC port pins, as the oracle reads them (port 2: 0x67).
-const PORT_PINS: [u8; 2] = [0x7F, 0x67];
-
 impl Smpc {
-    pub fn new(area: u8) -> Smpc {
-        Smpc {
+    pub fn new(area: u8, eeprom: Option<&[u8]>) -> Smpc {
+        let mut s = Smpc {
             ireg: [0; 7],
             comreg: 0,
             oreg: [0; 32],
             sr: 0,
             sf: 0,
-            pdr: [0; 2],
-            ddr: [0; 2],
-            iosel: 0,
-            exle: 0,
+            data_out: [[0; 2]; 2],
+            data_dir: [[0; 2]; 2],
+            direct: [false; 2],
+            exle: [false; 2],
+            port_state: [0x7F; 2],
+            eeprom: Eeprom::new(eeprom),
+            sctrl: 0xFF,
+            sctrl_events: Vec::new(),
             bus_buffer: 0,
             busy: None,
             intback_waiting: false,
@@ -70,7 +83,29 @@ impl Smpc {
             smem: [0; 4],
             rtc_seconds: 0,
             rtc_cycles: 0,
-        }
+        };
+        s.update_port(0);
+        s.update_port(1);
+        s
+    }
+
+    /// Drives a port's pins: lines the SMPC does not drive float high; the board answers on the rest.
+    fn update_port(&mut self, p: usize) {
+        let d = self.direct[p] as usize;
+        let asserted = self.data_dir[p][d] & 0x7F;
+        let out = (self.data_out[p][d] | !self.data_dir[p][d]) & 0x7F;
+        let pins = if p == 0 {
+            self.eeprom.update(out & 0x04 != 0, out & 0x08 != 0, out & 0x10 != 0);
+            0x7F & !0x23
+        } else {
+            let sctrl = out & 0x18;
+            if sctrl != self.sctrl {
+                self.sctrl_events.push((self.sctrl, sctrl));
+                self.sctrl = sctrl;
+            }
+            (0x7F & !1) | self.eeprom.dout as u8
+        };
+        self.port_state[p] = (out & asserted) | (pins & !asserted);
     }
 
     pub fn read(&mut self, a: u32) -> u8 {
@@ -79,7 +114,11 @@ impl Smpc {
             0x10..=0x2F => self.oreg[(r - 0x10) as usize],
             0x30 => self.sr,
             0x31 => (self.bus_buffer & !1) | self.sf,
-            0x3A | 0x3B => (self.bus_buffer & 0x80) | PORT_PINS[(r - 0x3A) as usize],
+            0x3A | 0x3B => {
+                let p = (r - 0x3A) as usize;
+                self.update_port(p);
+                (self.bus_buffer & 0x80) | self.port_state[p]
+            }
             _ => self.bus_buffer,
         }
     }
@@ -112,10 +151,22 @@ impl Smpc {
                 self.busy = Some((v, duration.max(1)));
             }
             0x31 => self.sf |= v & 1,
-            0x3A | 0x3B => self.pdr[(r - 0x3A) as usize] = v,
-            0x3C | 0x3D => self.ddr[(r - 0x3C) as usize] = v,
-            0x3E => self.iosel = v,
-            0x3F => self.exle = v,
+            0x3A | 0x3B => {
+                let p = (r - 0x3A) as usize;
+                self.data_out[p][1] = v & 0x7F;
+                self.update_port(p);
+            }
+            0x3C | 0x3D => {
+                let p = (r - 0x3C) as usize;
+                self.data_dir[p][1] = v & 0x7F;
+                self.update_port(p);
+            }
+            0x3E => {
+                self.direct = [v & 1 != 0, v & 2 != 0];
+                self.update_port(0);
+                self.update_port(1);
+            }
+            0x3F => self.exle = [v & 1 != 0, v & 2 != 0],
             _ => {}
         }
     }

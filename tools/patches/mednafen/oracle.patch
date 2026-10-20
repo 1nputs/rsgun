@@ -83,10 +83,19 @@
  	 else
 --- a/src/ss/sound.cpp
 +++ b/src/ss/sound.cpp
-@@ -221,6 +221,11 @@
+@@ -221,6 +221,20 @@
   SCSP.Reset(false);
  }
  
++void SOUND_OracleRegs(uint32* out)
++{
++ for(unsigned i = 0; i < 16; i++)
++  out[i] = SoundCPU.DA[i];
++ out[16] = SoundCPU.PC;
++ out[17] = SoundCPU.GetRegister(M68K::GSREG_SR);
++ out[18] = SoundCPU.SP_Inactive;
++}
++
 +uint16* SOUND_OracleRAM(void)
 +{
 + return SCSP.OracleRAM();
@@ -95,19 +104,62 @@
  void SOUND_Kill(void)
  {
   if(resampler)
+@@ -449,6 +463,8 @@
+   RunSCSP();
+ 
+  SCSP.RW<T, false>(A & 0x1FFFFF, ret);
++ if(MDFN_UNLIKELY(M68K::OracleHook))
++  M68K::OracleHook('R', sizeof(T), A & 0xFFFFFF, ret);
+ 
+  SoundCPU.timestamp += 2;
+ 
+@@ -518,6 +534,8 @@
+ 
+  SoundCPU.timestamp += 2;
+ 
++ if(MDFN_UNLIKELY(M68K::OracleHook))
++  M68K::OracleHook('W', sizeof(T), A & 0xFFFFFF, V);
+  SCSP.RW<T, true>(A & 0x1FFFFF, V);
+  SoundCPU.timestamp += 2;
+ }
+@@ -561,11 +579,15 @@
+   RunSCSP();
+ 
+  SCSP.RW<uint8, false>(A & 0x1FFFFF, tmp);
++ if(MDFN_UNLIKELY(M68K::OracleHook))
++  M68K::OracleHook('R', 1, A & 0xFFFFFF, tmp);
+ 
+  tmp = cb(&SoundCPU, tmp);
+ 
+  SoundCPU.timestamp += 6;
+ 
++ if(MDFN_UNLIKELY(M68K::OracleHook))
++  M68K::OracleHook('W', 1, A & 0xFFFFFF, tmp);
+  SCSP.RW<uint8, true>(A & 0x1FFFFF, tmp);
+ 
+  SoundCPU.timestamp += 2;
 --- a/src/ss/sound.h
 +++ b/src/ss/sound.h
-@@ -29,6 +29,7 @@
+@@ -29,6 +29,8 @@
  void SOUND_SetMIDIOutput(void (*p)(uint8)) MDFN_COLD;
  void SOUND_Reset(bool powering_up) MDFN_COLD;
  void SOUND_Kill(void) MDFN_COLD;
 +uint16* SOUND_OracleRAM(void) MDFN_COLD;
++void SOUND_OracleRegs(uint32* out) MDFN_COLD;
  
  void SOUND_Set68KActive(bool active);
  void SOUND_Reset68K(void);
 --- a/src/ss/ss.cpp
 +++ b/src/ss/ss.cpp
-@@ -139,6 +139,7 @@
+@@ -30,6 +30,7 @@
+ #include <mednafen/hash/sha256.h>
+ #include <mednafen/hash/md5.h>
+ #include <mednafen/Time.h>
++#include <mednafen/hw_cpu/m68k/m68k.h>	// stv-recomp oracle (oracle.inc)
+ 
+ #include <bitset>
+ 
+@@ -139,6 +140,7 @@
  static uint32 SH7095_DB;
  #include "scu.inc"
  
@@ -115,7 +167,7 @@
  #include "debug.inc"
  
  static sha256_digest BIOS_SHA256;	// SHA-256 hash of the currently-loaded BIOS; used for save state sanity checks.
-@@ -859,6 +860,7 @@
+@@ -859,6 +861,7 @@
   int32 end_ts;
  
   espec = espec_arg;
@@ -123,7 +175,7 @@
   AllowMidSync = true;
   MDFNGameInfo->mouse_sensitivity = MDFN_GetSettingF("ss.input.mouse_sensitivity");
  
-@@ -921,6 +923,7 @@
+@@ -921,6 +924,7 @@
   //
   //
   SMPC_UpdateOutput();
@@ -131,7 +183,7 @@
   //
   //
   //
-@@ -1658,6 +1661,7 @@
+@@ -1658,6 +1662,7 @@
  
  static MDFN_COLD void Load(GameFile* gf)
  {
@@ -139,6 +191,31 @@
   const std::string dbg_cdpath = MDFN_GetSettingS("ss.dbg_exe_cdpath");
   //
   const bool region_autodetect = MDFN_GetSettingB("ss.region_autodetect");
+--- a/src/ss/stvio.cpp
++++ b/src/ss/stvio.cpp
+@@ -333,6 +333,12 @@
+   eep.PokeMem(addr, MDFN_de16msb(tmp + (addr << 1)));
+ }
+ 
++void STVIO_OracleEEPROM(uint16* out)
++{
++ for(unsigned addr = 0; addr < 0x40; addr++)
++  out[addr] = eep.PeekMem(addr);
++}
++
+ void STVIO_Init(const STVGameInfo* sgi)
+ {
+  ControlScheme = sgi->control;
+--- a/src/ss/stvio.h
++++ b/src/ss/stvio.h
+@@ -29,6 +29,7 @@
+ {
+ 
+ void STVIO_Init(const STVGameInfo* sgi) MDFN_COLD;
++void STVIO_OracleEEPROM(uint16* out) MDFN_COLD;
+ void STVIO_Reset(bool powering_up) MDFN_COLD;
+ void STVIO_StateAction(StateMem* sm, const unsigned load, const bool data_only) MDFN_COLD;
+ 
 --- a/src/ss/vdp2.cpp
 +++ b/src/ss/vdp2.cpp
 @@ -909,6 +909,10 @@
@@ -164,3 +241,63 @@
  void StateAction(StateMem* sm, const unsigned load, const bool data_only) MDFN_COLD;
  
  void Reset(bool powering_up) MDFN_COLD;
+--- a/src/hw_cpu/m68k/m68k.cpp
++++ b/src/hw_cpu/m68k/m68k.cpp
+@@ -200,6 +200,8 @@
+   return BusRead8(addr);
+ }
+ 
++void (*M68K::OracleHook)(uint8 tag, uint8 size, uint32 a, uint32 v) = nullptr;
++
+ INLINE uint16 M68K::ReadOp(void)
+ {
+  uint16 ret;
+@@ -669,6 +671,9 @@
+  const uint32 PC_save = PC;
+  const uint16 SR_save = GetSR();
+ 
++ if(MDFN_UNLIKELY(OracleHook))
++  OracleHook('X', vecnum, PC_save, which);
++
+  SetSVisor(true);
+  SetTrace(false);
+  
+@@ -690,6 +695,9 @@
+   else
+    vecnum = evn;
+ 
++  if(MDFN_UNLIKELY(OracleHook))
++   OracleHook('I', IPL, vecnum, 0);
++
+   timestamp += 4;
+  }
+ 
+@@ -2331,6 +2339,8 @@
+ 
+      A[7] = Read<uint32>(VECNUM_RESET_SSP << 2);
+      PC = Read<uint32>(VECNUM_RESET_PC << 2);
++     if(MDFN_UNLIKELY(OracleHook))
++      OracleHook('X', 0, PC, 0xFF);
+      //
+      XPending &= ~XPENDING_MASK_RESET;
+     }
+@@ -2365,6 +2375,8 @@
+  //
+  //
+  uint16 instr = ReadOp();
++ if(MDFN_UNLIKELY(OracleHook))
++  OracleHook('P', 0, PC - 2, instr);
+  const unsigned instr_b11_b9 = (instr >> 9) & 0x7;
+  const unsigned instr_b2_b0 = instr & 0x7;
+ 
+--- a/src/hw_cpu/m68k/m68k.h
++++ b/src/hw_cpu/m68k/m68k.h
+@@ -30,6 +30,8 @@
+ class M68K
+ {
+  public:
++ // stv-recomp oracle: called for each instruction, exception and bus access while tracing
++ static void (*OracleHook)(uint8 tag, uint8 size, uint32 a, uint32 v);
+ 
+  M68K(const bool rev_e = false) MDFN_COLD;
+  ~M68K() MDFN_COLD;

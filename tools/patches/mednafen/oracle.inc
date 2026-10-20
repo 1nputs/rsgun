@@ -17,14 +17,16 @@
  *   vdp1-vram.bin              VDP1 VRAM (512 KB)
  *   vdp2-vram.bin vdp2-cram.bin
  *   sound-ram.bin              SCSP RAM (512 KB)
+ *   eeprom.bin                 the ST-V's EEPROM (64 words)
  *   regs.txt                   both SH-2s' registers, and the frame's geometry
  *   regs.bin                   the same registers: per CPU (master, slave) 23 big-endian words:
- *                              R0-R15, PC, PR, SR, GBR, VBR, MACH, MACL
+ *                              R0-R15, PC, PR, SR, GBR, VBR, MACH, MACL; then the sound CPU (68000):
+ *                              19 words, D0-D7, A0-A7, PC, SR, the inactive stack pointer
  *   screen.ppm                 the frame as displayed (DisplayRect, the widest line's width)
  *
  * A trace from frame F is DIR/tFFFFFF/: start/ (a dump taken before frame F, the state the trace
- * starts from) and m.trace, s.trace (the master's and the slave's records, in the order the oracle
- * made them). Version 3 records are 12 bytes, big-endian:
+ * starts from) and m.trace, s.trace, k.trace (the master's, the slave's and the sound CPU's records,
+ * in the order the oracle made them). Version 3 records are 12 bytes, big-endian:
  *   u8 tag; u8 size; u16 0; u32 a; u32 v
  *   'P' a step: a = the PC the debugger reports before the CPU's step (0 when it has none), size = the
  *       pipeline's operation index (Pipe_ID >> 24), v = the instruction word. Indices 0x7E (standby),
@@ -36,6 +38,10 @@
  *       (Mednafen's: 0 power on and 1 reset, which save nothing (a = 0), 9 an interrupt)
  *   'I' an interrupt's level, after its 'X' and the stack and vector accesses: size = the level (SR.I)
  *   'F' the end of a frame: a = the frame number
+ * In k.trace (the 68000): 'P' a = the instruction's address, v = its first word (size 0); 'R'/'W'
+ * its bus accesses (8 or 16 bits: a long is two words); 'X' an exception: size = vector number
+ * (before an interrupt's acknowledge), a = the PC saved, v = Mednafen's exception number (0xFF a
+ * reset, with a = the new PC); 'I' an interrupt's level (size) and the vector taken (a).
  * The file begins with one header record: 'H', size 3 (the version), a = 0x53545654 ("STVT"), v = 0.
  */
 
@@ -55,8 +61,8 @@ static struct
  uint64 trace_end;	// the frame the current window ends after
  bool tracing;
  FILE* hashes_fp;
- FILE* trace_fp[2];
- std::vector<uint8> trace_buf[2];
+ FILE* trace_fp[3];
+ std::vector<uint8> trace_buf[3];
 } Oracle;
 
 static INLINE bool Oracle_Tracing(void)
@@ -100,6 +106,11 @@ static INLINE void Oracle_IntLevel(unsigned cpu, unsigned level)
 {
  if(MDFN_UNLIKELY(Oracle.tracing))
   Oracle_Record(cpu, 'I', level, 0, 0);
+}
+
+static void Oracle_SoundHook(uint8 tag, uint8 size, uint32 a, uint32 v)
+{
+ Oracle_Record(2, tag, size, a, v);
 }
 
 static void Oracle_Init(void)
@@ -211,6 +222,12 @@ static void Oracle_DumpTo(const std::string& d, const EmulateSpecStruct* es)
  Oracle_WriteWords(d + "/vdp2-vram.bin", VDP2::OracleVRAM(), 0x40000);
  Oracle_WriteWords(d + "/vdp2-cram.bin", VDP2::OracleCRAM(), 0x800);
  Oracle_WriteWords(d + "/sound-ram.bin", SOUND_OracleRAM(), 0x40000);
+ {
+  uint16 eeprom[0x40];
+
+  STVIO_OracleEEPROM(eeprom);
+  Oracle_WriteWords(d + "/eeprom.bin", eeprom, 0x40);
+ }
  if(FILE* fp = fopen((d + "/regs.txt").c_str(), "w"))
  {
   for(unsigned c = 0; c < 2; c++)
@@ -228,6 +245,8 @@ static void Oracle_DumpTo(const std::string& d, const EmulateSpecStruct* es)
  }
  if(FILE* fp = fopen((d + "/regs.bin").c_str(), "wb"))
  {
+  uint32 sound[19];
+
   for(unsigned c = 0; c < 2; c++)
   {
    const uint32 regs[23] = { CPU[c].R[0], CPU[c].R[1], CPU[c].R[2], CPU[c].R[3], CPU[c].R[4], CPU[c].R[5],
@@ -241,6 +260,13 @@ static void Oracle_DumpTo(const std::string& d, const EmulateSpecStruct* es)
 
     fwrite(b, 1, 4, fp);
    }
+  }
+  SOUND_OracleRegs(sound);
+  for(uint32 v : sound)
+  {
+   const uint8 b[4] = { (uint8)(v >> 24), (uint8)(v >> 16), (uint8)(v >> 8), (uint8)v };
+
+   fwrite(b, 1, 4, fp);
   }
   fclose(fp);
  }
@@ -261,20 +287,24 @@ static void Oracle_TraceStart(const EmulateSpecStruct* es)
 
  mkdir(d.c_str(), 0755);
  Oracle_DumpTo(d + "/start", es);
- for(unsigned c = 0; c < 2; c++)
+ static const char* const names[3] = { "/m.trace", "/s.trace", "/k.trace" };
+
+ for(unsigned c = 0; c < 3; c++)
  {
-  Oracle.trace_fp[c] = fopen((d + (c ? "/s.trace" : "/m.trace")).c_str(), "wb");
+  Oracle.trace_fp[c] = fopen((d + names[c]).c_str(), "wb");
   Oracle.trace_buf[c].clear();
  }
  Oracle.tracing = true;
- for(unsigned c = 0; c < 2; c++)
+ M68K::OracleHook = Oracle_SoundHook;
+ for(unsigned c = 0; c < 3; c++)
   Oracle_Record(c, 'H', 3, 0x53545654, 0);
 }
 
 static void Oracle_TraceStop(void)
 {
  Oracle.tracing = false;
- for(unsigned c = 0; c < 2; c++)
+ M68K::OracleHook = nullptr;
+ for(unsigned c = 0; c < 3; c++)
  {
   fwrite(Oracle.trace_buf[c].data(), 1, Oracle.trace_buf[c].size(), Oracle.trace_fp[c]);
   Oracle.trace_buf[c].clear();
@@ -328,7 +358,7 @@ static void Oracle_EndFrame(const EmulateSpecStruct* es)
   Oracle_WriteHashes();
  if(Oracle.tracing)
  {
-  for(unsigned c = 0; c < 2; c++)
+  for(unsigned c = 0; c < 3; c++)
    Oracle_Record(c, 'F', 0, (uint32)Oracle.frame, 0);
   if(Oracle.frame >= Oracle.trace_end)
    Oracle_TraceStop();

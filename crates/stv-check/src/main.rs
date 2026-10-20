@@ -340,7 +340,11 @@ fn trace(dir: &Path, cpus: &[usize], rom: &Path) -> Result<bool, String> {
     let start = dir.join("start");
     let read = |p: PathBuf| fs::read(&p).map_err(|e| format!("{}: {e}", p.display()));
     let mut ok = true;
-    for &c in cpus {
+    if cpus.contains(&2)
+        && dir.join("k.trace").exists() {
+            ok &= trace68k(dir)?;
+        }
+    for &c in cpus.iter().filter(|&&c| c < 2) {
         let mem = Memory {
             bios: read(rom.join("bios-epr20091.bin"))?,
             wram_l: read(start.join("wram-l.bin"))?,
@@ -384,6 +388,140 @@ fn trace(dir: &Path, cpus: &[usize], rom: &Path) -> Result<bool, String> {
     Ok(ok)
 }
 
+/// The sound CPU's bus during a replay: each instruction's accesses are the records between its 'P'
+/// and the next, matched by address and size in any order (the 68000 writes some longs low word
+/// first); reads are answered from them. Fetches come from the start dump's sound RAM.
+struct Replay68 {
+    ram: Vec<u8>,
+    /// The current instruction's accesses: (record, used).
+    group: Vec<(Rec, bool)>,
+    vector: Option<u8>,
+    error: Option<String>,
+}
+
+impl Replay68 {
+    fn access(&mut self, kind: u8, size: u32, addr: u32, value: u32) -> u32 {
+        if let Some(e) = self.group.iter_mut().find(|(r, used)| !*used && r.tag == kind && r.size as u32 == size && r.a == addr) {
+            e.1 = true;
+            if kind == b'W' && e.0.v != value && self.error.is_none() {
+                self.error = Some(format!("W{size} [{addr:06x}]: the core wrote {value:x}, the oracle {:x}", e.0.v));
+            }
+            return e.0.v;
+        }
+        if self.error.is_none() {
+            self.error = Some(format!("the core made {}{size} [{addr:06x}] {value:x}, which the oracle did not", kind as char));
+        }
+        0
+    }
+}
+
+impl stv::m68k::Bus68 for Replay68 {
+    fn read8(&mut self, a: u32) -> u8 {
+        self.access(b'R', 1, a, 0) as u8
+    }
+    fn read16(&mut self, a: u32) -> u16 {
+        self.access(b'R', 2, a, 0) as u16
+    }
+    fn write8(&mut self, a: u32, v: u8) {
+        self.access(b'W', 1, a, v as u32);
+        if a < 0x10_0000 {
+            self.ram[(a & 0x7_FFFF) as usize] = v;
+        }
+    }
+    fn write16(&mut self, a: u32, v: u16) {
+        self.access(b'W', 2, a, v as u32);
+        if a < 0x10_0000 {
+            let i = (a & 0x7_FFFE) as usize;
+            self.ram[i..i + 2].copy_from_slice(&v.to_be_bytes());
+        }
+    }
+    fn fetch16(&mut self, a: u32) -> u16 {
+        let i = (a & 0x7_FFFE) as usize;
+        u16::from_be_bytes([self.ram[i], self.ram[i + 1]])
+    }
+    fn int_ack(&mut self, _level: u8) -> Option<u8> {
+        self.vector
+    }
+}
+
+/// Replays the sound CPU's records (k.trace).
+fn trace68k(dir: &Path) -> Result<bool, String> {
+    let recs = load_trace(&dir.join("k.trace"))?;
+    let start = dir.join("start");
+    let ram = fs::read(start.join("sound-ram.bin")).map_err(|e| format!("sound-ram.bin: {e}"))?;
+    let regs = fs::read(start.join("regs.bin")).map_err(|e| format!("regs.bin: {e}"))?;
+    let w: Vec<u32> = regs[184..184 + 76].as_chunks::<4>().0.iter().map(|c| u32::from_be_bytes(*c)).collect();
+    let mut cpu = stv::m68k::M68k::default();
+    cpu.d.copy_from_slice(&w[..8]);
+    cpu.a.copy_from_slice(&w[8..16]);
+    cpu.pc = w[16];
+    cpu.sr = w[17] as u16;
+    cpu.other_sp = w[18];
+    let mut bus = Replay68 { ram, group: Vec::new(), vector: None, error: None };
+    let (mut steps, mut interrupts) = (0u64, 0u64);
+    let mut i = 1;
+    let show = |recs: &[Rec], at: usize| show_recs(recs, at.saturating_sub(12), at + 10, at);
+    while i < recs.len() {
+        let r = recs[i];
+        // the group of records up to the next step, exception or frame mark
+        let mut j = i + 1;
+        while j < recs.len() && matches!(recs[j].tag, b'R' | b'W' | b'I') {
+            j += 1;
+        }
+        match r.tag {
+            b'P' => {
+                if cpu.pc != r.a {
+                    println!("sound CPU: {steps} instructions matched, then the oracle is at {:06x}, the core at {:06x}\n{}", r.a, cpu.pc, show(&recs, i));
+                    return Ok(false);
+                }
+                bus.group = recs[i + 1..j].iter().map(|x| (*x, false)).collect();
+                cpu.step(&mut bus);
+                steps += 1;
+            }
+            b'X' if r.v == 9 => {
+                // an interrupt: the level and vector are in the 'I' record that follows
+                let Some(lvl) = recs[i + 1..j].iter().find(|x| x.tag == b'I') else {
+                    return Err("an interrupt with no level record".into());
+                };
+                if cpu.pc != r.a {
+                    println!("sound CPU: interrupt at {:06x}, the core is at {:06x}\n{}", r.a, cpu.pc, show(&recs, i));
+                    return Ok(false);
+                }
+                bus.group = recs[i + 1..j].iter().filter(|x| x.tag != b'I').map(|x| (*x, false)).collect();
+                bus.vector = Some(lvl.a as u8);
+                cpu.ipl = lvl.size;
+                cpu.step(&mut bus);
+                cpu.ipl = 0;
+                bus.vector = None;
+                interrupts += 1;
+            }
+            b'X' if r.v == 0xFF => {
+                bus.group = recs[i + 1..j].iter().map(|x| (*x, false)).collect();
+                cpu.reset(&mut bus);
+            }
+            b'X' | b'F' => {
+                // another exception is raised inside its instruction's group; a frame mark
+            }
+            _ => {
+                println!("sound CPU: an unexpected record\n{}", show(&recs, i));
+                return Ok(false);
+            }
+        }
+        if let Some(e) = bus.error.take() {
+            println!("sound CPU: {steps} instructions matched, then at {:06x}: {e}\n{}", r.a, show(&recs, i));
+            return Ok(false);
+        }
+        if let Some((x, _)) = bus.group.iter().find(|(x, used)| !*used && x.tag != b'X') {
+            println!("sound CPU: {steps} instructions matched, then at {:06x} the oracle made {}{} [{:06x}] {:x}, which the core did not\n{}",
+                r.a, x.tag as char, x.size, x.a, x.v, show(&recs, i));
+            return Ok(false);
+        }
+        i = j;
+    }
+    println!("sound CPU: {steps} instructions, {interrupts} interrupts: all {} records match", recs.len());
+    Ok(true)
+}
+
 /// The oracle dump taken at the end of the trace (DIR/../fFFFFFF for the trace's last frame).
 fn end_dump(dir: &Path, frames: u64) -> Option<PathBuf> {
     let first: u64 = dir.file_name()?.to_str()?.strip_prefix('t')?.parse().ok()?;
@@ -397,7 +535,8 @@ fn boot(oracle: &Path, frames: u64, rom: &Path, dumps: &[u64], dump_dir: &Path) 
     let read = |p: PathBuf| fs::read(&p).map_err(|e| format!("{}: {e}", p.display()));
     let text = fs::read_to_string(oracle).map_err(|e| format!("{}: {e}", oracle.display()))?;
     let lines: Vec<Vec<String>> = text.lines().map(|l| l.split(' ').map(String::from).collect()).collect();
-    let mut m = stv::machine::Machine::new(read(rom.join("bios-epr20091.bin"))?, read(rom.join("rsgun-cart.bin"))?, 1);
+    let eeprom = fs::read(rom.join("eeprom.bin")).ok();
+    let mut m = stv::machine::Machine::new(read(rom.join("bios-epr20091.bin"))?, read(rom.join("rsgun-cart.bin"))?, 1, eeprom.as_deref());
     const NAMES: [&str; 7] = ["wram-l", "wram-h", "vdp1-vram", "vdp2-vram", "cram", "vdp2-regs", "sound-ram"];
     let mut first_diff: [Option<u64>; 7] = [None; 7];
     let mut equal_frames = 0u64;
@@ -417,11 +556,14 @@ fn boot(oracle: &Path, frames: u64, rom: &Path, dumps: &[u64], dump_dir: &Path) 
             }
         }
         equal_frames += all as u64;
+        if std::env::var_os("STV_CHECK_PCS").is_some() {
+            println!("pc {f} {:08x} {:08x}", m.cpu[0].pc, m.cpu[1].pc);
+        }
         if f <= 3 || f % 600 == 0 || (!all && first_diff.iter().filter(|d| **d == Some(f)).count() > 0) {
             let differ: Vec<&str> = (0..7).filter(|&i| format!("{:016x}", ours.0[i]) != want[i + 1]).map(|i| NAMES[i]).collect();
-            println!("frame {f}: {} (steps m {} s {}, pc m {:08x} s {:08x}; oracle m {} s {})",
+            println!("frame {f}: {} (steps m {} s {} k {}, pc m {:08x} s {:08x} k {:06x}; oracle m {} s {})",
                 if differ.is_empty() { "equal".into() } else { format!("differ: {}", differ.join(" ")) },
-                m.steps[0], m.steps[1], m.cpu[0].pc, m.cpu[1].pc, want[8], want[9]);
+                m.steps[0], m.steps[1], m.sys.sound_steps, m.cpu[0].pc, m.cpu[1].pc, m.sys.m68k.pc, want[8], want[9]);
         }
     }
     println!("{equal_frames} of {frames} frames equal");
@@ -435,12 +577,12 @@ fn boot(oracle: &Path, frames: u64, rom: &Path, dumps: &[u64], dump_dir: &Path) 
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: stv-check trace DIR [--cpu m|s] [--rom DIR]\n       stv-check boot ORACLE.hashes [--frames N] [--rom DIR] [--dump F,F --dump-dir DIR]";
+    let usage = "usage: stv-check trace DIR [--cpu m|s|k] [--rom DIR]\n       stv-check boot ORACLE.hashes [--frames N] [--rom DIR] [--dump F,F --dump-dir DIR]";
     let Some(cmd) = args.first() else {
         eprintln!("{usage}");
         return ExitCode::from(2);
     };
-    let mut cpus = vec![0, 1];
+    let mut cpus = vec![0, 1, 2];
     let mut rom = PathBuf::from("build/rom");
     let mut frames = 600u64;
     let mut dumps: Vec<u64> = Vec::new();
@@ -449,7 +591,7 @@ fn main() -> ExitCode {
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--cpu" => cpus = match it.next().map(String::as_str) { Some("m") => vec![0], Some("s") => vec![1], _ => vec![0, 1] },
+            "--cpu" => cpus = match it.next().map(String::as_str) { Some("m") => vec![0], Some("s") => vec![1], Some("k") => vec![2], _ => vec![0, 1, 2] },
             "--rom" => rom = it.next().map(PathBuf::from).unwrap_or(rom),
             "--frames" => frames = it.next().and_then(|f| f.parse().ok()).unwrap_or(frames),
             "--dump" => dumps = it.next().map(|l| l.split(',').filter_map(|f| f.parse().ok()).collect()).unwrap_or_default(),

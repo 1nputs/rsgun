@@ -2,15 +2,19 @@
 //! run a line at a time. The client (or a check) owns the clock: `run_frame` runs to the end of the
 //! next frame, where the oracle's frames end, so the two can be compared frame by frame.
 
+use crate::m68k::M68k;
 use crate::mem::{fnv1a, rd16, rd32, wr16, wr32};
 use crate::onchip::OnChip;
 use crate::scu::{self, Scu};
 use crate::sh2::{Bus, Sh2};
 use crate::smpc::{Effect, Smpc};
-use crate::video::{Scsp, Vdp1, Vdp2};
+use crate::scsp::{Scsp, SoundBus};
+use crate::video::{Vdp1, Vdp2};
 
 /// NTSC: 263 lines a frame.
 const LINES: u32 = 263;
+/// The sound CPU's clock: the SCSP's 22.5792 MHz halved; a sample every 256 of its cycles.
+const SOUND_HZ: u64 = 11_289_600;
 
 pub struct Sys {
     pub bios: Vec<u8>,
@@ -28,6 +32,14 @@ pub struct Sys {
     pub vdp1: Vdp1,
     pub vdp2: Vdp2,
     pub scsp: Scsp,
+    pub m68k: M68k,
+    pub sound_on: bool,
+    sound_reset_pending: bool,
+    /// The sound CPU's clock: SH-2 cycles owed to it (in units of SOUND_HZ / SH-2 clock), and
+    /// its cycles into the current sample.
+    sound_owed: u64,
+    sound_in_sample: u32,
+    pub sound_steps: u64,
     pub slave_on: bool,
     pub clock352: bool,
     /// The line the beam is on (VDP2's V counter).
@@ -52,6 +64,42 @@ impl Sys {
         self.cycles_per_line() as u64 * LINES as u64 * 5994 / 100
     }
 
+    /// The SH-2s' clock: 28.6364 MHz for the 352-dot modes, 26.8466 MHz for 320.
+    fn sh2_hz(&self) -> u64 {
+        if self.clock352 { 28_636_363 } else { 26_846_590 }
+    }
+
+    /// Runs the sound CPU and the SCSP for `sh2_cycles` of the main clock.
+    fn run_sound(&mut self, sh2_cycles: u32) {
+        self.sound_owed += sh2_cycles as u64 * SOUND_HZ;
+        let cycles = (self.sound_owed / self.sh2_hz()) as u32;
+        self.sound_owed %= self.sh2_hz();
+        let mut left = cycles;
+        while left > 0 {
+            let chunk = left.min(256 - self.sound_in_sample);
+            if self.sound_on {
+                let mut done = 0;
+                while done < chunk {
+                    self.m68k.ipl = self.scsp.ipl();
+                    let mut bus = SoundBus { scsp: &mut self.scsp };
+                    done += self.m68k.step(&mut bus).max(4);
+                    self.sound_steps += 1;
+                }
+            }
+            self.sound_in_sample += chunk;
+            left -= chunk;
+            if self.sound_in_sample >= 256 {
+                self.sound_in_sample = 0;
+                self.scsp.sample();
+            }
+        }
+        if self.scsp.main_irq_edge {
+            self.scsp.main_irq_edge = false;
+            self.scu.raise(scu::SOUND_REQUEST);
+            self.scu.trigger(scu::FACTOR_SOUND);
+        }
+    }
+
     // ---- the external bus (also what DMA reaches) ----------------------------------------------
 
     pub fn ext_read8(&mut self, a: u32) -> u8 {
@@ -60,7 +108,13 @@ impl Sys {
             0x0000_0000..=0x000F_FFFF => self.bios[(p & 0x7_FFFF) as usize],
             0x0010_0000..=0x0017_FFFF => {
                 self.wait += 4;
-                if p & 1 != 0 { self.smpc.read(p) } else { 0xFF }
+                if p & 1 != 0 {
+                    let v = self.smpc.read(p);
+                    self.smpc_ports();
+                    v
+                } else {
+                    0xFF
+                }
             }
             0x0018_0000..=0x001F_FFFF => self.backup[(p & 0xFFFF) as usize],
             0x0020_0000..=0x002F_FFFF => {
@@ -84,8 +138,8 @@ impl Sys {
     pub fn ext_read16(&mut self, a: u32) -> u16 {
         let p = a & 0x07FF_FFFE;
         match p {
-            0x05A0_0000..=0x05AF_FFFF => rd16(&self.scsp.ram, (p & 0x7_FFFF) as usize),
-            0x05B0_0000..=0x05BF_FFFF => rd16(&self.scsp.regs, (p & 0xFFF) as usize),
+            0x05A0_0000..=0x05AF_FFFF => self.scsp.read16_bus(p & 0x7_FFFF),
+            0x05B0_0000..=0x05BF_FFFF => self.scsp.read16_bus(0x10_0000 | (p & 0xFFF)),
             0x05C0_0000..=0x05C7_FFFF => rd16(&self.vdp1.vram, (p & 0x7_FFFF) as usize),
             0x05C8_0000..=0x05CF_FFFF => rd16(&self.vdp1.fb[self.vdp1.draw], (p & 0x3_FFFF) as usize),
             0x05D0_0000..=0x05D7_FFFF => self.vdp1.read_reg(p),
@@ -118,6 +172,7 @@ impl Sys {
                 if p & 1 != 0 {
                     let per_ms = (self.cycles_per_second() / 1000) as u32;
                     self.smpc.write(p, v, per_ms);
+                    self.smpc_ports();
                 }
             }
             0x0018_0000..=0x001F_FFFF => self.backup[(p & 0xFFFF) as usize] = v,
@@ -125,8 +180,8 @@ impl Sys {
             0x0040_0000..=0x004F_FFFF => self.io[(p & 0x7F) as usize] = v,
             0x0100_0000..=0x01FF_FFFF => self.signal(p),
             0x04FF_FFF0..=0x04FF_FFFF => self.prot[(p & 0xF) as usize] = v,
-            0x05A0_0000..=0x05AF_FFFF => self.scsp.ram[(p & 0x7_FFFF) as usize] = v,
-            0x05B0_0000..=0x05BF_FFFF => self.scsp.regs[(p & 0xFFF) as usize] = v,
+            0x05A0_0000..=0x05AF_FFFF => self.scsp.write8(p & 0x7_FFFF, v),
+            0x05B0_0000..=0x05BF_FFFF => self.scsp.write8(0x10_0000 | (p & 0xFFF), v),
             0x05C0_0000..=0x05C7_FFFF => self.vdp1.vram[(p & 0x7_FFFF) as usize] = v,
             0x05C8_0000..=0x05CF_FFFF => {
                 let fb = self.vdp1.draw;
@@ -149,8 +204,8 @@ impl Sys {
     pub fn ext_write16(&mut self, a: u32, v: u16) {
         let p = a & 0x07FF_FFFE;
         match p {
-            0x05A0_0000..=0x05AF_FFFF => wr16(&mut self.scsp.ram, (p & 0x7_FFFF) as usize, v),
-            0x05B0_0000..=0x05BF_FFFF => wr16(&mut self.scsp.regs, (p & 0xFFF) as usize, v),
+            0x05A0_0000..=0x05AF_FFFF => self.scsp.write16_bus(p & 0x7_FFFF, v),
+            0x05B0_0000..=0x05BF_FFFF => self.scsp.write16_bus(0x10_0000 | (p & 0xFFF), v),
             0x05C0_0000..=0x05C7_FFFF => wr16(&mut self.vdp1.vram, (p & 0x7_FFFF) as usize, v),
             0x05C8_0000..=0x05CF_FFFF => {
                 let fb = self.vdp1.draw;
@@ -391,9 +446,30 @@ impl Sys {
 
     // ---- SMPC effects ---------------------------------------------------------------------------
 
+    /// The SMPC's port 2 changed the sound control lines: bit 4 resets the sound CPU, bit 3 the
+    /// SCSP; the sound CPU runs while both are low.
+    fn smpc_ports(&mut self) {
+        for (prev, cur) in std::mem::take(&mut self.smpc.sctrl_events) {
+            if (prev ^ cur) & 0x10 != 0 {
+                self.sound_reset_pending = true;
+            }
+            if (prev ^ cur) & 0x08 != 0 {
+                let ram = std::mem::take(&mut self.scsp.ram);
+                self.scsp = Scsp::new();
+                self.scsp.ram = ram;
+            }
+            self.sound_on = cur == 0;
+        }
+    }
+
     fn smpc_effect(&mut self, e: Effect) {
         match e {
-            Effect::None | Effect::SoundOn | Effect::SoundOff => {}
+            Effect::None => {}
+            Effect::SoundOn => {
+                self.sound_on = true;
+                self.sound_reset_pending = true;
+            }
+            Effect::SoundOff => self.sound_on = false,
             Effect::Nmi => self.nmi_pending[0] = true,
             Effect::SystemReset => self.reset_pending = true,
             Effect::SlaveOn => {
@@ -465,7 +541,8 @@ pub struct Machine {
 }
 
 impl Machine {
-    pub fn new(bios: Vec<u8>, cart: Vec<u8>, area: u8) -> Machine {
+    /// `eeprom`: the settings EEPROM's contents at power on (the oracle's: tools/oracle/eeprom.py).
+    pub fn new(bios: Vec<u8>, cart: Vec<u8>, area: u8, eeprom: Option<&[u8]>) -> Machine {
         let sys = Sys {
             bios,
             wram_l: vec![0; 0x10_0000],
@@ -477,10 +554,16 @@ impl Machine {
             onchip: [OnChip::new(false), OnChip::new(true)],
             cache_data: [vec![0; 0x1000], vec![0; 0x1000]],
             scu: Scu::default(),
-            smpc: Smpc::new(area),
+            smpc: Smpc::new(area, eeprom),
             vdp1: Vdp1::new(),
             vdp2: Vdp2::new(),
             scsp: Scsp::new(),
+            m68k: M68k::default(),
+            sound_on: false,
+            sound_reset_pending: false,
+            sound_owed: 0,
+            sound_in_sample: 0,
+            sound_steps: 0,
             slave_on: false,
             clock352: false,
             line: 0,
@@ -555,6 +638,12 @@ impl Machine {
         }
         self.run_cpus(per_line);
         self.time = [0; 2];
+        if self.sys.sound_reset_pending {
+            self.sys.sound_reset_pending = false;
+            let mut bus = SoundBus { scsp: &mut self.sys.scsp };
+            self.sys.m68k.reset(&mut bus);
+        }
+        self.sys.run_sound(per_line);
         // the SMPC and its clock, once a line
         let (effect, irq) = self.sys.smpc.clock(per_line, self.sys.cycles_per_second());
         if irq {
