@@ -88,7 +88,8 @@ pub fn model_init(cpu: &mut Cpu, obj: u32) {
 }
 
 /// A part follows its parent (by number): no hits while the parent has none, ending as it ends.
-pub fn follow_parent(cpu: &mut Cpu, obj: u32) {
+/// The parent (the stages' code takes it).
+pub fn follow_parent(cpu: &mut Cpu, obj: u32) -> u32 {
     let n = cpu.read8(obj + PARENT) as i8 as i32;
     let parent = cpu.read32(NUMBERED.wrapping_add((n * 4) as u32));
     let flags = cpu.read32(obj + FLAGS) | cpu.read32(parent + FLAGS) & NO_HITS;
@@ -96,6 +97,7 @@ pub fn follow_parent(cpu: &mut Cpu, obj: u32) {
     if cpu.read8(parent + OBJ_MODE) as i8 >= ENDING as i8 {
         cpu.write8(obj + OBJ_MODE, ENDING);
     }
+    parent
 }
 
 /// An actor that ends with the object at +0x3c (once that is freed or ends).

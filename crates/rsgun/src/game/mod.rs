@@ -507,7 +507,7 @@ pub fn register(n: &mut Natives) {
         0x0605_7454 => actors::drift_effect[e] -> u32,
         0x0605_681c => actors::enemy_clear[enemy] -> (),
         0x0605_2908 => models::model_init[obj] -> (),
-        0x0605_2970 => models::follow_parent[obj] -> (),
+        0x0605_2970 => models::follow_parent[obj] -> u32,
         0x0605_29ac => models::model_boxes[obj] -> (),
         0x0605_2b08 => models::beam_boxes[obj, src] -> (),
         0x0605_2b88 => models::beam_length[obj, length] -> (),
