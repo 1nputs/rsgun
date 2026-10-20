@@ -437,8 +437,6 @@ const FLASH: u32 = 80;
 const FLASH_FADE: u32 = 300;
 const SE_BIG: u32 = 19;
 const SE_SMALL: u32 = 0x0607_31c6;
-/// The maker of another piece (not rewritten yet).
-const SMALL_PIECE_SET: u32 = 0x0605_7da4;
 /// The explosion's own flags bit (an attribute, at random) and colours.
 const COLOUR_ALT: u16 = 0x10;
 
@@ -521,7 +519,7 @@ pub fn explosion_exec(cpu: &mut Cpu, x: u32) {
                 cpu.write32(d + D_SCALES + 4, power.wrapping_mul(6));
                 let r = random(cpu, 0x10000);
                 cpu.write16(d + D_ANGLE, r as u16);
-                cpu.call(SMALL_PIECE_SET, &[d]);
+                nested!(cpu, 0x0605_7da4, cross_set(cpu, d));
                 let r = random(cpu, 0x10000) & 3;
                 let se = cpu.read16(SE_SMALL + 4 * r) as i16 as i32 as u32;
                 nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, se));
@@ -737,4 +735,629 @@ pub fn blast_draw(cpu: &mut Cpu, s: u32) {
         nested!(cpu, 0x0604_0960, sprites::draw(cpu, shard));
         n = (n + 1) as i8 as i32;
     }
+}
+
+/// The drifting effect's description (actors.rs's E_*), and its maker.
+use super::actors::{E_ANGLE, E_COLOUR, E_POSITION, E_SCALES, E_SCRIPT, E_SPEED};
+const DRIFT_EFFECT: u32 = 0x0605_7454;
+
+fn drift_effect(cpu: &mut Cpu, e: u32) -> u32 {
+    nested!(cpu, DRIFT_EFFECT, super::actors::drift_effect(cpu, e))
+}
+
+/// The drifting effects' animations used here.
+const SMOKE_A: u32 = 0x0607_3008;
+const SMOKE_B: u32 = 0x0607_3044;
+const SMOKE_C: u32 = 0x0607_305c;
+const SPARK: u32 = 0x0607_30b0;
+const FLAME: u32 = 0x0607_3074;
+const JET_PUFF: u32 = 0x0607_3128;
+const CROSS: u32 = 0x0607_3188;
+const SMOKE_TRAIL: u32 = 0x0607_304a;
+/// A description's size for glow_set (+0x2c).
+const E_SIZE: u32 = 0x2c;
+const GLOW_SET: u32 = 0x0605_8f34;
+
+/// Makes an afterimage of `src`: a copy of its look (one lift lower) shrinking away over
+/// `frames`, moving at `speed` in its direction; in list 3: it, or 0.
+pub fn afterimage_set(cpu: &mut Cpu, src: u32, _unused: u32, frames: u32, speed: u32) -> u32 {
+    let o = piece_in(cpu, &[3], 100);
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    cpu.write32(o + BEHAVIOUR, 0x0605_75e4);
+    for k in 0..3 {
+        let v = cpu.read32(src + POSITION + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    let flags = cpu.read32(src + FLAGS) & ATTR_100 | PIECE_FLAGS;
+    cpu.write32(o + FLAGS, flags);
+    for field in [KIND, FRAME] {
+        let v = cpu.read8(src + field);
+        cpu.write8(o + field, v);
+    }
+    for field in [COLOUR, ANGLE] {
+        let v = cpu.read16(src + field);
+        cpu.write16(o + field, v);
+    }
+    for k in 0..2 {
+        let v = cpu.read32(src + SCALES + 4 * k);
+        cpu.write32(o + SCALES + 4 * k, v);
+    }
+    let lift = cpu.read8(src + LIFT).wrapping_sub(1);
+    cpu.write8(o + LIFT, lift);
+    let angle = cpu.read16(o + ANGLE) as i16 as i32 as u32;
+    let s = cpu.call(SL_SIN, &[angle]);
+    let dx = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, s, speed));
+    cpu.write32(o + SPEED, dx);
+    let angle = cpu.read16(o + ANGLE) as i16 as i32 as u32;
+    let c = cpu.call(SL_COS, &[angle]);
+    let dy = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, c.wrapping_neg(), speed));
+    cpu.write32(o + SPEED + 4, dy);
+    for k in 0..2 {
+        let v = cpu.read32(src + SCALES + 4 * k);
+        let q = nested!(cpu, 0x0600_6a78, math::quotient(cpu, v, frames));
+        cpu.write32(o + SHRINK + 4 * k, q);
+    }
+    o
+}
+
+/// A glow and six smoke trails flung out around it from `d` (its position).
+pub fn smoke_burst(cpu: &mut Cpu, d: u32) {
+    cpu.write32(d + E_SIZE, 0x2_0000);
+    nested!(cpu, GLOW_SET, glow_set(cpu, d));
+    let r = random(cpu, 0x10000);
+    cpu.write16(d + E_ANGLE, r as u16);
+    for _ in 0..6 {
+        let r = random(cpu, 0x10000);
+        cpu.write32(d + E_SPEED, 0x2_0000u32.wrapping_sub(r));
+        nested!(cpu, 0x0605_7998, smoke_trail_set(cpu, d));
+        let a = cpu.read16(d + E_ANGLE).wrapping_add(0x2aaa);
+        cpu.write16(d + E_ANGLE, a);
+    }
+}
+
+/// A puff of smoke from `e` (its position and size): one of three smokes at random, maybe
+/// flipped, in a random direction at a random speed up to 1 pixel a frame.
+pub fn smoke_puff(cpu: &mut Cpu, e: u32) {
+    let script = match random(cpu, 0x10000) & 0x300 {
+        0x100 => SMOKE_B,
+        0x200 => SMOKE_C,
+        _ => SMOKE_A,
+    };
+    cpu.write32(e + E_SCRIPT, script);
+    cpu.write16(e + E_COLOUR, 0x90);
+    let r = random(cpu, 0x10000) as u16;
+    let colour = r & 0x2000 | cpu.read16(e + E_COLOUR);
+    cpu.write16(e + E_COLOUR, colour);
+    let r = random(cpu, 0x10000);
+    cpu.write16(e + E_ANGLE, r as u16);
+    let r = random(cpu, 0x10000);
+    cpu.write32(e + E_SPEED, r);
+    let size = cpu.read32(e + E_SCALES);
+    cpu.write32(e + E_SCALES + 4, size);
+    drift_effect(cpu, e);
+}
+
+/// A burst of sparks from `e` (its position, direction and speed): a puff of smoke where it is,
+/// a spark flung back the other way and two at random, and a glow.
+pub fn spark_burst(cpu: &mut Cpu, e: u32) {
+    cpu.write32(e + E_SCRIPT, SMOKE_C);
+    cpu.write16(e + E_COLOUR, 0x90);
+    cpu.write32(e + E_SCALES, 0x1_0000);
+    cpu.write32(e + E_SCALES + 4, 0x1_0000);
+    drift_effect(cpu, e);
+    cpu.write32(e + E_SCRIPT, SPARK);
+    cpu.write16(e + E_COLOUR, 0x8000);
+    let r = random(cpu, 0x10000);
+    cpu.write16(e + E_ANGLE, r as u16);
+    let speed = cpu.read32(e + E_SPEED).wrapping_neg();
+    cpu.write32(e + E_SPEED, speed);
+    cpu.write32(e + E_SCALES + 4, 0xa000);
+    drift_effect(cpu, e);
+    for _ in 0..2 {
+        let r = random(cpu, 0x10000);
+        cpu.write16(e + E_ANGLE, r as u16);
+        drift_effect(cpu, e);
+    }
+    cpu.write32(e + E_SIZE, 0xc000);
+    nested!(cpu, GLOW_SET, glow_set(cpu, e));
+}
+
+/// A smoke trail (not drawn): its speed (x, y, z: rising faster each frame, ended past 6 pixels
+/// a frame), and a count (its width's field) that puts out a puff each 6th frame.
+const TRAIL_SPEED: u32 = 0x3c;
+const TRAIL_COUNT: u32 = SCALES;
+const TRAIL_RISE: u32 = 0x1000;
+const TRAIL_LAST: i32 = 0x6_0000;
+const NO_DRAW: u32 = 0x8000_0000;
+
+/// A smoke trail's behaviour.
+pub fn smoke_trail_exec(cpu: &mut Cpu, o: u32) {
+    let vz = cpu.read32(o + TRAIL_SPEED + 8).wrapping_add(TRAIL_RISE);
+    cpu.write32(o + TRAIL_SPEED + 8, vz);
+    if vz as i32 > TRAIL_LAST {
+        end(cpu, o);
+        return;
+    }
+    let n = cpu.read32(o + TRAIL_COUNT).wrapping_add(1);
+    cpu.write32(o + TRAIL_COUNT, n);
+    if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, n, 6)) == 0 {
+        let e = cpu.stack();
+        for k in 0..3 {
+            let v = cpu.read32(o + POSITION + 4 * k);
+            cpu.write32(e + E_POSITION + 4 * k, v);
+        }
+        cpu.write32(e + E_SCALES, 0xc000);
+        nested!(cpu, 0x0605_77d0, smoke_puff(cpu, e));
+    }
+    for k in 0..3 {
+        let p = cpu.read32(o + POSITION + 4 * k).wrapping_add(cpu.read32(o + TRAIL_SPEED + 4 * k));
+        cpu.write32(o + POSITION + 4 * k, p);
+    }
+}
+
+/// Makes a smoke trail from `d` (its position, direction and speed), starting a pixel a frame
+/// downward (toward the eye), its count at random; in list 3.
+pub fn smoke_trail_set(cpu: &mut Cpu, d: u32) {
+    let o = piece_in(cpu, &[3], 0x48);
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    cpu.write32(o + BEHAVIOUR, 0x0605_790c);
+    cpu.write32(o + FLAGS, NO_DRAW);
+    for k in 0..3 {
+        let v = cpu.read32(d + E_POSITION + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    let angle = cpu.read16(d + E_ANGLE);
+    cpu.write16(o + ANGLE, angle);
+    let angle = angle as i16 as i32 as u32;
+    let speed = cpu.read32(d + E_SPEED);
+    let s = cpu.call(SL_SIN, &[angle]);
+    let dx = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, s, speed));
+    cpu.write32(o + TRAIL_SPEED, dx);
+    let speed = cpu.read32(d + E_SPEED);
+    let angle = cpu.read16(d + E_ANGLE) as i16 as i32 as u32;
+    let c = cpu.call(SL_COS, &[angle]);
+    let dy = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, c.wrapping_neg(), speed));
+    cpu.write32(o + TRAIL_SPEED + 4, dy);
+    cpu.write32(o + TRAIL_SPEED + 8, 0xffff_0000);
+    let r = random(cpu, 0x10000);
+    cpu.write32(o + TRAIL_COUNT, r);
+}
+
+fn drift(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0605_73f0, super::actors::drift(cpu, o));
+}
+
+/// A smoking effect's behaviour: drifting; on odd frames a puff of smoke 20 behind it (back
+/// along its direction, scattered by up to 16 pixels), drifting slowly back.
+pub fn smoking_exec(cpu: &mut Cpu, o: u32) {
+    drift(cpu, o);
+    if cpu.read32(GAME_FRAMES) & 1 == 0 {
+        return;
+    }
+    let e = cpu.stack();
+    let back = cpu.read16(o + ANGLE).wrapping_add(0x8000) as i16 as i32 as u32;
+    let s = cpu.call(SL_SIN, &[back]);
+    let r = random(cpu, 0x10_0000);
+    let x = cpu.read32(o + POSITION).wrapping_add(s.wrapping_mul(20)).wrapping_add(r);
+    cpu.write32(e + E_POSITION, x);
+    let back = cpu.read16(o + ANGLE).wrapping_add(0x8000) as i16 as i32 as u32;
+    let c = cpu.call(SL_COS, &[back]);
+    let r = random(cpu, 0x10_0000);
+    let y = cpu.read32(o + POSITION + 4).wrapping_sub(c.wrapping_mul(20)).wrapping_add(r);
+    cpu.write32(e + E_POSITION + 4, y);
+    let r = random(cpu, 2);
+    let z = cpu.read32(o + POSITION + 8).wrapping_sub(r);
+    cpu.write32(e + E_POSITION + 8, z);
+    let r = random(cpu, 0x10000);
+    cpu.write32(e + E_SCRIPT, SMOKE_TRAIL + 2 * (r & 3));
+    let r = random(cpu, 0x10000) as u16;
+    cpu.write16(e + E_COLOUR, r & 0xa000 | 0x90);
+    let r = random(cpu, 0x1000);
+    cpu.write32(e + E_SCALES, r + 0x6000);
+    cpu.write32(e + E_SCALES + 4, r + 0x6000);
+    let r = random(cpu, 0x1000) as u16;
+    let a = r.wrapping_add(cpu.read16(o + ANGLE));
+    cpu.write16(e + E_ANGLE, a);
+    let r = random(cpu, 0x2000);
+    cpu.write32(e + E_SPEED, r.wrapping_add(0xffff_4000));
+    drift_effect(cpu, e);
+}
+
+/// Makes a smoking effect from `e` (its position and direction: smoke flung out at 2 pixels a
+/// frame), with a glow.
+pub fn smoking_set(cpu: &mut Cpu, e: u32) {
+    cpu.write32(e + E_SCRIPT, SMOKE_B);
+    cpu.write16(e + E_COLOUR, 0x90);
+    cpu.write32(e + E_SCALES, 0x1_0000);
+    cpu.write32(e + E_SCALES + 4, 0x1_0000);
+    cpu.write32(e + E_SPEED, 0x2_0000);
+    let o = drift_effect(cpu, e);
+    if o != 0 {
+        cpu.write32(o + BEHAVIOUR, 0x0605_7a64);
+        cpu.write32(e + E_SIZE, 0x1_0000);
+        nested!(cpu, GLOW_SET, glow_set(cpu, e));
+    }
+}
+
+/// A burning effect's behaviour: drifting; while it lasts, a twin spark on even frames, and on
+/// odd ones a puff of smoke 32 out from it in a random direction.
+pub fn burning_exec(cpu: &mut Cpu, o: u32) {
+    drift(cpu, o);
+    if cpu.read8(o + OBJ_MODE) as i8 >= ENDING as i8 {
+        return;
+    }
+    let e = cpu.stack();
+    if cpu.read32(GAME_FRAMES) & 1 == 0 {
+        for k in 0..3 {
+            let v = cpu.read32(o + POSITION + 4 * k);
+            cpu.write32(e + 4 * k, v);
+        }
+        nested!(cpu, 0x0605_8278, twin_set(cpu, e));
+        return;
+    }
+    cpu.write32(e + E_SCRIPT, SMOKE_B);
+    let r = random(cpu, 0x10000) as u16;
+    cpu.write16(e + E_COLOUR, r & 0x2000 | 0x90);
+    let r = random(cpu, 0x2000).wrapping_add(0x1_0000);
+    cpu.write32(e + E_SCALES, r);
+    cpu.write32(e + E_SCALES + 4, r);
+    let r = random(cpu, 0x10000);
+    cpu.write16(e + E_ANGLE, r as u16);
+    let r = random(cpu, 0x8000);
+    cpu.write32(e + E_SPEED, r.wrapping_add(0x1_2000));
+    let angle = cpu.read16(e + E_ANGLE) as i16 as i32 as u32;
+    let s = cpu.call(SL_SIN, &[angle]);
+    let x = cpu.read32(o + POSITION).wrapping_add(s.wrapping_mul(32));
+    cpu.write32(e + E_POSITION, x);
+    let angle = cpu.read16(e + E_ANGLE) as i16 as i32 as u32;
+    let c = cpu.call(SL_COS, &[angle]);
+    let y = cpu.read32(o + POSITION + 4).wrapping_sub(c.wrapping_mul(32));
+    cpu.write32(e + E_POSITION + 4, y);
+    let z = cpu.read32(o + POSITION + 8).wrapping_sub(2);
+    cpu.write32(e + E_POSITION + 8, z);
+    drift_effect(cpu, e);
+}
+
+/// The burning effect's orbiting rings (orbits.rs's description: kind 4, colours 4).
+const ORBIT_D: u32 = 0;
+
+/// Makes a burning effect from `e` (its position): a still flame with a glow, and five rings
+/// orbiting it until its flags' high word has bit 8.
+pub fn burning_set(cpu: &mut Cpu, e: u32) {
+    cpu.write32(e + E_SCRIPT, FLAME);
+    cpu.write16(e + E_COLOUR, 0);
+    cpu.write32(e + E_SCALES, 0x1_0000);
+    cpu.write32(e + E_SCALES + 4, 0x1_0000);
+    cpu.write32(e + E_SPEED, 0);
+    let o = drift_effect(cpu, e);
+    if o == 0 {
+        return;
+    }
+    cpu.write32(o + BEHAVIOUR, 0x0605_7bcc);
+    cpu.write32(e + E_SIZE, 0x2_0000);
+    nested!(cpu, GLOW_SET, glow_set(cpu, e));
+    let d = cpu.stack() + ORBIT_D;
+    cpu.write16(d + D_2C, 4);
+    cpu.write16(d + D_20, 4);
+    cpu.write32(d + D_SCALES, 0x3000);
+    cpu.write32(d + D_SCALES + 4, 0x4000);
+    cpu.write32(d + D_SCALE_SPEED, 0xffff_fc00);
+    cpu.write32(d + D_SCALE_SPEED + 4, 0x2000);
+    cpu.write32(d + D_RADIUS, 0x2_0000);
+    cpu.write32(d + D_RADIUS + 4, 0);
+    for _ in 0..5 {
+        let r = random(cpu, 0x10000);
+        cpu.write16(d + D_ANGLE, r as u16);
+        let r = random(cpu, 0x10000);
+        cpu.write16(d + D_ANGLE_OFFSET, r as u16);
+        let r = random(cpu, 0x400);
+        cpu.write16(d + D_TURN, r as u16);
+        cpu.write16(d + D_32, 0xfff7);
+        let (watched, centre, angle) = (o + FLAGS, o + POSITION, o + ANGLE);
+        cpu.nested_with_stack(&ORBIT_SET_PROLOGUE, ORBIT_SET, &[angle], |cpu| super::orbits::orbit_set(cpu, d, watched, 0x100, centre, angle));
+    }
+}
+
+/// Four sparks from `e` (its position, direction and size): a pair across its direction a
+/// quarter turn round, flung at 4 times its size; then a pair along it, larger, half as fast.
+pub fn cross_set(cpu: &mut Cpu, e: u32) {
+    cpu.write32(e + E_SCRIPT, CROSS);
+    cpu.write32(e + E_SCALES, 0x2000);
+    let a = cpu.read16(e + E_ANGLE).wrapping_add(0x4000);
+    cpu.write16(e + E_ANGLE, a);
+    let size = cpu.read32(e + E_SCALES + 4);
+    let speed = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, size, 0x4_0000));
+    cpu.write32(e + E_SPEED, speed);
+    drift_effect(cpu, e);
+    let a = cpu.read16(e + E_ANGLE).wrapping_add(0x8000);
+    cpu.write16(e + E_ANGLE, a);
+    drift_effect(cpu, e);
+    cpu.write32(e + E_SCALES, 0x4000);
+    for field in [E_SCALES + 4, E_SPEED] {
+        let v = cpu.read32(e + field) as i32;
+        cpu.write32(e + field, (v / 2) as u32);
+    }
+    drift_effect(cpu, e);
+    let a = cpu.read16(e + E_ANGLE).wrapping_add(0x8000);
+    cpu.write16(e + E_ANGLE, a);
+    drift_effect(cpu, e);
+}
+
+/// cross_set with a flash of the screen (grey, faded back over 512 frames).
+pub fn cross_flash(cpu: &mut Cpu, e: u32) {
+    nested!(cpu, 0x0605_7da4, cross_set(cpu, e));
+    nested!(cpu, 0x0605_e9d8, super::screen::stop_fades(cpu));
+    nested!(cpu, 0x0605_e6dc, super::screen::set_fade_offset(cpu, 40, 40, 40));
+    nested!(cpu, 0x0605_e93c, super::screen::fade_to(cpu, 0, 0, 0, 0x200));
+}
+
+/// A jet (the flame behind something): what it is behind (+0x3c), its reach (a byte, pixels),
+/// a count, its width's size (a byte).
+const JET_OF: u32 = 0x3c;
+const JET_REACH: u32 = 0x40;
+const JET_COUNT: u32 = 0x41;
+const JET_SIZE: u32 = 0x42;
+
+/// A jet's behaviour: ended with what it is behind; else just above it, its width flickering,
+/// put its reach (and a pixel at random) behind it, its frames flickering, flipped at random;
+/// each third frame a puff of exhaust drifting back.
+pub fn jet_exec(cpu: &mut Cpu, j: u32) {
+    let of = cpu.read32(j + JET_OF);
+    if cpu.read8(of + OBJ_MODE) as i8 >= ENDING as i8 {
+        end(cpu, j);
+        return;
+    }
+    let z = cpu.read32(of + POSITION + 8).wrapping_add(1);
+    cpu.write32(j + POSITION + 8, z);
+    let r = random(cpu, 0x10000);
+    let w = (cpu.read8(j + JET_SIZE) as u32).wrapping_mul((r & 0x3ff) + 0xc00);
+    cpu.write32(j + SCALES, w);
+    let a = cpu.read16(of + ANGLE);
+    cpu.write16(j + ANGLE, a);
+    let r = random(cpu, 0x10000);
+    let reach = ((r & 1) as i32 + cpu.read8(j + JET_REACH) as i8 as i32) as u32 & 0xffff;
+    let n = cpu.read8(j + JET_COUNT).wrapping_add(1);
+    cpu.write8(j + JET_COUNT, n);
+    let frame = if n & 1 != 0 {
+        (random(cpu, 0x10000) & 1) as u8 + 0xd3
+    } else {
+        (random(cpu, 0x10000) & 3) as u8 + 0xcf
+    };
+    cpu.write8(j + FRAME, frame);
+    let back = cpu.read16(of + ANGLE).wrapping_add(0x8000) as i16 as i32 as u32;
+    let s = cpu.call(SL_SIN, &[back]);
+    let x = cpu.read32(of + POSITION).wrapping_add(s.wrapping_mul(reach));
+    cpu.write32(j + POSITION, x);
+    let back = cpu.read16(of + ANGLE).wrapping_add(0x8000) as i16 as i32 as u32;
+    let c = cpu.call(SL_COS, &[back]);
+    let y = cpu.read32(of + POSITION + 4).wrapping_add(c.wrapping_neg().wrapping_mul(reach));
+    cpu.write32(j + POSITION + 4, y);
+    let flags = cpu.read32(j + FLAGS) & !0x10;
+    cpu.write32(j + FLAGS, flags);
+    let r = random(cpu, 0x10000);
+    let flags = cpu.read32(j + FLAGS) | r & 0x10;
+    cpu.write32(j + FLAGS, flags);
+    let w = cpu.read32(j + SCALES);
+    cpu.write32(j + SCALES + 4, w);
+    let n = cpu.read8(j + JET_COUNT) as u32;
+    if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, n, 3)) == 0 {
+        let e = cpu.stack();
+        cpu.write32(e + E_SCRIPT, JET_PUFF);
+        let r = random(cpu, 0x10000) as u16;
+        cpu.write16(e + E_COLOUR, r & 0xa000 | 0xd0);
+        for k in 0..3 {
+            let v = cpu.read32(j + POSITION + 4 * k);
+            cpu.write32(e + E_POSITION + 4 * k, v);
+        }
+        let a = cpu.read16(of + ANGLE);
+        cpu.write16(e + E_ANGLE, a);
+        cpu.write32(e + E_SPEED, 0xfffc_c000);
+        cpu.write32(e + E_SCALES, 0x8000);
+        cpu.write32(e + E_SCALES + 4, 0x8000);
+        drift_effect(cpu, e);
+    }
+}
+
+/// Makes a jet behind the object at `d`+0x3c, its reach and size from `d`'s bytes +0x2d and
+/// +0x2f; in list 3, else 2: it, or 0.
+pub fn jet_set(cpu: &mut Cpu, d: u32) -> u32 {
+    let j = piece_in(cpu, &[3, 2], 0x44);
+    if j == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, j + SPRITE));
+    cpu.write32(j + BEHAVIOUR, 0x0605_7e78);
+    cpu.write32(j + FLAGS, PIECE_FLAGS);
+    cpu.write8(j + KIND, 0);
+    cpu.write8(j + FRAME, 0x2c);
+    let base = cpu.read16(CHAR_BASE);
+    cpu.write16(j + COLOUR, base);
+    cpu.write8(j + LIFT, 8);
+    cpu.write8(j + JET_COUNT, 0);
+    let of = cpu.read32(d + 0x3c);
+    cpu.write32(j + JET_OF, of);
+    for k in 0..3 {
+        let v = cpu.read32(of + POSITION + 4 * k);
+        cpu.write32(j + POSITION + 4 * k, v);
+    }
+    let reach = cpu.read8(d + 0x2d);
+    cpu.write8(j + JET_REACH, reach);
+    let size = cpu.read8(d + 0x2f);
+    cpu.write8(j + JET_SIZE, size);
+    cpu.write32(j + SCALES, 0);
+    cpu.write32(j + SCALES + 4, 0);
+    j
+}
+
+/// A glow: its animation (actors.rs's script), its size's step (whose low word is also its spin)
+/// and that step's slowing, the size it grows to.
+const GLOW_STEP: u32 = 0x54;
+const GLOW_SPIN: u32 = 0x56;
+const GLOW_SLOWING: u32 = 0x58;
+const GLOW_SIZE_TO: u32 = 0x5c;
+const SCRIPT: u32 = 0x4c;
+const SHOWN_LEFT: u32 = 0x50;
+const GLOW_ANIMATION: u32 = 0x0607_31a0;
+/// Past this frame it takes the attribute bit 0x100.
+const GLOW_LATE: u8 = 0xcd;
+
+/// A glow's behaviour: ended at its animation's end; else spun, its size grown toward its size
+/// (the step slowing), its frame late in the animation taking the attribute bit.
+pub fn glow_exec(cpu: &mut Cpu, g: u32) {
+    if nested!(cpu, 0x0605_73a0, super::actors::anim_step(cpu, g)) as u8 != 0 {
+        end(cpu, g);
+        return;
+    }
+    let a = cpu.read16(g + ANGLE).wrapping_add(cpu.read16(g + GLOW_SPIN));
+    cpu.write16(g + ANGLE, a);
+    let (w, to, step) = (cpu.read32(g + SCALES), cpu.read32(g + GLOW_SIZE_TO), cpu.read32(g + GLOW_STEP));
+    let w = nested!(cpu, 0x0604_6168, super::actors::approach(cpu, w, to, step));
+    cpu.write32(g + SCALES, w);
+    let (step, slowing) = (cpu.read32(g + GLOW_STEP), cpu.read32(g + GLOW_SLOWING));
+    let step = nested!(cpu, 0x0604_6168, super::actors::approach(cpu, step, 0, slowing));
+    cpu.write32(g + GLOW_STEP, step);
+    let w = cpu.read32(g + SCALES);
+    cpu.write32(g + SCALES + 4, w);
+    if cpu.read8(g + FRAME) > GLOW_LATE {
+        let flags = cpu.read32(g + FLAGS) | ATTR_100;
+        cpu.write32(g + FLAGS, flags);
+    }
+}
+
+/// Makes a glow at `d` (its position) growing from half its size (+0x2c) to it: in list 3; it,
+/// or 0.
+pub fn glow_set(cpu: &mut Cpu, d: u32) -> u32 {
+    let g = piece_in(cpu, &[3], 100);
+    if g == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, g + SPRITE));
+    cpu.write32(g + BEHAVIOUR, 0x0605_8eac);
+    cpu.write32(g + FLAGS, PIECE_FLAGS);
+    let base = cpu.read16(CHAR_BASE);
+    cpu.write16(g + COLOUR, base);
+    cpu.write8(g + LIFT, 8);
+    cpu.write32(g + SCRIPT, GLOW_ANIMATION);
+    let first = cpu.read8(GLOW_ANIMATION);
+    cpu.write8(g + FRAME, first);
+    let script = cpu.read32(g + SCRIPT);
+    let time = cpu.read8(script + 1);
+    cpu.write8(g + SHOWN_LEFT, time);
+    for k in 0..3 {
+        let v = cpu.read32(d + 4 * k);
+        cpu.write32(g + POSITION + 4 * k, v);
+    }
+    let size = cpu.read32(d + E_SIZE) as i32;
+    cpu.write32(g + SCALES, (size / 2) as u32);
+    cpu.write32(g + SCALES + 4, (size / 2) as u32);
+    cpu.write32(g + GLOW_SIZE_TO, size as u32);
+    cpu.write32(g + GLOW_STEP, shifted(size, 4));
+    cpu.write32(g + GLOW_SLOWING, shifted(size, 8));
+    let r = random(cpu, 0x10000);
+    cpu.write16(g + ANGLE, r as u16);
+    g
+}
+
+/// A rising ring (drawn by ring_draw): its speed (x, y, z); its width grows by its height, which
+/// falls by 0x100 a frame (its width below none ends it); its colour (+0x30, from the first
+/// character's).
+const RING_SPEED: u32 = 0x3c;
+const RING_COLOUR: u32 = ANGLE;
+
+/// A rising ring's behaviour.
+pub fn ring_exec(cpu: &mut Cpu, o: u32) {
+    let w = cpu.read32(o + SCALES).wrapping_add(cpu.read32(o + SCALES + 4));
+    cpu.write32(o + SCALES, w);
+    let h = cpu.read32(o + SCALES + 4).wrapping_add(0xffff_ff00);
+    cpu.write32(o + SCALES + 4, h);
+    if (cpu.read32(o + SCALES) as i32) < 0 {
+        end(cpu, o);
+        return;
+    }
+    for k in 0..3 {
+        let p = cpu.read32(o + POSITION + 4 * k).wrapping_add(cpu.read32(o + RING_SPEED + 4 * k));
+        cpu.write32(o + POSITION + 4 * k, p);
+    }
+}
+
+/// The ring's sprite (in the draw's frame, sprites.rs's struct).
+const R_FLAGS: u32 = 0x00;
+const R_POSITION: u32 = 0x04;
+const R_SCALES: u32 = 0x10;
+const R_COLOUR: u32 = 0x18;
+const R_KIND: u32 = 0x1e;
+const R_FRAME: u32 = 0x1f;
+const R_LIFT: u32 = 0x23;
+const LOOPS: u32 = super::globals::LOOPS;
+const COLOUR_TABLE: u32 = 0x0607_31b6;
+const GAME_FRAMES_LOW: u32 = GAME_FRAMES + 3;
+
+/// A rising ring's draw (sprite `s`): while its height is above none, an outer ring (frame 2, half
+/// again as wide); then the ring (frame 0 or 1 by turns), in its colour with the colours of
+/// orbits.rs's table by turns.
+pub fn ring_draw(cpu: &mut Cpu, s: u32) {
+    let o = s - SPRITE;
+    let r = cpu.stack();
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, r));
+    for k in 0..3 {
+        let v = cpu.read32(o + POSITION + 4 * k);
+        cpu.write32(r + R_POSITION + 4 * k, v);
+    }
+    let turn = (cpu.read32(LOOPS) & 1) * 2;
+    let colour = cpu
+        .read16(CHAR_BASE)
+        .wrapping_add(cpu.read16(o + RING_COLOUR))
+        .wrapping_add(cpu.read16(COLOUR_TABLE + turn));
+    cpu.write16(r + R_COLOUR, colour);
+    cpu.write8(r + R_LIFT, 0xf8);
+    cpu.write8(r + R_KIND, 0);
+    if cpu.read32(o + SCALES + 4) as i32 > 0 {
+        cpu.write32(r + R_FLAGS, ATTR_100);
+        cpu.write8(r + R_FRAME, 2);
+        let w = cpu.read32(o + SCALES);
+        let w = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, w, 0x1_8000));
+        cpu.write32(r + R_SCALES, w);
+        cpu.write32(r + R_SCALES + 4, w);
+        nested!(cpu, 0x0604_0960, sprites::draw(cpu, r));
+    }
+    cpu.write32(r + R_FLAGS, 0);
+    let f = cpu.read8(GAME_FRAMES_LOW) & 1;
+    cpu.write8(r + R_FRAME, f);
+    let w = cpu.read32(o + SCALES);
+    cpu.write32(r + R_SCALES, w);
+    cpu.write32(r + R_SCALES + 4, w);
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, r));
+}
+
+/// Makes a rising ring from `d`: its position, its width and height (words +0x2c, +0x2e), its
+/// speed (+0x30), its colour (a word, +0x20); in list 3.
+pub fn ring_set(cpu: &mut Cpu, d: u32) {
+    let o = piece_in(cpu, &[3], 0x48);
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    cpu.write32(o + BEHAVIOUR, 0x0605_9034);
+    cpu.write32(o + DRAW_AT, 0x0605_9080);
+    cpu.write32(o + FLAGS, OWN_MODEL);
+    for k in 0..3 {
+        let v = cpu.read32(d + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    for k in 0..3 {
+        let v = cpu.read32(d + 0x30 + 4 * k);
+        cpu.write32(o + RING_SPEED + 4 * k, v);
+    }
+    for k in 0..2 {
+        let v = cpu.read16(d + 0x2c + 2 * k) as i16 as i32 as u32;
+        cpu.write32(o + SCALES + 4 * k, v);
+    }
+    let colour = cpu.read16(d + 0x20);
+    cpu.write16(o + RING_COLOUR, colour);
 }
