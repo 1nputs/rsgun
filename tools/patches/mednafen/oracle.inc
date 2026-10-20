@@ -6,7 +6,11 @@
  *   STV_ORACLE_DIR    directory to write into (the hooks are off when it is unset)
  *   STV_ORACLE_DUMP   frames to dump at, comma separated ("600,1200")
  *   STV_ORACLE_EXIT   exit after this frame (after its dump and trace, if any)
- *   STV_ORACLE_TRACE  F:N[,F:N...]  trace both SH-2s through frames F to F+N-1 (F >= 2; windows in order)
+ *   STV_ORACLE_TRACE  F:N[,F:N...]  trace both SH-2s through frames F to F+N-1 (windows in order; a
+ *                     window from frame 1 starts at power on)
+ *   STV_ORACLE_HASHES FILE  write a line per frame: the frame number, then 64-bit FNV-1a hashes (hex) of
+ *                     the big-endian bytes of work RAM-L, work RAM-H, VDP1 VRAM, VDP2 VRAM, VDP2 CRAM,
+ *                     VDP2's registers (as written, 0x200 bytes) and sound RAM, then both SH-2s' PCs
  *
  * Frames count Emulate() calls from 1. A dump at frame F (taken after the frame) is DIR/fFFFFFF/:
  *   wram-l.bin wram-h.bin      work RAM, 1 MB each, big-endian bytes as the SH-2 sees them
@@ -50,6 +54,7 @@ static struct
  size_t trace_next;	// the next window to start
  uint64 trace_end;	// the frame the current window ends after
  bool tracing;
+ FILE* hashes_fp;
  FILE* trace_fp[2];
  std::vector<uint8> trace_buf[2];
 } Oracle;
@@ -103,8 +108,14 @@ static void Oracle_Init(void)
 
  Oracle.on = (dir && *dir);
  Oracle.tracing = false;
+ Oracle.hashes_fp = nullptr;
  if(!Oracle.on)
   return;
+ if(const char* h = getenv("STV_ORACLE_HASHES"))
+ {
+  if(*h)
+   Oracle.hashes_fp = fopen(h, "w");
+ }
  Oracle.dir = dir;
  Oracle.frame = 0;
  Oracle.exit_frame = 0;
@@ -272,11 +283,49 @@ static void Oracle_TraceStop(void)
  }
 }
 
+static uint64 Oracle_Hash(const uint16* words, size_t count)
+{
+ uint64 h = 0xcbf29ce484222325ULL;
+
+ for(size_t i = 0; i < count; i++)
+ {
+  h = (h ^ (words[i] >> 8)) * 0x100000001b3ULL;
+  h = (h ^ (words[i] & 0xFF)) * 0x100000001b3ULL;
+ }
+ return h;
+}
+
+static void Oracle_WriteHashes(void)
+{
+ fprintf(Oracle.hashes_fp, "%llu %016llx %016llx %016llx %016llx %016llx %016llx %016llx %08x %08x\n",
+	(unsigned long long)Oracle.frame,
+	(unsigned long long)Oracle_Hash(WorkRAML, sizeof(WorkRAML) / sizeof(WorkRAML[0])),
+	(unsigned long long)Oracle_Hash(WorkRAMH, sizeof(WorkRAMH) / sizeof(WorkRAMH[0])),
+	(unsigned long long)Oracle_Hash(VDP1::VRAM, 0x40000),
+	(unsigned long long)Oracle_Hash(VDP2::OracleVRAM(), 0x40000),
+	(unsigned long long)Oracle_Hash(VDP2::OracleCRAM(), 0x800),
+	(unsigned long long)Oracle_Hash(VDP2::OracleRegs(), 0x100),
+	(unsigned long long)Oracle_Hash(SOUND_OracleRAM(), 0x40000),
+	CPU[0].PC, CPU[1].PC);
+}
+
+static void Oracle_BeginFrame(const EmulateSpecStruct* es)
+{
+ if(Oracle.on && Oracle.frame == 0 && !Oracle.tracing && Oracle.trace_next < Oracle.traces.size() && Oracle.traces[Oracle.trace_next].first == 1)
+ {	// a window from power on
+  Oracle.trace_end = Oracle.traces[Oracle.trace_next].second;
+  Oracle.trace_next++;
+  Oracle_TraceStart(es);
+ }
+}
+
 static void Oracle_EndFrame(const EmulateSpecStruct* es)
 {
  if(!Oracle.on)
   return;
  Oracle.frame++;
+ if(Oracle.hashes_fp)
+  Oracle_WriteHashes();
  if(Oracle.tracing)
  {
   for(unsigned c = 0; c < 2; c++)
@@ -299,6 +348,8 @@ static void Oracle_EndFrame(const EmulateSpecStruct* es)
  {
   if(Oracle.tracing)
    Oracle_TraceStop();
+  if(Oracle.hashes_fp)
+   fclose(Oracle.hashes_fp);
   fflush(stdout);
   std::exit(0);
  }

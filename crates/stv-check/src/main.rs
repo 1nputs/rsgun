@@ -391,26 +391,75 @@ fn end_dump(dir: &Path, frames: u64) -> Option<PathBuf> {
     p.join("regs.bin").exists().then_some(p)
 }
 
+/// Runs the machine from power on and compares each frame's memory hashes with the oracle's
+/// (tools/oracle/run.py --hashes FILE).
+fn boot(oracle: &Path, frames: u64, rom: &Path, dumps: &[u64], dump_dir: &Path) -> Result<bool, String> {
+    let read = |p: PathBuf| fs::read(&p).map_err(|e| format!("{}: {e}", p.display()));
+    let text = fs::read_to_string(oracle).map_err(|e| format!("{}: {e}", oracle.display()))?;
+    let lines: Vec<Vec<String>> = text.lines().map(|l| l.split(' ').map(String::from).collect()).collect();
+    let mut m = stv::machine::Machine::new(read(rom.join("bios-epr20091.bin"))?, read(rom.join("rsgun-cart.bin"))?, 1);
+    const NAMES: [&str; 7] = ["wram-l", "wram-h", "vdp1-vram", "vdp2-vram", "cram", "vdp2-regs", "sound-ram"];
+    let mut first_diff: [Option<u64>; 7] = [None; 7];
+    let mut equal_frames = 0u64;
+    for f in 1..=frames.min(lines.len() as u64) {
+        m.run_frame();
+        if dumps.contains(&f) {
+            let d = dump_dir.join(format!("f{f:06}"));
+            m.dump(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+        }
+        let ours = m.hashes();
+        let want = &lines[(f - 1) as usize];
+        let mut all = true;
+        for (i, h) in ours.0.iter().enumerate() {
+            if format!("{h:016x}") != want[i + 1] {
+                all = false;
+                first_diff[i].get_or_insert(f);
+            }
+        }
+        equal_frames += all as u64;
+        if f <= 3 || f % 600 == 0 || (!all && first_diff.iter().filter(|d| **d == Some(f)).count() > 0) {
+            let differ: Vec<&str> = (0..7).filter(|&i| format!("{:016x}", ours.0[i]) != want[i + 1]).map(|i| NAMES[i]).collect();
+            println!("frame {f}: {} (steps m {} s {}, pc m {:08x} s {:08x}; oracle m {} s {})",
+                if differ.is_empty() { "equal".into() } else { format!("differ: {}", differ.join(" ")) },
+                m.steps[0], m.steps[1], m.cpu[0].pc, m.cpu[1].pc, want[8], want[9]);
+        }
+    }
+    println!("{equal_frames} of {frames} frames equal");
+    for (i, d) in first_diff.iter().enumerate() {
+        if let Some(f) = d {
+            println!("  {} first differs at frame {f}", NAMES[i]);
+        }
+    }
+    Ok(first_diff.iter().all(|d| d.is_none()))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: stv-check trace DIR [--cpu m|s] [--rom DIR]";
+    let usage = "usage: stv-check trace DIR [--cpu m|s] [--rom DIR]\n       stv-check boot ORACLE.hashes [--frames N] [--rom DIR] [--dump F,F --dump-dir DIR]";
     let Some(cmd) = args.first() else {
         eprintln!("{usage}");
         return ExitCode::from(2);
     };
     let mut cpus = vec![0, 1];
     let mut rom = PathBuf::from("build/rom");
+    let mut frames = 600u64;
+    let mut dumps: Vec<u64> = Vec::new();
+    let mut dump_dir = PathBuf::from("out/machine");
     let mut dir = None;
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--cpu" => cpus = match it.next().map(String::as_str) { Some("m") => vec![0], Some("s") => vec![1], _ => vec![0, 1] },
             "--rom" => rom = it.next().map(PathBuf::from).unwrap_or(rom),
+            "--frames" => frames = it.next().and_then(|f| f.parse().ok()).unwrap_or(frames),
+            "--dump" => dumps = it.next().map(|l| l.split(',').filter_map(|f| f.parse().ok()).collect()).unwrap_or_default(),
+            "--dump-dir" => dump_dir = it.next().map(PathBuf::from).unwrap_or(dump_dir),
             _ => dir = Some(PathBuf::from(a)),
         }
     }
     let result = match (cmd.as_str(), dir) {
         ("trace", Some(d)) => trace(&d, &cpus, &rom),
+        ("boot", Some(d)) => boot(&d, frames, &rom, &dumps, &dump_dir),
         _ => Err(usage.into()),
     };
     match result {

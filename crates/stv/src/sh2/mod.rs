@@ -32,6 +32,7 @@ pub const SR_MASK: u32 = 0x3F3;
 pub const VEC_ILLEGAL: u32 = 4;
 pub const VEC_SLOT_ILLEGAL: u32 = 6;
 pub const VEC_CPU_ADDRESS_ERROR: u32 = 9;
+pub const VEC_NMI: u32 = 11;
 
 /// A delayed branch waiting for its slot: where it goes, and where the branch itself was (the PC a
 /// slot-illegal exception saves).
@@ -149,6 +150,14 @@ impl Sh2 {
         let saved = self.pc;
         self.exception(bus, vector, saved);
         self.sr = (self.sr & !SR_I) | ((level & 0xF) << 4);
+    }
+
+    /// Takes an NMI (vector 11): not maskable; the mask becomes 15.
+    pub fn nmi<B: Bus>(&mut self, bus: &mut B) {
+        debug_assert!(self.delay.is_none());
+        let saved = self.pc;
+        self.exception(bus, VEC_NMI, saved);
+        self.sr |= SR_I;
     }
 
     /// Executes one instruction (or, asleep, nothing).

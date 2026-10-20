@@ -5,7 +5,8 @@
 Each dump is DIR/fFFFFFF/, each trace DIR/tFFFFFF/ (work RAM, VDP1/VDP2 memory, sound RAM, both SH-2s' registers, the screen as
 PPM and PNG); see tools/patches/mednafen/oracle.inc. Mednafen keeps its settings and the ST-V BIOS chips in
 out/mednafen-home (made on first use from the user's stvbios.zip). Headless by default: no window, no
-sound, no frame skipping, unthrottled.
+sound, no frame skipping, unthrottled. Deterministic: the SMPC clock is not set from the host, and no
+battery RAM, EEPROM or clock state carries over from an earlier run.
 """
 import argparse
 import os
@@ -50,6 +51,7 @@ def main() -> None:
     ap.add_argument("--dump", default="", help="frames to dump at, comma separated (default: the last)")
     ap.add_argument("--out", default=str(ROOT / "out/oracle"), help="dump directory")
     ap.add_argument("--trace", default="", help="F:N[,F:N...]: trace both SH-2s through frames F to F+N-1 (to DIR/tFFFFFF)")
+    ap.add_argument("--hashes", default="", help="write a line of memory hashes per frame to this file")
     ap.add_argument("--window", action="store_true", help="show a window, at normal speed, with sound")
     ap.add_argument("extra", nargs="*", help="more Mednafen arguments")
     a = ap.parse_args()
@@ -60,8 +62,12 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, MEDNAFEN_HOME=str(HOME), STV_ORACLE_DIR=str(out),
                STV_ORACLE_DUMP=a.dump or str(a.frames), STV_ORACLE_EXIT=str(a.frames),
-               STV_ORACLE_TRACE=a.trace)
-    args = [str(MEDNAFEN), "-video.fs", "0", "-video.frameskip", "0"]
+               STV_ORACLE_TRACE=a.trace,
+               STV_ORACLE_HASHES=str(pathlib.Path(a.hashes).resolve()) if a.hashes else "")
+    # Deterministic: no clock from the host, no battery RAM, EEPROM or clock state from an earlier run.
+    for f in (HOME / "sav").glob("*"):
+        f.unlink()
+    args = [str(MEDNAFEN), "-video.fs", "0", "-video.frameskip", "0", "-ss.smpc.autortc", "0"]
     if not a.window:
         env.update(SDL_VIDEODRIVER="dummy", SDL_AUDIODRIVER="dummy")
         args += ["-sound", "0", "-nothrottle", "1", "-video.driver", "softfb"]

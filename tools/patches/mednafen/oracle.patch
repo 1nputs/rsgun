@@ -115,7 +115,15 @@
  #include "debug.inc"
  
  static sha256_digest BIOS_SHA256;	// SHA-256 hash of the currently-loaded BIOS; used for save state sanity checks.
-@@ -921,6 +922,7 @@
+@@ -859,6 +860,7 @@
+  int32 end_ts;
+ 
+  espec = espec_arg;
++ Oracle_BeginFrame(espec);
+  AllowMidSync = true;
+  MDFNGameInfo->mouse_sensitivity = MDFN_GetSettingF("ss.input.mouse_sensitivity");
+ 
+@@ -921,6 +923,7 @@
   //
   //
   SMPC_UpdateOutput();
@@ -123,7 +131,7 @@
   //
   //
   //
-@@ -1658,6 +1660,7 @@
+@@ -1658,6 +1661,7 @@
  
  static MDFN_COLD void Load(GameFile* gf)
  {
@@ -133,24 +141,26 @@
   const bool region_autodetect = MDFN_GetSettingB("ss.region_autodetect");
 --- a/src/ss/vdp2.cpp
 +++ b/src/ss/vdp2.cpp
-@@ -909,6 +909,9 @@
+@@ -909,6 +909,10 @@
   VDP2REND_SetGetVideoParams(gi, caspect, sls, sle, show_h_overscan, dohblend);
  }
  
 +uint16* OracleVRAM(void) { return VRAM; }
 +uint16* OracleCRAM(void) { return CRAM; }
++uint16* OracleRegs(void) { return RawRegs; }
 +
  void Kill(void)
  {
   VDP2REND_Kill();
 --- a/src/ss/vdp2.h
 +++ b/src/ss/vdp2.h
-@@ -34,6 +34,8 @@
+@@ -34,6 +34,9 @@
  void Init(const bool IsPAL, const uint64 affinity) MDFN_COLD;
  void SetGetVideoParams(MDFNGI* gi, const bool caspect, const int sls, const int sle, const bool show_h_overscan, const bool dohblend) MDFN_COLD;
  void Kill(void) MDFN_COLD;
 +uint16* OracleVRAM(void) MDFN_COLD;
 +uint16* OracleCRAM(void) MDFN_COLD;
++uint16* OracleRegs(void) MDFN_COLD;
  void StateAction(StateMem* sm, const unsigned load, const bool data_only) MDFN_COLD;
  
  void Reset(bool powering_up) MDFN_COLD;
