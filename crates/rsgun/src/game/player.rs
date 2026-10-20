@@ -32,8 +32,8 @@ const UNHURT: u32 = 0x4_0000;
 const FLASH: u16 = 1;
 const WAS_HIT: u16 = 0x200;
 
-/// The states: 0-2 (coming in, ..., dead: no control), 3 no weapon, 4-9 the weapons by buttons,
-/// 10 the sword, 11 the hyper sword.
+/// The states: 0 start, 1 coming in, 2 dead, 3 no weapon, 4-9 the weapons by buttons (A, B, C,
+/// A+B, A+C, B+C), 10 the sword (A+B+C), 11 the hyper sword.
 const DEAD: u16 = 2;
 const NO_WEAPON: u8 = 3;
 const SWORD: u8 = 10;
@@ -121,8 +121,8 @@ const SCRAPE_COLOUR: u16 = 0x10;
 const GROUND_SAFE: u32 = 0x0600_edbc;
 /// The buttons: A, B, C (PAD_INF bits); the setting that tells three buttons from two.
 const BUTTON_A: u16 = 0x400;
-const BUTTON_B: u16 = 0x200;
-const BUTTON_C: u16 = 0x100;
+const BUTTON_B: u16 = 0x100;
+const BUTTON_C: u16 = 0x200;
 const SL_TURN: u32 = 0x0606_4eac;
 
 fn random(cpu: &mut Cpu, n: u32) -> u32 {
@@ -188,18 +188,19 @@ pub fn control(cpu: &mut Cpu, p: u32) {
     let state = if super::globals::bios_setting_is_1(cpu) {
         match held & (BUTTON_A | BUTTON_B | BUTTON_C) {
             BUTTON_A => weapon(cpu, p, 4),
-            BUTTON_C => weapon(cpu, p, 5),
-            BUTTON_B => weapon(cpu, p, 6),
-            0x300 => 9,
+            BUTTON_B => weapon(cpu, p, 5),
+            BUTTON_C => weapon(cpu, p, 6),
             0x500 => weapon(cpu, p, 7),
             0x600 => weapon(cpu, p, 8),
+            0x300 => 9,
             0x700 => sword(cpu, p),
             _ => weapon(cpu, p, NO_WEAPON),
         }
     } else {
-        match held & (BUTTON_A | BUTTON_C) {
+        // two buttons: B gives C's weapon, A and B together the sword
+        match held & (BUTTON_A | BUTTON_B) {
             BUTTON_A => weapon(cpu, p, 4),
-            BUTTON_C => weapon(cpu, p, 6),
+            BUTTON_B => weapon(cpu, p, 6),
             0x500 => sword(cpu, p),
             _ => weapon(cpu, p, NO_WEAPON),
         }
@@ -419,16 +420,16 @@ fn extend(cpu: &mut Cpu, p: u32) {
 
 /// The state's phase (the high byte of STATE: each weapon state starts at 0, waits a frame, then
 /// fires (2) and waits its reload (3)), the shots fired in the state, the frames into the phase,
-/// counts of each weapon's shots alive (bytes, the shots count themselves each frame: A, C, B,
-/// A+B, B+C, the hyper sword, all), the shot limits' flags, the sideways and upward drift (banking)
+/// counts of each weapon's shots alive (bytes, the shots count themselves each frame: A, B, C,
+/// A+C, B+C, the hyper sword, all), the shot limits' flags, the sideways and upward drift (banking)
 /// and the tilt (a byte: its frame's index).
 const PHASE: u32 = 0x6c;
 const SHOTS: u32 = 0x89;
 const PHASE_FRAMES: u32 = 0x88;
 const ALIVE_A: u32 = 0x80;
-const ALIVE_C: u32 = 0x81;
-const ALIVE_B: u32 = 0x82;
-const ALIVE_AB: u32 = 0x84;
+const ALIVE_B: u32 = 0x81;
+const ALIVE_C: u32 = 0x82;
+const ALIVE_AC: u32 = 0x84;
 const ALIVE_BC: u32 = 0x85;
 const ALIVE_HYPER: u32 = 0x86;
 const ALIVE_ALL: u32 = 0x87;
@@ -586,10 +587,10 @@ fn fired(cpu: &mut Cpu, p: u32) {
 
 /// The shots' makers (not rewritten yet).
 const SHOT_A: u32 = 0x0604_860c;
-const SHOT_C: u32 = 0x0604_8d84;
-const SHOT_B: u32 = 0x0604_965c;
-const SHOT_AC: u32 = 0x0604_a854;
-const SHOT_AB: u32 = 0x0604_aa98;
+const SHOT_B: u32 = 0x0604_8d84;
+const SHOT_C: u32 = 0x0604_965c;
+const SHOT_AB: u32 = 0x0604_a854;
+const SHOT_AC: u32 = 0x0604_aa98;
 const SHOT_BC: u32 = 0x0604_bdf8;
 const SWORD_SET: u32 = 0x0604_c9a4;
 const HYPER_SET: u32 = 0x0604_d444;
@@ -614,8 +615,8 @@ pub fn weapon_a(cpu: &mut Cpu, p: u32) {
     }
 }
 
-/// Weapon C (state 5): up to 13 shots alive, one each 7 frames.
-pub fn weapon_c(cpu: &mut Cpu, p: u32) {
+/// Weapon B (state 5, homing): up to 13 shots alive, one each 7 frames.
+pub fn weapon_b(cpu: &mut Cpu, p: u32) {
     nested!(cpu, 0x0604_6900, move_ship(cpu, p));
     match phase(cpu, p) {
         0 | 1 => {
@@ -625,8 +626,8 @@ pub fn weapon_c(cpu: &mut Cpu, p: u32) {
             wait(cpu, p, 0, 2);
         }
         2 => {
-            if !at_limit(cpu, p, ALIVE_C, 12) {
-                fire(cpu, p, 4, SHOT_C);
+            if !at_limit(cpu, p, ALIVE_B, 12) {
+                fire(cpu, p, 4, SHOT_B);
             }
         }
         3 => wait(cpu, p, 6, 2),
@@ -634,9 +635,9 @@ pub fn weapon_c(cpu: &mut Cpu, p: u32) {
     }
 }
 
-/// Weapon B (state 6): up to 5 shots alive (with two buttons, under 7.5: the source's double),
+/// Weapon C (state 6): up to 5 shots alive (with two buttons, under 7.5: the source's double),
 /// one each 24 frames.
-pub fn weapon_b(cpu: &mut Cpu, p: u32) {
+pub fn weapon_c(cpu: &mut Cpu, p: u32) {
     nested!(cpu, 0x0604_6900, move_ship(cpu, p));
     match phase(cpu, p) {
         0 | 1 => {
@@ -658,18 +659,18 @@ pub fn weapon_b(cpu: &mut Cpu, p: u32) {
             if limits & LIMIT_ALL != 0 && over(cpu, ALIVE_ALL) {
                 return;
             }
-            if cpu.read32(p + LIMITS) & LIMIT_EACH != 0 && over(cpu, ALIVE_B) {
+            if cpu.read32(p + LIMITS) & LIMIT_EACH != 0 && over(cpu, ALIVE_C) {
                 return;
             }
-            fire(cpu, p, 7, SHOT_B);
+            fire(cpu, p, 7, SHOT_C);
         }
         3 => wait(cpu, p, 23, 2),
         _ => {}
     }
 }
 
-/// A+C (state 7): its shot once (the shot keeps itself up while the buttons are held).
-pub fn weapon_ac(cpu: &mut Cpu, p: u32) {
+/// A+B (state 7): its shot once (the shot keeps itself up while the buttons are held).
+pub fn weapon_ab(cpu: &mut Cpu, p: u32) {
     nested!(cpu, 0x0604_6900, move_ship(cpu, p));
     match phase(cpu, p) {
         0 | 1 => {
@@ -679,18 +680,18 @@ pub fn weapon_ac(cpu: &mut Cpu, p: u32) {
             wait(cpu, p, 0, 2);
         }
         2 => {
-            cpu.call(SHOT_AC, &[p]);
+            cpu.call(SHOT_AB, &[p]);
             set_phase(cpu, p, 3);
         }
         _ => {}
     }
 }
 
-/// The weapon levels' third (each player's three) that A+B's limit grows with.
-const LEVEL_AB: u32 = LEVELS + 2;
+/// C's weapon level (each player's three: A, B, C), which A+C's limit grows with.
+const LEVEL_C: u32 = LEVELS + 2;
 
-/// A+B (state 8): its shots one each 7 frames, up to 16 alive (24 from level 8, 32 from level 24).
-pub fn weapon_ab(cpu: &mut Cpu, p: u32) {
+/// A+C (state 8): its shots one each 7 frames, up to 16 alive (24 from C's level 8, 32 from 24).
+pub fn weapon_ac(cpu: &mut Cpu, p: u32) {
     nested!(cpu, 0x0604_6900, move_ship(cpu, p));
     match phase(cpu, p) {
         0 | 1 => {
@@ -701,16 +702,16 @@ pub fn weapon_ab(cpu: &mut Cpu, p: u32) {
         }
         2 => {
             let n = number(cpu, p);
-            let level = cpu.read8(LEVEL_AB.wrapping_add((n * 3) as u32)) as i8;
+            let level = cpu.read8(LEVEL_C.wrapping_add((n * 3) as u32)) as i8;
             let most = if level <= 7 { 4 } else if level <= 23 { 6 } else { 8 } * 4;
             let limits = cpu.read32(p + LIMITS);
             if limits & LIMIT_ALL != 0 && cpu.read8(p + ALIVE_ALL) as i8 as i32 >= most {
                 return;
             }
-            if limits & LIMIT_EACH != 0 && cpu.read8(p + ALIVE_AB) as i8 as i32 >= most {
+            if limits & LIMIT_EACH != 0 && cpu.read8(p + ALIVE_AC) as i8 as i32 >= most {
                 return;
             }
-            cpu.call(SHOT_AB, &[p]);
+            cpu.call(SHOT_AC, &[p]);
             nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 3));
             fired(cpu, p);
         }
