@@ -18,6 +18,7 @@ const SCALES: u32 = 0x20;
 const COLOUR: u32 = 0x28;
 const OWN_COLOUR: u32 = 0x2a;
 const KIND: u32 = 0x2e;
+const FRAME: u32 = 0x2f;
 const ANGLE: u32 = 0x30;
 const NUMBER: u32 = 0x32;
 const LIFT: u32 = 0x33;
@@ -843,7 +844,7 @@ pub fn trail_exec(cpu: &mut Cpu, o: u32) {
     nested!(cpu, 0x0604_6558, effects::link_step(cpu, o + SPRITE, o + TRAIL_LINK));
     let kind = KINDS.wrapping_add((cpu.read8(o + KIND) as i8 as i32 * 16) as u32);
     let frames = cpu.read32(kind + 4);
-    let n = cpu.read8(o + 0x2f) as u32;
+    let n = cpu.read8(o + FRAME) as u32;
     let frame = cpu.read32(frames + 8 * n);
     let ch = cpu.read16(kind + 8).wrapping_add(cpu.read8(frame) as u16) as i16 as i32;
     let w = cpu.read16(CHAR_SIZES.wrapping_add((ch * 8) as u32)) as i32;
@@ -1724,5 +1725,284 @@ pub fn shot_ac_set(cpu: &mut Cpu, p: u32) -> u32 {
     }
     muzzle(cpu, p, 0, C_MUZZLE, 0);
     muzzle(cpu, p, 0, MUZZLE, 0x8000);
+    s
+}
+
+/// B+C's shot (the ring): drawn by its own draw (eight sprites around it, kind 3 in the kind's
+/// colour plus 0x30, frame 30), type 14, held at the ship and turning (0x200 a frame), its radius
+/// growing toward 96 pixels and 1 more each B level. It takes the things to hit within it (on the
+/// other side, alive, not ending, not to be homed on; at most a fifth of C's level plus 4) as its
+/// targets, each keeping its wait from the last frame, and sends a bolt at each whose wait is over
+/// (then 19 frames) unless as many were sent this frame. Once the ship lets go (not in B+C's state)
+/// or ends it shrinks away.
+const RING_EXEC: u32 = 0x0604_b98c;
+const RING_DRAW: u32 = 0x0604_b830;
+const RING_COLOUR: u16 = 0x30;
+const RING_FRAME: u8 = 30;
+const RING_TYPE: u8 = 14;
+const RING_TURN: u16 = 0x200;
+const RING_REACH: i32 = -0x60_0000;
+const RING_WAIT: u8 = 19;
+const RING_FADING: u16 = 5;
+const RING_SHRINK: u32 = 0x2000;
+/// The ring's bolts sent this frame (a byte, cleared each frame), its radius (16.16, negative: up
+/// from it), its targets' numbers (10 bytes, the last -1) and their waits.
+const RING_SENT: u32 = 0x70;
+const RING_RADIUS: u32 = 0x60;
+const RING_5C: u32 = 0x5c;
+const RING_TARGETS: u32 = 0x74;
+const RING_WAITS: u32 = 0x80;
+const RING_MOST: u32 = 10;
+const STATE_BC: u8 = 9;
+/// The ship's B+C shots alive.
+const ALIVE_BC: u32 = 0x85;
+const BC_BOLT_EXEC: u32 = 0x0604_b510;
+/// A B+C bolt's target, ring, and its place from the target.
+const BC_TARGET: u32 = 0x70;
+const BC_RING: u32 = 0x78;
+const BC_FROM: u32 = 0x5c;
+/// The polygon flag: four corners.
+const FOUR_CORNERS: u32 = 2;
+
+/// The most targets (and bolts a frame) by C's level.
+fn ring_most(cpu: &mut Cpu, s: u32) -> i32 {
+    let n = number(cpu, s);
+    cpu.read8(LEVEL_C.wrapping_add((n * 3) as u32)) as i8 as i32 / 5 + 4
+}
+
+pub fn ring_exec(cpu: &mut Cpu, s: u32) {
+    let ship = cpu.read32(s + SHIP);
+    if cpu.read8(ship + SHIP_STATE) != STATE_BC {
+        cpu.write16(s + PHASE, RING_FADING);
+    }
+    if cpu.read8(ship + OBJ_MODE) as i8 >= ENDING as i8 {
+        cpu.write32(s + SHIP, 0);
+        cpu.write16(s + PHASE, RING_FADING);
+    }
+    if cpu.read32(s + SHIP) != 0 {
+        count_alive(cpu, s, ALIVE_BC);
+        for k in 0..3 {
+            let v = cpu.read32(ship + POSITION + 4 * k);
+            cpu.write32(s + POSITION + 4 * k, v);
+        }
+        let a = cpu.read16(s + ANGLE).wrapping_add(RING_TURN);
+        cpu.write16(s + ANGLE, a);
+    }
+    let phase = cpu.read8(s + PHASE_LOW) as i8;
+    match phase {
+        0 | 1 => {
+            if phase == 0 {
+                let flags = cpu.read32(s + FLAGS) | OWN_MODEL;
+                cpu.write32(s + FLAGS, flags);
+                cpu.write32(s + BEAM_DRAW, RING_DRAW);
+                cpu.write8(s + KIND, A_KIND);
+                cpu.write8(s + FRAME, RING_FRAME);
+                let kind = cpu.read8(s + KIND) as i8 as i32;
+                let colour = cpu.read16(KIND_COLOURS.wrapping_add((kind * 16) as u32)).wrapping_add(RING_COLOUR);
+                cpu.write16(s + OWN_COLOUR, colour);
+                cpu.write16(s + COLOUR, colour);
+                cpu.write8(s + LIFT, 4);
+                cpu.write8(s + SIDE, 0);
+                cpu.write8(s + TYPE, RING_TYPE);
+                cpu.write8(s + RING_SENT, 0);
+                cpu.write32(s + RING_RADIUS, 0);
+                cpu.write32(s + RING_5C, 0);
+                cpu.write16(s + TURN, 0);
+                cpu.write8(s + RING_TARGETS, 0xff);
+                cpu.write16(s + PHASE, 1);
+            }
+            ring_targets(cpu, s);
+        }
+        p if p == RING_FADING as i8 => {
+            let w = cpu.read32(s + SCALES);
+            let w = nested!(cpu, 0x0604_6168, actors::approach(cpu, w, 0, RING_SHRINK));
+            cpu.write32(s + SCALES, w);
+            cpu.write32(s + SCALES + 4, w);
+            if cpu.read32(s + SCALES) == 0 {
+                end(cpu, s);
+            }
+        }
+        _ => {}
+    }
+    cpu.write8(s + RING_SENT, 0);
+    let lift = if cpu.read32(GAME_FRAMES) & 1 != 0 { 0 } else { 0x7f };
+    cpu.write8(s + LIFT, lift);
+}
+
+/// The ring grown, its targets taken (the waits of those still cooling kept), and the bolts sent.
+fn ring_targets(cpu: &mut Cpu, s: u32) {
+    let f = cpu.stack();
+    let r = cpu.read32(s + RING_RADIUS) as i32;
+    let n = number(cpu, s);
+    let level_b = cpu.read8(B_LEVEL.wrapping_add((n * 3) as u32)) as i8 as i32;
+    let to = RING_REACH.wrapping_sub(r).wrapping_sub(level_b << 16);
+    cpu.write32(s + RING_RADIUS, r.wrapping_add(to / 16) as u32);
+    for i in 0..RING_MOST {
+        if cpu.read8(s + RING_TARGETS + i) as i8 == -1 {
+            break;
+        }
+        let wait = cpu.read8(s + RING_WAITS + i);
+        if wait != 0 {
+            cpu.write8(s + RING_WAITS + i, wait.wrapping_sub(1));
+        }
+    }
+    // the targets still cooling and their waits, in the frame
+    let mut cooling = 0;
+    for i in 0..RING_MOST {
+        let t = cpu.read8(s + RING_TARGETS + i);
+        cpu.write8(f + cooling, t);
+        if t as i8 == -1 {
+            break;
+        }
+        let wait = cpu.read8(s + RING_WAITS + i);
+        if wait != 0 {
+            cpu.write8(f + 0xc + cooling, wait);
+            cooling += 1;
+        }
+    }
+    let radius = (cpu.read32(s + RING_RADIUS) as i32).wrapping_abs();
+    let mut count = 0;
+    cpu.write32(f + 0x18, count);
+    cpu.write8(s + RING_TARGETS, 0xff);
+    cpu.write32(f + 0x1c, f + 0xc);
+    for i in 2..64u32 {
+        let t = cpu.read32(NUMBERED + 4 * i);
+        if t == 0
+            || cpu.read8(s + SIDE) == cpu.read8(t + SIDE)
+            || cpu.read8(t + OBJ_MODE) as i8 >= ENDING as i8
+            || cpu.read32(t + FLAGS) & UNHOMED != 0
+            || cpu.read32(t + LIFE) as i32 <= 0
+            || nested!(cpu, 0x0604_5ee4, super::aim::distance(cpu, s, t)) as i32 > radius
+        {
+            continue;
+        }
+        let at = s + count;
+        let n = cpu.read8(t + NUMBER);
+        cpu.write8(at + RING_TARGETS, n);
+        cpu.write8(at + RING_WAITS, 0);
+        for j in 0..cooling {
+            if cpu.read8(f + j) == cpu.read8(t + NUMBER) {
+                let wait = cpu.read8(f + 0xc + j);
+                cpu.write8(at + RING_WAITS, wait);
+                break;
+            }
+        }
+        count += 1;
+        cpu.write32(f + 0x18, count);
+        if count as i32 >= ring_most(cpu, s) {
+            break;
+        }
+        cpu.write8(s + count + RING_TARGETS, 0xff);
+    }
+    if cpu.read8(s + RING_SENT) as i8 as i32 >= ring_most(cpu, s) || count == 0 {
+        return;
+    }
+    cpu.write32(f + 0x20, RING_WAITS);
+    for j in 0..count {
+        let at = s + j;
+        if cpu.read8(at + RING_TARGETS) as i8 == -1 {
+            break;
+        }
+        if cpu.read8(at + RING_WAITS) != 0 {
+            continue;
+        }
+        let b = shot_in(cpu);
+        if b == 0 {
+            continue;
+        }
+        let n = cpu.read8(at + RING_TARGETS) as i8 as i32;
+        let t = cpu.read32(NUMBERED.wrapping_add((n * 4) as u32));
+        cpu.write32(b + BEHAVIOUR, BC_BOLT_EXEC);
+        for k in 0..3 {
+            let v = cpu.read32(s + POSITION + 4 * k);
+            cpu.write32(b + POSITION + 4 * k, v);
+        }
+        let n = cpu.read8(s + NUMBER);
+        cpu.write8(b + NUMBER, n);
+        cpu.write16(b + POWER, 0);
+        let ship = cpu.read32(s + SHIP);
+        cpu.write32(b + SHIP, ship);
+        cpu.write32(b + BC_RING, s);
+        cpu.write32(b + BC_TARGET, t);
+        for k in 0..2 {
+            let d = cpu.read32(s + POSITION + 4 * k).wrapping_sub(cpu.read32(t + POSITION + 4 * k));
+            cpu.write32(b + BC_FROM + 4 * k, d);
+        }
+        hit_set(cpu, b, 0);
+        cpu.write8(at + RING_WAITS, RING_WAIT);
+    }
+}
+
+/// The ring's own draw (sprite `s`): eight four-cornered polygons of its kind around it at its
+/// radius, turned with it (the last four mirrored, turning the other way), flickering in colour (its
+/// colour less 0x20 while it has targets).
+pub fn ring_draw(cpu: &mut Cpu, sp: u32) {
+    let s = sp.wrapping_sub(SPRITE);
+    let f = cpu.stack();
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, f));
+    let corners = f + 0x6c;
+    cpu.write32(f + 0x24, corners);
+    let flags = cpu.read32(f) | FOUR_CORNERS;
+    cpu.write32(f, flags);
+    for (k, v) in [(8, 0u16), (2, 0), (0, 0), (0xa, 0xfffc), (4, 0xfffc), (6, 4), (0xc, 4), (0xe, 4)] {
+        cpu.write16(corners + k, v);
+    }
+    let z = cpu.read32(s + POSITION + 8);
+    cpu.write32(f + 0x0c, z);
+    let kind = cpu.read8(s + KIND);
+    cpu.write8(f + 0x1e, kind);
+    let lift = cpu.read8(s + LIFT);
+    cpu.write8(f + 0x23, lift);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 4)) as u16;
+    let flicker = if cpu.read8(s + RING_TARGETS) as i8 == -1 { 0x36 } else { 0x16 };
+    let kind = cpu.read8(f + 0x1e) as i8 as i32;
+    let colour = r.wrapping_add(flicker).wrapping_add(cpu.read16(KIND_COLOURS.wrapping_add((kind * 16) as u32)));
+    cpu.write16(f + 0x18, colour);
+    let t = f + 0x2c;
+    for k in 0..2 {
+        let v = cpu.read32(s + SCALES + 4 * k);
+        cpu.write32(t + 0x0c + 4 * k, v);
+    }
+    cpu.write32(t + 0x14, 0);
+    let a = cpu.read16(s + ANGLE);
+    cpu.write16(t + 0x18, a);
+    for i in 0..8 {
+        if i == 4 {
+            let flip = cpu.read32(t + 0x14) | MIRRORED;
+            cpu.write32(t + 0x14, flip);
+            let a = cpu.read16(s + ANGLE).wrapping_neg();
+            cpu.write16(t + 0x18, a);
+        }
+        cpu.write32(t, 0);
+        let r = cpu.read32(s + RING_RADIUS);
+        cpu.write32(t + 4, r);
+        cpu.call(SL_TURN, &[t]);
+        for k in 0..2 {
+            let p = cpu.read32(s + POSITION + 4 * k).wrapping_add(cpu.read32(t + 4 * k));
+            cpu.write32(f + 4 + 4 * k, p);
+        }
+        let a = cpu.read16(t + 0x18);
+        cpu.write16(f + 0x20, a);
+        nested!(cpu, 0x0604_0960, sprites::draw(cpu, f));
+        let a = cpu.read16(t + 0x18).wrapping_add(0x4000);
+        cpu.write16(t + 0x18, a);
+    }
+}
+
+/// B+C's shot from ship `p`: the ring (its power 0). It, or 0.
+pub fn shot_bc_set(cpu: &mut Cpu, p: u32) -> u32 {
+    let s = shot_in(cpu);
+    if s == 0 {
+        return 0;
+    }
+    cpu.write32(s + BEHAVIOUR, RING_EXEC);
+    for k in 0..3 {
+        let v = cpu.read32(p + POSITION + 4 * k);
+        cpu.write32(s + POSITION + 4 * k, v);
+    }
+    let n = cpu.read8(p + NUMBER);
+    cpu.write8(s + NUMBER, n);
+    cpu.write16(s + POWER, 0);
+    cpu.write32(s + SHIP, p);
     s
 }
