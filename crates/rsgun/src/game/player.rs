@@ -416,3 +416,594 @@ fn extend(cpu: &mut Cpu, p: u32) {
     cpu.write8(at, lives);
     nested!(cpu, 0x0600_50d4, sound::se_set(cpu, SE_EXTEND));
 }
+
+/// The state's phase (the high byte of STATE: each weapon state starts at 0, waits a frame, then
+/// fires (2) and waits its reload (3)), the shots fired in the state, the frames into the phase,
+/// counts of each weapon's shots alive (bytes, the shots count themselves each frame: A, C, B,
+/// A+B, B+C, the hyper sword, all), the shot limits' flags, the sideways and upward drift (banking)
+/// and the tilt (a byte: its frame's index).
+const PHASE: u32 = 0x6c;
+const SHOTS: u32 = 0x89;
+const PHASE_FRAMES: u32 = 0x88;
+const ALIVE_A: u32 = 0x80;
+const ALIVE_C: u32 = 0x81;
+const ALIVE_B: u32 = 0x82;
+const ALIVE_AB: u32 = 0x84;
+const ALIVE_BC: u32 = 0x85;
+const ALIVE_HYPER: u32 = 0x86;
+const ALIVE_ALL: u32 = 0x87;
+const LIMITS: u32 = 0xa8;
+const LIMIT_ALL: u32 = 0x0800_0000;
+const LIMIT_EACH: u32 = 0x0400_0000;
+const MOVES_WITH_SWORD: u32 = 0x0070_0000;
+const BANK_X: u32 = 0x94;
+const BANK_Y: u32 = 0x98;
+const TILT: u32 = 0x9f;
+const ANGLE: u32 = 0x30;
+const FRAME: u32 = 0x2f;
+/// The frames by tilt (32 a row: level, moving up, faster up).
+const TILT_FRAMES: u32 = 0x0607_2700;
+/// The B+C laser's direction (by the stick when it starts) and whether it was taken.
+const AIM: u32 = 0x8e;
+const AIM_TAKEN: u32 = BYTE_8C;
+
+/// The speeds: straight (1.875 pixels a frame) and diagonal (1.5).
+const STRAIGHT: u32 = 0x1_e000;
+const DIAGONAL: u32 = 0x1_8000;
+const SCREEN_X: u32 = 0xa0_0000;
+const SCREEN_Y: u32 = 0x60_0000;
+/// The stick's bits in the pad.
+const RIGHT: u16 = 0x8000;
+const LEFT: u16 = 0x4000;
+const DOWN: u16 = 0x2000;
+const UP: u16 = 0x1000;
+
+fn neg(v: u32) -> u32 {
+    v.wrapping_neg()
+}
+
+/// A ship's move by its stick (kept on screen), its banking eased toward its motion and its frame
+/// by the tilt: banked sideways by the sideways drift, a row on for moving up (and another for
+/// moving up fast).
+pub fn move_ship(cpu: &mut Cpu, p: u32) {
+    let held = cpu.read16(p + PAD);
+    let (mut dx, mut dy) = (0u32, 0u32);
+    if held & (UP | DOWN) == 0 {
+        if held & RIGHT != 0 {
+            dx = STRAIGHT;
+        }
+        if held & LEFT != 0 {
+            dx = neg(STRAIGHT);
+        }
+    } else {
+        if held & RIGHT != 0 {
+            dx = DIAGONAL;
+        }
+        if held & LEFT != 0 {
+            dx = neg(DIAGONAL);
+        }
+        let speed = if dx == 0 { STRAIGHT } else { DIAGONAL };
+        if held & UP != 0 {
+            dy = neg(speed);
+        }
+        if held & DOWN != 0 {
+            dy = speed;
+        }
+    }
+    let x = cpu.read32(p + POSITION).wrapping_add(dx);
+    cpu.write32(p + POSITION, x);
+    let y = cpu.read32(p + POSITION + 4).wrapping_add(dy);
+    cpu.write32(p + POSITION + 4, y);
+    let x = cpu.read32(p + POSITION);
+    let x = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, x, SCREEN_X));
+    cpu.write32(p + POSITION, x);
+    let y = cpu.read32(p + POSITION + 4);
+    let y = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, y, SCREEN_Y));
+    cpu.write32(p + POSITION + 4, y);
+    let bank = cpu.read32(p + BANK_X);
+    let bank = nested!(cpu, 0x0604_6168, super::actors::approach(cpu, bank, 0, 0x100)) as i32;
+    cpu.write32(p + BANK_X, bank as u32);
+    let bank = bank.wrapping_add((dx as i32).wrapping_sub(bank) / 8);
+    cpu.write32(p + BANK_X, bank as u32);
+    let bank_y = cpu.read32(p + BANK_Y);
+    let bank_y = nested!(cpu, 0x0604_6168, super::actors::approach(cpu, bank_y, 0, 0x100));
+    cpu.write32(p + BANK_Y, bank_y);
+    let tilt = (cpu.read32(p + BANK_X) as i32 / 24576) as u8;
+    cpu.write8(p + TILT, tilt);
+    if (tilt as i8) < 0 {
+        cpu.write8(p + TILT, tilt.wrapping_add(32));
+    }
+    for past in [0x1000, 0xc000] {
+        let rising = (dy as i32).wrapping_sub(cpu.read32(p + BANK_Y) as i32);
+        if rising > past {
+            let t = cpu.read8(p + TILT).wrapping_add(32);
+            cpu.write8(p + TILT, t);
+        }
+    }
+    let bank_y = cpu.read32(p + BANK_Y) as i32;
+    cpu.write32(p + BANK_Y, bank_y.wrapping_add((dy as i32).wrapping_sub(bank_y) / 16) as u32);
+    let t = cpu.read8(p + TILT) as i8 as i32 as u32;
+    let frame = cpu.read8(TILT_FRAMES.wrapping_add(t));
+    cpu.write8(p + FRAME, frame);
+}
+
+fn phase(cpu: &mut Cpu, p: u32) -> u8 {
+    cpu.read8(p + PHASE)
+}
+
+fn set_phase(cpu: &mut Cpu, p: u32, phase: u8) {
+    cpu.write8(p + PHASE, phase);
+}
+
+/// The phase's frames counted: past `wait`, on to `next`.
+fn wait(cpu: &mut Cpu, p: u32, wait: i8, next: u8) {
+    let n = cpu.read8(p + PHASE_FRAMES).wrapping_add(1);
+    cpu.write8(p + PHASE_FRAMES, n);
+    if n as i8 > wait {
+        set_phase(cpu, p, next);
+    }
+}
+
+fn hits_at(cpu: &mut Cpu, p: u32) -> u32 {
+    WEAPON_HITS.wrapping_add((number(cpu, p) * HITS_SIZE as i32) as u32)
+}
+
+/// A weapon state's start: the B+C and A+B+C hit counts cleared (`both`, else only A+B+C's), the
+/// shots and frames cleared, on to the first wait.
+fn start(cpu: &mut Cpu, p: u32, clear_bc: bool, clear_frames: bool) {
+    let h = hits_at(cpu, p);
+    cpu.write32(h + 24, 0);
+    if clear_bc {
+        cpu.write32(h + 20, 0);
+    }
+    cpu.write8(p + SHOTS, 0);
+    if clear_frames {
+        cpu.write8(p + PHASE_FRAMES, 0);
+    }
+    set_phase(cpu, p, 1);
+}
+
+/// Whether the shots alive are at a limit: all of them (`all` counted past `most`, with the
+/// limit on all) or this weapon's (`each`).
+fn at_limit(cpu: &mut Cpu, p: u32, each: u32, most: i8) -> bool {
+    let limits = cpu.read32(p + LIMITS);
+    (limits & LIMIT_ALL != 0 && cpu.read8(p + ALIVE_ALL) as i8 > most) || (limits & LIMIT_EACH != 0 && cpu.read8(p + each) as i8 > most)
+}
+
+/// A shot fired: its sound and its maker, counted; on to the reload.
+fn fire(cpu: &mut Cpu, p: u32, se: u32, maker: u32) {
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, se));
+    cpu.call(maker, &[p]);
+    fired(cpu, p);
+}
+
+fn fired(cpu: &mut Cpu, p: u32) {
+    let n = cpu.read8(p + SHOTS).wrapping_add(1);
+    cpu.write8(p + SHOTS, n);
+    cpu.write8(p + PHASE_FRAMES, 0);
+    set_phase(cpu, p, 3);
+}
+
+/// The shots' makers (not rewritten yet).
+const SHOT_A: u32 = 0x0604_860c;
+const SHOT_C: u32 = 0x0604_8d84;
+const SHOT_B: u32 = 0x0604_965c;
+const SHOT_AC: u32 = 0x0604_a854;
+const SHOT_AB: u32 = 0x0604_aa98;
+const SHOT_BC: u32 = 0x0604_bdf8;
+const SWORD_SET: u32 = 0x0604_c9a4;
+const HYPER_SET: u32 = 0x0604_d444;
+
+/// Weapon A (state 4): up to 15 shots alive, one each 5 frames.
+pub fn weapon_a(cpu: &mut Cpu, p: u32) {
+    nested!(cpu, 0x0604_6900, move_ship(cpu, p));
+    match phase(cpu, p) {
+        0 | 1 => {
+            if phase(cpu, p) == 0 {
+                start(cpu, p, true, true);
+            }
+            wait(cpu, p, 0, 2);
+        }
+        2 => {
+            if !at_limit(cpu, p, ALIVE_A, 14) {
+                fire(cpu, p, 2, SHOT_A);
+            }
+        }
+        3 => wait(cpu, p, 4, 2),
+        _ => {}
+    }
+}
+
+/// Weapon C (state 5): up to 13 shots alive, one each 7 frames.
+pub fn weapon_c(cpu: &mut Cpu, p: u32) {
+    nested!(cpu, 0x0604_6900, move_ship(cpu, p));
+    match phase(cpu, p) {
+        0 | 1 => {
+            if phase(cpu, p) == 0 {
+                start(cpu, p, true, true);
+            }
+            wait(cpu, p, 0, 2);
+        }
+        2 => {
+            if !at_limit(cpu, p, ALIVE_C, 12) {
+                fire(cpu, p, 4, SHOT_C);
+            }
+        }
+        3 => wait(cpu, p, 6, 2),
+        _ => {}
+    }
+}
+
+/// Weapon B (state 6): up to 5 shots alive (with two buttons, under 7.5: the source's double),
+/// one each 24 frames.
+pub fn weapon_b(cpu: &mut Cpu, p: u32) {
+    nested!(cpu, 0x0604_6900, move_ship(cpu, p));
+    match phase(cpu, p) {
+        0 | 1 => {
+            if phase(cpu, p) == 0 {
+                start(cpu, p, true, true);
+            }
+            wait(cpu, p, 0, 2);
+        }
+        2 => {
+            let three_buttons = super::globals::bios_setting_is_1(cpu);
+            let limits = cpu.read32(p + LIMITS);
+            let over = |cpu: &mut Cpu, three: u32| {
+                if three_buttons {
+                    cpu.read8(p + three) as i8 > 4
+                } else {
+                    cpu.read8(p + ALIVE_ALL) as i8 as f64 >= 7.5
+                }
+            };
+            if limits & LIMIT_ALL != 0 && over(cpu, ALIVE_ALL) {
+                return;
+            }
+            if cpu.read32(p + LIMITS) & LIMIT_EACH != 0 && over(cpu, ALIVE_B) {
+                return;
+            }
+            fire(cpu, p, 7, SHOT_B);
+        }
+        3 => wait(cpu, p, 23, 2),
+        _ => {}
+    }
+}
+
+/// A+C (state 7): its shot once (the shot keeps itself up while the buttons are held).
+pub fn weapon_ac(cpu: &mut Cpu, p: u32) {
+    nested!(cpu, 0x0604_6900, move_ship(cpu, p));
+    match phase(cpu, p) {
+        0 | 1 => {
+            if phase(cpu, p) == 0 {
+                start(cpu, p, true, false);
+            }
+            wait(cpu, p, 0, 2);
+        }
+        2 => {
+            cpu.call(SHOT_AC, &[p]);
+            set_phase(cpu, p, 3);
+        }
+        _ => {}
+    }
+}
+
+/// The weapon levels' third (each player's three) that A+B's limit grows with.
+const LEVEL_AB: u32 = LEVELS + 2;
+
+/// A+B (state 8): its shots one each 7 frames, up to 16 alive (24 from level 8, 32 from level 24).
+pub fn weapon_ab(cpu: &mut Cpu, p: u32) {
+    nested!(cpu, 0x0604_6900, move_ship(cpu, p));
+    match phase(cpu, p) {
+        0 | 1 => {
+            if phase(cpu, p) == 0 {
+                start(cpu, p, true, true);
+            }
+            wait(cpu, p, 0, 2);
+        }
+        2 => {
+            let n = number(cpu, p);
+            let level = cpu.read8(LEVEL_AB.wrapping_add((n * 3) as u32)) as i8;
+            let most = if level <= 7 { 4 } else if level <= 23 { 6 } else { 8 } * 4;
+            let limits = cpu.read32(p + LIMITS);
+            if limits & LIMIT_ALL != 0 && cpu.read8(p + ALIVE_ALL) as i8 as i32 >= most {
+                return;
+            }
+            if limits & LIMIT_EACH != 0 && cpu.read8(p + ALIVE_AB) as i8 as i32 >= most {
+                return;
+            }
+            cpu.call(SHOT_AB, &[p]);
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 3));
+            fired(cpu, p);
+        }
+        3 => wait(cpu, p, 6, 2),
+        _ => {}
+    }
+}
+
+/// B+C's directions by the stick (0 up, clockwise: a stick held as it starts; up alone keeps 0).
+const AIMS: [(u16, u16); 7] = [(0x5000, 0xe000), (0x2000, 0x8000), (0x4000, 0xc000), (0x6000, 0xa000), (0x8000, 0x4000), (0x9000, 0x2000), (0xa000, 0x6000)];
+
+/// B+C (state 9): its laser aimed by the stick as the state starts (unless it was aimed already),
+/// one at a time, each 29 frames.
+pub fn weapon_bc(cpu: &mut Cpu, p: u32) {
+    nested!(cpu, 0x0604_6900, move_ship(cpu, p));
+    match phase(cpu, p) {
+        0 | 1 => {
+            if phase(cpu, p) == 0 {
+                let h = hits_at(cpu, p);
+                cpu.write32(h + 24, 0);
+                if cpu.read8(p + AIM_TAKEN) == 0 {
+                    let stick = cpu.read16(p + PAD) & 0xf000;
+                    let aim = AIMS.iter().find(|&&(s, _)| s == stick).map_or(0, |&(_, a)| a);
+                    cpu.write16(p + AIM, aim);
+                }
+                cpu.write8(p + AIM_TAKEN, 1);
+                cpu.write8(p + SHOTS, 0);
+                cpu.write8(p + PHASE_FRAMES, 0);
+                set_phase(cpu, p, 1);
+            }
+            wait(cpu, p, 0, 2);
+        }
+        2 => {
+            if cpu.read8(p + ALIVE_BC) as i8 > 0 {
+                return;
+            }
+            cpu.call(SHOT_BC, &[p]);
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 5));
+            fired(cpu, p);
+        }
+        3 => wait(cpu, p, 28, 2),
+        _ => {}
+    }
+}
+
+/// The sword (state 10): moving only if the ship's limits allow; a swing once (when the sword
+/// can be made), then held.
+pub fn sword_state(cpu: &mut Cpu, p: u32) {
+    if cpu.read32(p + LIMITS) & MOVES_WITH_SWORD != 0 {
+        nested!(cpu, 0x0604_6900, move_ship(cpu, p));
+    }
+    match phase(cpu, p) {
+        0 | 1 => {
+            if phase(cpu, p) == 0 {
+                let h = hits_at(cpu, p);
+                cpu.write32(h + 20, 0);
+                cpu.write8(p + SHOTS, 0);
+                cpu.write8(p + PHASE_FRAMES, 0);
+                set_phase(cpu, p, 1);
+            }
+            wait(cpu, p, 0, 2);
+        }
+        2 => {
+            if cpu.call(SWORD_SET, &[p]) == 0 {
+                return;
+            }
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 9));
+            let n = cpu.read8(p + SHOTS).wrapping_add(1);
+            cpu.write8(p + SHOTS, n);
+            cpu.write8(p + PHASE_FRAMES, 0);
+            set_phase(cpu, p, 4);
+        }
+        3 => wait(cpu, p, -1, 2),
+        _ => {}
+    }
+}
+
+/// The hyper sword's own aura.
+const HYPER_AURA_EXEC: u32 = 0x0604_7228;
+const HYPER_AURA_FRAME: u8 = 64;
+/// The frames the ship stays hurt (blinking, not hit) after the hyper sword.
+const AFTER_HYPER: u16 = 30;
+
+/// The hyper sword (state 11): its aura, the ship not hurt, the gauge down to half; the hyper
+/// sword once (when it can be made); when its shots are gone, the ship hurt (blinking) for 30
+/// frames and back to no weapon.
+pub fn hyper_state(cpu: &mut Cpu, p: u32) {
+    if cpu.read32(p + LIMITS) & MOVES_WITH_SWORD != 0 {
+        nested!(cpu, 0x0604_6900, move_ship(cpu, p));
+    }
+    match phase(cpu, p) {
+        0 | 1 => {
+            if phase(cpu, p) == 0 {
+                let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, AURA_SIZE)) as i8 as i32 as u32;
+                let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 1, blocks, PLAIN_EXEC));
+                if o != 0 {
+                    nested!(cpu, 0x0604_dd50, effects::actor_init(cpu, o));
+                    cpu.write32(o + 0x38, HYPER_AURA_EXEC);
+                    cpu.write8(o + 0x2e, AURA_KIND);
+                    cpu.write8(o + 0x2f, HYPER_AURA_FRAME);
+                    cpu.write8(o + LIFT, 4);
+                    let colour = cpu.read16(CHAR_BASE).wrapping_add(AURA_COLOUR);
+                    cpu.write16(o + 0x2a, colour);
+                    cpu.write16(o + 0x28, colour);
+                    let n = cpu.read8(p + NUMBER);
+                    cpu.write8(o + NUMBER, n);
+                    cpu.write32(o + AURA_OF, p);
+                }
+                let h = hits_at(cpu, p);
+                cpu.write32(h + 20, 0);
+                let flags = cpu.read32(p + FLAGS) | UNHURT;
+                cpu.write32(p + FLAGS, flags);
+                cpu.write32(p + GAUGE, GAUGE_HALF);
+                cpu.write8(p + HYPER_READY, 0);
+                cpu.write8(p + SHOTS, 0);
+                cpu.write8(p + PHASE_FRAMES, 0);
+                set_phase(cpu, p, 1);
+            }
+            wait(cpu, p, 0, 2);
+        }
+        2 => {
+            if cpu.call(HYPER_SET, &[p]) == 0 {
+                return;
+            }
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 10));
+            fired(cpu, p);
+        }
+        3 => {
+            let limits = cpu.read32(p + LIMITS);
+            if limits & LIMIT_ALL != 0 && cpu.read8(p + ALIVE_ALL) != 0 {
+                return;
+            }
+            if limits & LIMIT_EACH != 0 && cpu.read8(p + ALIVE_HYPER) != 0 {
+                return;
+            }
+            let flags = cpu.read32(p + FLAGS) & !UNHURT;
+            cpu.write32(p + FLAGS, flags);
+            cpu.write16(p + HURT, AFTER_HYPER);
+            cpu.write16(p + STATE, NO_WEAPON as u16);
+        }
+        _ => {}
+    }
+}
+
+/// The hit flags' fields and the bytes a ship's start clears.
+const HIT_58: u32 = 0x58;
+const NO_HITS: u32 = 0x8_0000;
+
+/// A ship's start (state 0): hittable, its banking and tilt none, its chains reset; no weapon.
+pub fn ship_start(cpu: &mut Cpu, p: u32) {
+    let flags = cpu.read32(p + FLAGS) & !NO_HITS;
+    cpu.write32(p + FLAGS, flags);
+    cpu.write16(p + HIT_58, 0);
+    cpu.write8(p + HYPER_READY, 0);
+    cpu.write32(p + BANK_Y, 0);
+    cpu.write32(p + BANK_X, 0);
+    for field in [0x9c, 0x9e, TILT] {
+        cpu.write8(p + field, 0);
+    }
+    let n = number(cpu, p) as u32;
+    nested!(cpu, 0x0604_5090, hits::chain_reset(cpu, n));
+    cpu.write16(p + STATE, NO_WEAPON as u16);
+}
+
+/// The ship's entry: its frames left (a word) and its climb toward the screen (z per frame).
+const ENTRY_LEFT: u32 = 0x6e;
+const CLIMB: u32 = 0x70;
+const ENTRY_FRAMES: u32 = 60;
+const ENTRY_JET: u32 = 0x0606_23d4;
+/// Where each player comes in from (x, and the sideways drift that brings it in), the depth and
+/// height it starts at, its start upward drift; then it blinks for 180 frames.
+const ENTRY_X: [(u32, u32); 2] = [(0x30_0000, 0xfffe_6667), (0xffd0_0000, 0x1_9999)];
+const ENTRY_Y: u32 = 0x100_0000;
+const ENTRY_Z: u32 = 0xff40_0000;
+const ENTRY_BANK_Y: u32 = 0xfff1_0000;
+const AFTER_ENTRY: u16 = 180;
+
+/// A ship coming in (state 1): started below the screen and away from it (with its jet), it flies
+/// up into place over 60 frames (sideways by the stick), then blinks and takes no weapon.
+pub fn ship_entry(cpu: &mut Cpu, p: u32) {
+    match phase(cpu, p) as i8 {
+        0 => {
+            nested!(cpu, 0x0604_66d4, ship_start(cpu, p));
+            let flags = cpu.read32(p + FLAGS) | NO_HITS;
+            cpu.write32(p + FLAGS, flags);
+            let n = cpu.read8(p + NUMBER);
+            if (n as usize) < ENTRY_X.len() {
+                let (x, drift) = ENTRY_X[n as usize];
+                cpu.write32(p + POSITION, x);
+                cpu.write32(p + BANK_X, drift);
+            }
+            cpu.write32(p + POSITION + 4, ENTRY_Y);
+            cpu.write32(p + POSITION + 8, ENTRY_Z);
+            cpu.write32(p + BANK_Y, ENTRY_BANK_Y);
+            let z = cpu.read32(p + POSITION + 8) as i32;
+            cpu.write32(p + CLIMB, (z.wrapping_neg() / ENTRY_FRAMES as i32) as u32);
+            cpu.call(ENTRY_JET, &[p, ENTRY_FRAMES]);
+            cpu.write16(p + ENTRY_LEFT, ENTRY_FRAMES as u16);
+            cpu.write16(p + HURT, 0);
+            cpu.write8(p + STATE_LOW, 1);
+            set_phase(cpu, p, 1);
+        }
+        1 => {
+            let up = cpu.read32(p + BANK_Y);
+            let up = nested!(cpu, 0x0604_6168, super::actors::approach(cpu, up, 0x8_0000, 0x6000));
+            cpu.write32(p + BANK_Y, up);
+            for (k, field) in [BANK_X, BANK_Y, CLIMB].into_iter().enumerate() {
+                let v = cpu.read32(p + POSITION + 4 * k as u32).wrapping_add(cpu.read32(p + field));
+                cpu.write32(p + POSITION + 4 * k as u32, v);
+            }
+            let held = cpu.read16(p + PAD);
+            if held & RIGHT != 0 {
+                let x = cpu.read32(p + POSITION).wrapping_add(STRAIGHT);
+                cpu.write32(p + POSITION, x);
+            }
+            if held & LEFT != 0 {
+                let x = cpu.read32(p + POSITION).wrapping_add(neg(STRAIGHT));
+                cpu.write32(p + POSITION, x);
+            }
+            let x = cpu.read32(p + POSITION);
+            let x = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, x, SCREEN_X));
+            cpu.write32(p + POSITION, x);
+            let left = cpu.read16(p + ENTRY_LEFT).wrapping_sub(1);
+            cpu.write16(p + ENTRY_LEFT, left);
+            let left = cpu.read16(p + ENTRY_LEFT) as i16 as i32 as u32;
+            let i = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, left, 32));
+            let frame = cpu.read8(TILT_FRAMES.wrapping_add(i));
+            cpu.write8(p + FRAME, frame);
+            if cpu.read16(p + ENTRY_LEFT) as i16 <= 0 {
+                cpu.write32(p + BANK_Y, 0);
+                cpu.write32(p + BANK_X, 0);
+                cpu.write32(p + POSITION + 8, 0);
+                cpu.write16(p + HURT, AFTER_ENTRY);
+                let flags = cpu.read32(p + FLAGS) & !NO_HITS;
+                cpu.write32(p + FLAGS, flags);
+                cpu.write8(p + TILT, 0);
+                cpu.write16(p + STATE, NO_WEAPON as u16);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The ship's death: its explosion (effect_set's struct, an animation linked), its sound, the
+/// death counted in its PLAY_DATA; 20 frames later the ship ends.
+const DEATH_FRAMES: u32 = 0x6e;
+const EXPLOSION: u32 = 0x0607_2bbc;
+const SE_DEATH: u32 = 56;
+const PD_DEATHS: u32 = 0x10;
+const DEATH_WAIT: i16 = 19;
+const OBJ_MODE: u32 = 3;
+const ENDING: u8 = 0x70;
+
+/// A ship dead (state 2).
+pub fn ship_dead(cpu: &mut Cpu, p: u32) {
+    match phase(cpu, p) as i8 {
+        0 => {
+            let f = cpu.stack();
+            for k in 0..3 {
+                let v = cpu.read32(p + POSITION + 4 * k);
+                cpu.write32(f + 4 * k, v);
+            }
+            cpu.write32(f + 0x10, 0x8000);
+            cpu.write32(f + 0x0c, 0x8000);
+            cpu.write32(f + 0x14, 3);
+            let a = cpu.read16(p + ANGLE);
+            cpu.write16(f + 0x18, a);
+            cpu.write16(f + 0x24, 0);
+            for field in [0x26, 0x1c, 0x1d] {
+                cpu.write8(f + field, 0);
+            }
+            let colour = cpu.read16(CHAR_BASE).wrapping_add(0x90);
+            cpu.write16(f + 0x20, colour);
+            let n = cpu.read8(p + NUMBER);
+            cpu.write8(f + 0x1e, n);
+            cpu.write32(f + 0x28, EXPLOSION);
+            cpu.write32(f + 0x3c, 0);
+            nested!(cpu, 0x0604_e1cc, effects::effect_set(cpu, f));
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, SE_DEATH));
+            let at = play_data(cpu, p) + PD_DEATHS;
+            let d = cpu.read8(at).wrapping_add(1);
+            cpu.write8(at, d);
+            cpu.write16(p + DEATH_FRAMES, 0);
+            set_phase(cpu, p, 1);
+        }
+        1 => {
+            let n = cpu.read16(p + DEATH_FRAMES).wrapping_add(1);
+            cpu.write16(p + DEATH_FRAMES, n);
+            if n as i16 > DEATH_WAIT {
+                cpu.write16(p + STATE, NO_WEAPON as u16);
+                cpu.write8(p + OBJ_MODE, ENDING);
+            }
+        }
+        _ => {}
+    }
+}
