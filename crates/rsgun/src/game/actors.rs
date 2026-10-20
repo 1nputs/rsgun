@@ -61,17 +61,29 @@ pub fn approach(_cpu: &mut Cpu, from: u32, to: u32, step: u32) -> u32 {
     }
 }
 
+/// A numbered actor's further ending modes: ENDING_KEEP (its number kept) goes to FREE, which is
+/// freed; ENDED clears its number first.
+const ENDING_KEEP: u8 = 0x71;
+const FREE: u8 = 0x72;
+/// The numbered objects (their number at +0x32).
+const NUMBERED: u32 = 0x0607_40f0;
+const NUMBER: u32 = 0x32;
+
+/// A new actor starts running (not while the game is held): whether it runs this frame.
+fn start(cpu: &mut Cpu, actor: u32) -> bool {
+    if cpu.read32(GAME_FLAGS) & HELD != 0 {
+        return false;
+    }
+    cpu.write8(actor + OBJ_MODE, 1);
+    true
+}
+
 /// An actor's frame (its exec): while the game is not held, its behaviour (unless it ends by the
 /// flags), the flash, its boxes registered; then its colour or model for the flash, and drawn.
 pub fn actor_exec(cpu: &mut Cpu, actor: u32) {
     match cpu.read8(actor + OBJ_MODE) {
         1 => {}
-        0 => {
-            if cpu.read32(GAME_FLAGS) & HELD != 0 {
-                return;
-            }
-            cpu.write8(actor + OBJ_MODE, 1);
-        }
+        0 if start(cpu, actor) => {}
         ENDING => {
             cpu.write8(actor + OBJ_MODE, ENDED);
             return;
@@ -82,6 +94,69 @@ pub fn actor_exec(cpu: &mut Cpu, actor: u32) {
         }
         _ => return,
     }
+    actor_frame(cpu, actor);
+}
+
+/// A numbered actor's frame (one with a number among the numbered objects): as actor_exec's, but
+/// ending it frees its number (or, ending by ENDING_KEEP, keeps it).
+pub fn numbered_exec(cpu: &mut Cpu, actor: u32) {
+    match cpu.read8(actor + OBJ_MODE) {
+        1 => {}
+        0 if start(cpu, actor) => {}
+        ENDING => {
+            cpu.write8(actor + OBJ_MODE, ENDED);
+            return;
+        }
+        ENDING_KEEP => {
+            cpu.write8(actor + OBJ_MODE, FREE);
+            return;
+        }
+        FREE => {
+            objects::obj_free(cpu, actor);
+            return;
+        }
+        ENDED => {
+            let n = cpu.read8(actor + NUMBER) as i8 as i32;
+            cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), 0);
+            objects::obj_free(cpu, actor);
+            return;
+        }
+        _ => return,
+    }
+    actor_frame(cpu, actor);
+}
+
+/// A plain actor's frame (no boxes, no flash): while the game is not held, its behaviour (unless it
+/// ends by the flags); drawn.
+pub fn plain_exec(cpu: &mut Cpu, actor: u32) {
+    match cpu.read8(actor + OBJ_MODE) {
+        1 => {}
+        0 if start(cpu, actor) => {}
+        ENDING => {
+            cpu.write8(actor + OBJ_MODE, ENDED);
+            return;
+        }
+        ENDED => {
+            objects::obj_free(cpu, actor);
+            return;
+        }
+        _ => return,
+    }
+    if cpu.read32(GAME_FLAGS) & HELD == 0 {
+        if nested!(cpu, END_BY_FLAGS, end_by_flags(cpu, actor)) != 0 {
+            return;
+        }
+        let behaviour = cpu.read32(actor + BEHAVIOUR);
+        cpu.call(behaviour, &[actor]);
+        if cpu.read8(actor + OBJ_MODE) as i8 >= ENDING as i8 {
+            return;
+        }
+    }
+    nested!(cpu, DRAW, sprites::draw(cpu, actor + SPRITE));
+}
+
+/// The running actor's frame (actor_exec's and numbered_exec's).
+fn actor_frame(cpu: &mut Cpu, actor: u32) {
     if cpu.read32(GAME_FLAGS) & HELD == 0 {
         if nested!(cpu, END_BY_FLAGS, end_by_flags(cpu, actor)) != 0 {
             return;
@@ -120,4 +195,61 @@ pub fn actor_exec(cpu: &mut Cpu, actor: u32) {
         cpu.write32(actor + MODEL, model);
     }
     nested!(cpu, DRAW, sprites::draw(cpu, actor + SPRITE));
+}
+
+/// An animation (a script of frame, frames-to-show byte pairs, 0xff to end): the script at +0x4c,
+/// the frames left of the current at +0x50, the sprite's frame at +0x2f.
+const SCRIPT: u32 = 0x4c;
+const SHOWN_LEFT: u32 = 0x50;
+const SPRITE_FRAME: u32 = 0x2f;
+const SCRIPT_END: u8 = 0xff;
+
+/// One frame of `actor`'s animation: the next frame taken when the current's time is out (the
+/// script's end ends the actor): 1 at the end, else 0.
+pub fn anim_step(cpu: &mut Cpu, actor: u32) -> u32 {
+    if cpu.read8(actor + SHOWN_LEFT) as i8 <= 0 {
+        let script = cpu.read32(actor + SCRIPT);
+        let frame = cpu.read8(script);
+        cpu.write8(actor + SPRITE_FRAME, frame);
+        if frame == SCRIPT_END {
+            cpu.write8(actor + OBJ_MODE, ENDING);
+            return 1;
+        }
+        let script = cpu.read32(actor + SCRIPT);
+        let time = cpu.read8(script + 1);
+        cpu.write8(actor + SHOWN_LEFT, time);
+        let script = cpu.read32(actor + SCRIPT);
+        cpu.write32(actor + SCRIPT, script + 2);
+    }
+    let left = cpu.read8(actor + SHOWN_LEFT);
+    cpu.write8(actor + SHOWN_LEFT, left.wrapping_sub(1));
+    0
+}
+
+/// A drifting effect's behaviour: animated, moved by its speed (+0x54, +0x58) which its
+/// acceleration (+0x5c, +0x60) changes; ended once the screen is handed over (the director's flag
+/// bit 3).
+const SPEED: u32 = 0x54;
+const ACCEL: u32 = 0x5c;
+const POSITION: u32 = 0x14;
+const HANDED_OVER: u32 = 8;
+const DIRECTOR_FLAGS: u32 = 0x0604_0cb4;
+const ANIM_STEP: u32 = 0x0605_73a0;
+
+pub fn drift(cpu: &mut Cpu, actor: u32) {
+    if nested!(cpu, DIRECTOR_FLAGS, super::director::director_flags(cpu)) & HANDED_OVER != 0 {
+        cpu.write8(actor + OBJ_MODE, ENDING);
+        return;
+    }
+    nested!(cpu, ANIM_STEP, anim_step(cpu, actor));
+    for k in 0..2 {
+        let v = cpu.read32(actor + SPEED + 4 * k);
+        let p = cpu.read32(actor + POSITION + 4 * k);
+        cpu.write32(actor + POSITION + 4 * k, p.wrapping_add(v));
+    }
+    for k in 0..2 {
+        let a = cpu.read32(actor + ACCEL + 4 * k);
+        let v = cpu.read32(actor + SPEED + 4 * k);
+        cpu.write32(actor + SPEED + 4 * k, v.wrapping_add(a));
+    }
 }

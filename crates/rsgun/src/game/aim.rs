@@ -20,6 +20,11 @@ const HISTORY_FRAMES: i32 = 32;
 const LENGTH: u32 = 0x0604_5e60;
 const DISTANCE: u32 = 0x0604_5ee4;
 const TARGET: u32 = 0x0604_0ccc;
+const TURN_SIGN: u32 = 0x0605_6554;
+const ANGLE_BETWEEN: u32 = 0x0605_6580;
+const QUOTIENT: u32 = 0x0600_6a78;
+const APPROACH: u32 = 0x0604_6168;
+const AREA_FLAGS: u32 = 0x0605_69f8;
 
 /// SGL's (as far as can be told): the angle of a vector (x, y), and the sine and cosine of an
 /// angle.
@@ -195,4 +200,78 @@ pub fn nearest(cpu: &mut Cpu, obj: u32, out: u32) -> u32 {
         cpu.write32(out, nearest as u32);
     }
     best
+}
+
+/// Which way from `b` to `a` is the shorter turn (angles, 16 bits): 1 one way, -1 the other.
+pub fn turn_sign(_cpu: &mut Cpu, a: u32, b: u32) -> u32 {
+    let (a, b) = (a as i32, b as i32);
+    let d = a.wrapping_sub(b);
+    let sign = if a >= b { if d > 0x7fff { -1 } else { 1 } } else if d > -0x8000 { -1 } else { 1 };
+    sign as u32
+}
+
+/// `b - a` as angles (16 bits), wrapped by which side of `a` a quarter turn lies on.
+pub fn angle_between(cpu: &mut Cpu, a: u32, b: u32) -> u32 {
+    let (a, b) = ((a & 0xffff) as i32, (b & 0xffff) as i32);
+    let mut d = b - a;
+    let quarter = if nested!(cpu, TURN_SIGN, turn_sign(cpu, b as u32, a as u32)) as i32 > 0 { a - 0x4000 } else { a + 0x4000 };
+    if d > 0 {
+        if quarter < b && quarter > a {
+            d -= 0x1_0000;
+        }
+    } else if d < 0 && quarter > b && quarter < a {
+        d += 0x1_0000;
+    }
+    d as i16 as i32 as u32
+}
+
+/// Where a sprite's position (x, y at +4, +8 of `s`) lies against a box: bit 0 above `top`, 1 below
+/// `bottom`, 2 left of `left`, 3 right of `right` (16.16).
+pub fn area_flags(cpu: &mut Cpu, s: u32, top: u32, bottom: u32, left: u32, right: u32) -> u32 {
+    let y = cpu.read32(s + 8) as i32;
+    let mut f = (y < top as i32) as u32;
+    if y > bottom as i32 {
+        f |= 2;
+    }
+    let x = cpu.read32(s + 4) as i32;
+    if x < left as i32 {
+        f |= 4;
+    }
+    if x > right as i32 {
+        f |= 8;
+    }
+    f
+}
+
+/// The screen's edges (16.16 from its centre: top, bottom, left, right).
+const SCREEN: [u32; 4] = [0xff80_0000, 0x0080_0000, 0xff50_0000, 0x00b0_0000];
+
+/// area_flags against the screen.
+pub fn off_screen(cpu: &mut Cpu, s: u32) -> u32 {
+    let f = cpu.nested_with_stack(&AREA_FLAGS_PROLOGUE, AREA_FLAGS, &[SCREEN[3]], |cpu| area_flags(cpu, s, SCREEN[0], SCREEN[1], SCREEN[2], SCREEN[3]));
+    f & 0xff
+}
+static AREA_FLAGS_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
+
+/// Turns the angle at `angle` from `from` toward `to` (16-bit angles; words at `angle` and `speed`):
+/// the turn left (at most `most`), the turning speed eased toward that over `ease` (its sign the
+/// turn's) by at most `accel`, the angle moved by the speed but not past the turn.
+#[allow(clippy::too_many_arguments)]
+pub fn turn_toward(cpu: &mut Cpu, angle: u32, speed: u32, from: u32, to: u32, most: u32, ease: u32, accel: u32) {
+    let (from, to) = (from & 0xffff, to & 0xffff);
+    let most = most & 0xffff;
+    let ease = ease as i16 as i32;
+    let accel = accel as i16 as i32;
+    let d = nested!(cpu, ANGLE_BETWEEN, angle_between(cpu, from, to)) as i16 as i32;
+    let left = (d.unsigned_abs() & 0xffff).min(most);
+    let sign = nested!(cpu, TURN_SIGN, turn_sign(cpu, to, from)) as i32;
+    let by = if sign > 0 { ease } else { -ease };
+    let target = nested!(cpu, QUOTIENT, math::quotient(cpu, left, by as u32));
+    let s = cpu.read16(speed) as i16 as i32 as u32;
+    let s = nested!(cpu, APPROACH, super::actors::approach(cpu, s, target, accel as u32));
+    cpu.write16(speed, s as u16);
+    let a = cpu.read16(angle) as i16 as i32 as u32;
+    let s = cpu.read16(speed) as i16 as i32 as u32;
+    let a = nested!(cpu, APPROACH, super::actors::approach(cpu, a, s, left));
+    cpu.write16(angle, a as u16);
 }

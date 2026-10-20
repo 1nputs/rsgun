@@ -373,3 +373,14 @@ pub fn draw(cpu: &mut Cpu, s: u32) {
         cpu.write32(s + FLAGS, flags | OFF_SCREEN);
     }
 }
+
+/// A sprite struct set up: no flags, scales one (x, y, and the long after: a model's z scale), the
+/// turns and angle none.
+pub fn sprite_init(cpu: &mut Cpu, s: u32) {
+    cpu.write32(s + FLAGS, 0);
+    for field in [SCALE_Y, SCALE_X, SCALE_Y + 4] {
+        cpu.write32(s + field, 0x1_0000);
+    }
+    cpu.write32(s + 0x1c, 0);
+    cpu.write16(s + ANGLE, 0);
+}

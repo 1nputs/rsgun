@@ -15,6 +15,7 @@ mod camera;
 mod clib;
 mod director;
 mod dma;
+mod effects;
 mod files;
 mod globals;
 mod hits;
@@ -25,6 +26,7 @@ mod objects;
 mod pads;
 mod play;
 mod palette;
+mod parts;
 mod screen;
 mod sound;
 mod sprites;
@@ -93,6 +95,20 @@ impl Cpu<'_> {
     /// prologue's, see [`Prologue`]), where a struct it hands a callee by address goes.
     pub fn stack(&self) -> u32 {
         self.sh2.r[15]
+    }
+
+    /// `nested` for a callee that takes arguments past the fourth: `stack_args` pushed first (the
+    /// fifth at the stack pointer), as the SH-2 code pushes them before the call.
+    pub fn nested_with_stack<R>(&mut self, prologue: &std::sync::OnceLock<Prologue>, entry: u32, stack_args: &[u32], f: impl FnOnce(&mut Cpu) -> R) -> R {
+        let sp = self.sh2.r[15];
+        let top = sp.wrapping_sub(4 * stack_args.len() as u32);
+        for (i, &a) in stack_args.iter().enumerate() {
+            self.bus.write32(top.wrapping_add(4 * i as u32), a);
+        }
+        self.sh2.r[15] = top;
+        let r = self.nested(prologue, entry, f);
+        self.sh2.r[15] = sp;
+        r
     }
 
     /// Runs `f` (a rewrite called by another) as the SH-2 function at `entry` runs when called:
@@ -204,7 +220,7 @@ pub(crate) use nested;
 /// SH-2 code had it; some hand the video chips' DMA a buffer of theirs on it), moves the
 /// arguments from r4-r7 and the result to r0, and returns to PR.
 macro_rules! rewrites {
-    ($n:ident; $($entry:literal => $f:path [$($arg:ident),*] -> $ret:tt),* $(,)?) => {
+    ($n:ident; $($entry:literal => $f:path [$($arg:ident),* $(; $($sarg:ident),+)?] -> $ret:tt),* $(,)?) => {
         $(
             $n.register_as(
                 $entry,
@@ -214,9 +230,13 @@ macro_rules! rewrites {
                     #[allow(unused_mut, unused_variables)]
                     let mut args = sh2.r[4..8].iter().copied();
                     $( let $arg = args.next().unwrap_or(0); )*
+                    // arguments past the fourth: on the stack, the fifth at the stack pointer
+                    #[allow(unused_mut, unused_variables)]
+                    let mut at = sp;
+                    $($( #[allow(unused_assignments)] let $sarg = { let v = bus.read32(at); at = at.wrapping_add(4); v }; )+)?
                     let prologue = PROLOGUE.get_or_init(|| Prologue::read(&mut *bus, $entry));
                     sh2.r[15] = prologue.enter(sh2, &mut *bus);
-                    let result = $f(&mut Cpu { sh2: &mut *sh2, bus }, $($arg),*);
+                    let result = $f(&mut Cpu { sh2: &mut *sh2, bus }, $($arg),* $(, $($sarg),+)?);
                     rewrites!(@result sh2, result, $ret);
                     sh2.r[15] = sp;
                     sh2.pc = ret;
@@ -399,6 +419,20 @@ pub fn register(n: &mut Natives) {
         0x0604_0960 => sprites::draw[s] -> (),
         0x0604_6138 => actors::end_by_flags[actor] -> u32,
         0x0604_6168 => actors::approach[from, to, step] -> u32,
+        0x0604_dcb4 => actors::plain_exec[actor] -> (),
+        0x0604_d600 => actors::numbered_exec[actor] -> (),
+        0x0604_6264 => sprites::sprite_init[s] -> (),
+        0x0605_6554 => aim::turn_sign[a, b] -> u32,
+        0x0605_6580 => aim::angle_between[a, b] -> u32,
+        0x0605_69f8 => aim::area_flags[s, top, bottom, left; right] -> u32,
+        0x0605_6a24 => aim::off_screen[s] -> u32,
+        0x0605_70d8 => aim::turn_toward[angle, speed, from, to; most, ease, accel] -> (),
+        0x0605_73a0 => actors::anim_step[actor] -> u32,
+        0x0605_73f0 => actors::drift[actor] -> (),
+        0x0605_6cc8 => parts::part_exec[part] -> (),
+        0x0604_dd50 => effects::actor_init[actor] -> (),
+        0x0604_6530 => effects::link_init[link, to] -> (),
+        0x0604_e1cc => effects::effect_set[fx] -> u32,
         0x0604_d780 => actors::actor_exec[actor] -> (),
         0x0604_3d38 => hits::hits_exec[hits] -> (),
         0x0604_5d78 => math::random_seed[seed] -> (),
