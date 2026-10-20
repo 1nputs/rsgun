@@ -1,13 +1,13 @@
 //! Radiant Silvergun on the ST-V runtime: the machine in a window, the keyboard and pads as the
 //! cabinet's controls, the settings EEPROM and backup RAM kept between runs.
 //!
-//!     rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth]
-//!     rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--rom DIR] [--save DIR]
+//!     rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute]
+//!     rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--rom DIR] [--save DIR]
 //!
 //! `--rom`: the images tools/rom/mkcart.py makes (default build/rom). `--save`: where the EEPROM
 //! and backup RAM are kept (default $XDG_DATA_HOME/rsgun or ~/.local/share/rsgun). `--script`:
 //! an input script (controls.rs) played instead of the keyboard and pads. `--headless`: no window;
-//! runs N frames and writes the last picture (`--shot`).
+//! runs N frames and writes the last picture (`--shot`) and the sound (`--wav`).
 //!
 //! Keys: arrows move; Z, X, C are buttons A, B, C; A, S, D are A+B, A+C, B+C; space is all three;
 //! 5 and 6 insert coins, 1 and 2 start; F2 test, 9 service; P pauses, Tab runs fast while held,
@@ -16,6 +16,7 @@
 //! trigger all three; start starts and back inserts a coin. The first pad is player 1, unless the
 //! keyboard is, then player 2.
 
+mod audio;
 mod controls;
 
 use std::fs;
@@ -41,6 +42,8 @@ struct Options {
     headless: bool,
     frames: u64,
     shot: Option<PathBuf>,
+    wav: Option<PathBuf>,
+    mute: bool,
 }
 
 fn default_save_dir() -> PathBuf {
@@ -62,6 +65,8 @@ fn parse_args() -> Result<Options, String> {
         headless: false,
         frames: 0,
         shot: None,
+        wav: None,
+        mute: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut it = args.iter();
@@ -77,6 +82,8 @@ fn parse_args() -> Result<Options, String> {
             "--headless" => o.headless = true,
             "--frames" => o.frames = value()?.parse().map_err(|_| "--frames: a number")?,
             "--shot" => o.shot = Some(PathBuf::from(value()?)),
+            "--wav" => o.wav = Some(PathBuf::from(value()?)),
+            "--mute" => o.mute = true,
             "-h" | "--help" => return Err(String::new()),
             _ => return Err(format!("unknown option {a}")),
         }
@@ -141,16 +148,25 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
     let mut m = load_machine(o)?;
     let frames = if o.frames > 0 { o.frames } else { script.map_or(600, |s| s.last_frame() + 60) };
     let t = Instant::now();
+    let mut sound = Vec::new();
     for f in 0..frames {
         let held = script.map_or([0; 2], |s| s.held(f));
         m.sys.inputs = controls::ports(held);
         m.run_frame();
+        let samples = std::mem::take(&mut m.sys.scsp.out);
+        if o.wav.is_some() {
+            sound.extend_from_slice(&samples);
+        }
     }
     let ms = t.elapsed().as_secs_f64() * 1000.0 / frames as f64;
     println!("{frames} frames, {ms:.2} ms a frame");
     if let Some(p) = &o.shot {
         write_ppm(p, &m.picture)?;
         println!("picture {}x{} written to {}", m.picture.0, m.picture.1, p.display());
+    }
+    if let Some(p) = &o.wav {
+        audio::write_wav(p, &sound)?;
+        println!("{:.1} s of sound written to {}", sound.len() as f64 / audio::RATE as f64, p.display());
     }
     Ok(())
 }
@@ -180,6 +196,11 @@ fn windowed(o: &Options, script: Option<&Script>) -> Result<(), String> {
     let mut texture_size = (0, 0);
     let mut events = sdl.event_pump()?;
     let mut pads: Vec<GameController> = Vec::new();
+    let mut sound = if o.mute {
+        None
+    } else {
+        audio::Output::open(&sdl).map_err(|e| eprintln!("rsgun: no sound: {e}")).ok()
+    };
 
     // one frame a refresh on a 60 Hz display (vsync paces); otherwise frames by the clock
     let mut lock_to_vsync = (59..=61).contains(&refresh);
@@ -317,6 +338,14 @@ fn windowed(o: &Options, script: Option<&Script>) -> Result<(), String> {
             m.run_frame();
             frame += 1;
         }
+        let samples = std::mem::take(&mut m.sys.scsp.out);
+        if let Some(out) = &mut sound {
+            if fast || paused {
+                out.flush();
+            } else {
+                out.play(&samples)?;
+            }
+        }
 
         // the picture, 4:3 in the window
         let (w, h, rgb) = &m.picture;
@@ -372,8 +401,8 @@ fn main() -> ExitCode {
             if !e.is_empty() {
                 eprintln!("rsgun: {e}");
             }
-            eprintln!("usage: rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth]");
-            eprintln!("       rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--rom DIR] [--save DIR]");
+            eprintln!("usage: rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute]");
+            eprintln!("       rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--rom DIR] [--save DIR]");
             return ExitCode::from(2);
         }
     };

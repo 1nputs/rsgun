@@ -2,10 +2,10 @@
 
 Radiant Silvergun (Sega ST-V, 1998) reimplemented natively in Rust, verified against an emulator,
 the way `md-recomp` did NHL '94 and Gunstar Heroes for the Mega Drive. So far the runtime crate `stv`
-is a whole ST-V machine (two SH-2s, the 68000, SCU, SMPC, VDP1, VDP2, the SCSP's timers), checked
-against the oracle, that runs the game from power on through the real BIOS: `rsgun` plays it in a
-window. No sound yet, and no port code: the game's own SH-2 code still runs on the cores. The plan
-and the living guide are in `../playbook/rsgun/`.
+is a whole ST-V machine (two SH-2s, the 68000, SCU, SMPC, VDP1, VDP2, the SCSP with its synthesis
+and effect DSP), checked against the oracle, that runs the game from power on through the real BIOS:
+`rsgun` plays it in a window, with sound. No port code yet: the game's own SH-2 code still runs on
+the cores. The plan and the living guide are in `../playbook/rsgun/`.
 
 ```
 crates/stv          the ST-V as a library (no game knowledge)
@@ -45,8 +45,8 @@ cargo run --release -p rsgun            # a window; the BIOS takes about 17 seco
 | P, Tab, F11, F12, Esc | pause, fast while held, full screen, screenshot, quit | | |
 
 The settings EEPROM and backup RAM are kept in `~/.local/share/rsgun/` (`--save DIR`). `--script FILE`
-plays an input script instead (`crates/rsgun/src/controls.rs`); `--headless --frames N --shot F.ppm`
-runs without a window. With a 59-61 Hz display the game runs a frame a refresh; otherwise by the clock
+plays an input script instead (`crates/rsgun/src/controls.rs`); `--headless --frames N --shot F.ppm
+--wav F.wav` runs without a window; `--mute` plays no sound. With a 59-61 Hz display the game runs a frame a refresh; otherwise by the clock
 at 59.94.
 
 ## Tools
@@ -55,6 +55,8 @@ at 59.94.
 |---|---|
 | `cargo test` | the runtime's unit tests |
 | `tools/trace/check_spin.sh` | a machine that plays the CPUs' wait loops beside one that executes everything: equal after every frame |
+| `tools/scsp/probes.py` | crafted one-voice SCSP logs run on the oracle's SCSP (`tools/scsp/build.sh` builds it) and on ours: every sample must match |
+| `target/release/stv-check scsp LOG` | replays a sound log (`run.py --sound N`) through the SCSP against the oracle's samples |
 | `tools/trace/check_vdp2.sh` | VDP2's composition of the oracle's own state, pixel for pixel against its pictures |
 | `tools/trace/check_all.sh` | records 19 trace windows from power on to attract play and replays each through the SH-2 core (`stv-check trace`); fails on any difference |
 | `tools/oracle/run.py --frames N --dump F,... --trace F:N,...` | runs the game on the oracle headless; dumps RAM, VDP memory, registers and the screen at frames F; traces both SH-2s through windows of frames |
