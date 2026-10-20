@@ -25,6 +25,21 @@ pub struct Native {
     pub name: &'static str,
     /// For code in the overlay window: the window's fingerprint the function belongs to.
     pub overlay: Option<u64>,
+    pub contract: Contract,
+}
+
+/// What a native function keeps of the SH-2 code it replaces (what compare mode checks).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Contract {
+    /// A translation: every access the SH-2 code made, in order, and every register at its end.
+    #[default]
+    Exact,
+    /// A rewrite keeping GCC's calling convention for the SH: the accesses outside its stack frame,
+    /// in order, but for the literals the SH-2 code loads from beside itself; at its end its result
+    /// (r0) and what a function keeps for its caller (r8-r15, GBR, VBR, SR's interrupt mask).
+    Abi,
+    /// The same for a function with no result (r0 is whatever it was left as).
+    AbiVoid,
 }
 
 /// The registered functions.
@@ -50,14 +65,24 @@ fn wram_h_offset(a: u32) -> Option<u32> {
 }
 
 impl Natives {
+    /// Registers a translation (Contract::Exact) at `addr`, in place of what was registered there
+    /// for the same overlay.
     pub fn register(&mut self, addr: u32, f: NativeFn, name: &'static str, overlay: Option<u64>) {
+        self.register_as(addr, f, name, overlay, Contract::Exact);
+    }
+
+    /// Registers a native function with its contract, in place of what was registered at `addr` for
+    /// the same overlay.
+    pub fn register_as(&mut self, addr: u32, f: NativeFn, name: &'static str, overlay: Option<u64>, contract: Contract) {
         let Some(off) = wram_h_offset(addr) else { panic!("{name}: native code must be in work RAM-H") };
         if self.entries.is_empty() {
             self.entries = vec![0; 0x10_0000 / 2 / 64];
         }
         let i = (off >> 1) as usize;
         self.entries[i / 64] |= 1 << (i % 64);
-        self.map.entry(off).or_default().push(Native { f, name, overlay });
+        let list = self.map.entry(off).or_default();
+        list.retain(|n| n.overlay != overlay);
+        list.push(Native { f, name, overlay, contract });
     }
 
     /// The name of a function registered at `addr` (any of them, for overlay code).

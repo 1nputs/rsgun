@@ -2,7 +2,7 @@
 //! instead of going through the BIOS's boot (about 19 seconds). It is made the first time a run
 //! passes the handover with nothing pressed (the machine's state at the last frame's end before
 //! it), kept beside the EEPROM and backup RAM, and made again when the ROMs or the EEPROM it started
-//! from change.
+//! from change (or the CPUs' speed, --cpu-speed).
 //!
 //! The backup RAM is not taken from it: the run goes on with the backup RAM as saved. Checked with
 //! play1 to frame 4000: started so with another backup RAM, a run matches the run from power on
@@ -32,7 +32,7 @@ pub struct Boot {
 
 impl Boot {
     /// For a machine at power on (`key`: what the boot depends on that the save state does not
-    /// check, the EEPROM's contents): starts it at the handover, from the boot state at `path` if
+    /// check, the EEPROM's contents and the CPUs' speed): starts it at the handover, from the boot state at `path` if
     /// one was made from the same; else watches its run to make one.
     pub fn start(m: &mut Machine, path: PathBuf, key: u64) -> Boot {
         let mut boot = Boot { path, key, watching: false, last: None, next: Vec::new() };

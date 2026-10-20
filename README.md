@@ -4,12 +4,16 @@ Radiant Silvergun (Sega ST-V, 1998) reimplemented natively in Rust, verified aga
 the way `md-recomp` did NHL '94 and Gunstar Heroes for the Mega Drive. So far the runtime crate `stv`
 is a whole ST-V machine (two SH-2s, the 68000, SCU, SMPC, VDP1, VDP2, the SCSP with its synthesis
 and effect DSP), checked against the oracle, that runs the game from power on through the real BIOS:
-`rsgun` plays it in a window, with sound. No port code yet: the game's own SH-2 code still runs on
-the cores. The plan and the living guide are in `../playbook/rsgun/`.
+`rsgun` plays it in a window, with sound. The port runs the game's code as Rust in place of the SH-2
+code (`--native`): a mechanical translation of every function the evidence saw, generated from your
+ROM into `build/port` and never committed, being replaced function by function with a rewrite meant
+to be read (`crates/rsgun/src/game`: the game's own names where its leftovers give them, its state
+named). Every call of either is checked against the SH-2 code it replaces (`tools/port/check.sh`).
+The plan and the living guide are in `../playbook/rsgun/`.
 
 ```
 crates/stv          the ST-V as a library (no game knowledge)
-crates/rsgun        the game in a window: controls, saves, input scripts
+crates/rsgun        the game in a window: controls, saves, input scripts; the rewrite (src/game)
 crates/stv-check    checks the runtime against the oracle's records
 tools/              the oracle, traces, ROM and Ghidra tools (Python and shell)
 ```
@@ -49,14 +53,18 @@ The settings EEPROM and backup RAM are kept in `~/.local/share/rsgun/` (`--save 
 the boot state: the machine as the BIOS hands over to the game, saved the first time a run gets
 there, so later runs start at the game (`--cold` boots from power on). `--script FILE`
 plays an input script instead (`crates/rsgun/src/controls.rs`); `--headless --frames N --shot F.ppm
---wav F.wav` runs without a window; `--mute` plays no sound. With a 59-61 Hz display the game runs a frame a refresh; otherwise by the clock
-at 59.94.
+--wav F.wav` runs without a window; `--mute` plays no sound; `--cpu-speed N` runs the SH-2s N times
+as fast as the hardware (no slowdown where the game runs out of time). With a 59-61 Hz display the
+game runs a frame a refresh; otherwise by the clock at 59.94.
 
 ## Tools
 
 | Command | What it does |
 |---|---|
 | `cargo test` | the runtime's unit tests |
+| `tools/port/check_native.sh` | play1 and the attract mode natively and on the SH-2 code (CPUs 16 times as fast, so neither slows down): the same last pictures |
+| `tools/ghidra/project.py` | the Ghidra project of the port's functions with the leftover dma.c's types, and Ghidra's C for each in `build/ghidra/c` |
+| `tools/port/calls.py ADDR` | a function's callers and callees, from the evidence |
 | `tools/port/check.sh` | translates the game's functions to Rust (`tools/port/sh2rust.py`, into `build/port`) and checks every call the port has against the SH-2 code, over play1 and the attract mode |
 | `target/release/stv-check state --frames N --at F,F` | save states: a machine made from the state at each frame F must stay equal to the one it was saved from |
 | `tools/trace/check_spin.sh` | a machine that plays the CPUs' wait loops beside one that executes everything: equal after every frame |

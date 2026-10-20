@@ -107,6 +107,24 @@ impl Sys {
 }
 
 impl Sys {
+    /// Compare mode: before a write to work RAM while a call is logged, what it overwrites (so the
+    /// check knows what the memory held, though the SH-2 code wrote it before reading it).
+    #[inline]
+    fn log_overwritten(&mut self, cpu: usize, a: u32, size: u8) {
+        if !self.logging[cpu] || a >= 0x4000_0000 {
+            return;
+        }
+        let p = a & 0x07FF_FFFF;
+        let (mem, off) = match p {
+            0x0020_0000..=0x002F_FFFF => (&self.wram_l, p & 0xF_FFFF),
+            0x0600_0000..=0x07FF_FFFF => (&self.wram_h, p & 0xF_FFFF),
+            _ => return,
+        };
+        let old = (0..size as u32).fold(0, |v, i| v << 8 | mem[((off + i) & 0xF_FFFF) as usize] as u32);
+        let depth = self.log_depth[cpu];
+        self.access_log[cpu].push(crate::compare::Access { kind: b'O', size, depth, addr: a, value: old });
+    }
+
     fn new(bios: Vec<u8>, cart: Vec<u8>, area: u8, eeprom: Option<&[u8]>) -> Sys {
         Sys {
             bios,
@@ -663,16 +681,19 @@ impl Bus for CpuBus<'_> {
     }
     fn write8(&mut self, a: u32, v: u8) {
         self.watch_write(a, 1);
+        self.sys.log_overwritten(self.cpu, a, 1);
         self.sys.record(self.cpu, b'W', 1, a, v as u32);
         self.sys.cpu_write8(self.cpu, a, v)
     }
     fn write16(&mut self, a: u32, v: u16) {
         self.watch_write(a, 2);
+        self.sys.log_overwritten(self.cpu, a, 2);
         self.sys.record(self.cpu, b'W', 2, a, v as u32);
         self.sys.cpu_write16(self.cpu, a, v)
     }
     fn write32(&mut self, a: u32, v: u32) {
         self.watch_write(a, 4);
+        self.sys.log_overwritten(self.cpu, a, 4);
         self.sys.record(self.cpu, b'W', 4, a, v);
         self.sys.cpu_write32(self.cpu, a, v)
     }
@@ -734,6 +755,10 @@ pub struct Machine {
     /// Play the loops the CPUs spin in instead of executing them (spin.rs); off, every instruction
     /// is executed (the checks compare the two).
     pub spin_enabled: bool,
+    /// The SH-2s' speed against the rest of the machine (1: as built). Faster, the game has no
+    /// slowdown where it ran out of time (and a native run and an interpreted one stay equal
+    /// although they cost differently). Their timers count their own clock.
+    pub cpu_speed: u32,
     /// A place to watch for (CPU, address): the frame in which the CPU first reached it (to run its
     /// instruction, or to call native code there), in `reached`.
     pub breakpoint: Option<(usize, u32)>,
@@ -748,7 +773,7 @@ pub struct Machine {
     roms: std::cell::OnceCell<(u64, u64)>,
 }
 
-saved!(Machine { cpu, sys, time, steps, picture } skip { coverage, evidence, compare, spin_enabled, breakpoint, reached, watch, fibers, stacks, spare, roms });
+saved!(Machine { cpu, sys, time, steps, picture } skip { coverage, evidence, compare, spin_enabled, cpu_speed, breakpoint, reached, watch, fibers, stacks, spare, roms });
 
 /// A save state's start, and its format's version.
 const STATE_MAGIC: &[u8; 8] = b"STVSTATE";
@@ -962,6 +987,7 @@ impl Machine {
             evidence: None,
             compare: None,
             spin_enabled: true,
+            cpu_speed: 1,
             breakpoint: None,
             reached: None,
             watch: Default::default(),
@@ -1021,12 +1047,13 @@ impl Machine {
         let width = if self.sys.clock352 { 352 } else { 320 };
         let hblank_at = width * 4;
         let t1_at = (self.sys.scu.t1s * 4).min(per_line - 1);
+        let speed = self.cpu_speed.max(1);
         self.sys.vdp2.hblank = false;
         // run to timer 1 and HBlank-IN, then to the end of the line
         let mut points = [(t1_at, 1u8), (hblank_at, 2u8)];
         points.sort();
         for (at, what) in points {
-            self.run_cpus(at);
+            self.run_cpus(at * speed);
             match what {
                 1 => self.sys.scu.timer1(),
                 _ => {
@@ -1037,7 +1064,7 @@ impl Machine {
             }
             self.sys.run_scu_dma();
         }
-        self.run_cpus(per_line);
+        self.run_cpus(per_line * speed);
         self.time = [0; 2];
         if self.sys.sound_reset_pending {
             self.sys.sound_reset_pending = false;
@@ -1335,8 +1362,8 @@ impl Machine {
             let mut bus = CpuBus { sys: &mut self.sys, cpu: c };
             if let Some(cmp) = &mut self.compare {
                 // the SH-2 code runs; the call is logged to be checked when it returns
-                if bus.native_at(cpu.pc).is_some() {
-                    cmp.enter(c, cpu.pc, cpu, &self.sys.access_log[c]);
+                if let Some(n) = self.sys.natives.get(cpu.pc, &self.sys.wram_h) {
+                    cmp.enter(c, cpu.pc, n.contract, cpu, &self.sys.access_log[c]);
                     self.sys.logging[c] = true;
                 }
             } else if let Some(f) = bus.native_at(cpu.pc) {
@@ -1372,11 +1399,30 @@ impl Machine {
         let sys = &mut *self.sys;
         let mut log = std::mem::take(&mut sys.access_log[c]);
         let frame = sys.frame;
-        let mut run = |entry: u32, state: &Sh2, accesses: &[crate::compare::Access], depth: u8| {
+        let mut run = |entry: u32, state: &Sh2, accesses: &[crate::compare::Access], depth: u8, frame: Option<std::ops::Range<u32>>| {
             let mut code = CpuBus { sys: &mut *sys, cpu: c };
             let Some(f) = code.native_at(entry) else { return Err("no native function there now".to_string()) };
             let limit = 100_000 + 200 * accesses.len() as u64;
-            crate::compare::Replay { log: accesses, depth, pos: 0, cycles: 0, limit, code: &mut code, pc: entry }.run(f, state)
+            // STV_COMPARE_DUMP=ENTRY (and STV_COMPARE_DUMP_DIR): the first diverging call to ENTRY,
+            // the SH-2 code's accesses and the native run's, to look at
+            let dump = std::env::var("STV_COMPARE_DUMP").ok().and_then(|w| u32::from_str_radix(&w, 16).ok()) == Some(entry);
+            let mut replay = crate::compare::Replay::new(accesses, depth, &mut code, entry, limit, frame.clone());
+            if dump {
+                replay.trace = Some(Vec::new());
+            }
+            let r = replay.run(f, state);
+            if let (Err(what), true, Ok(dir)) = (&r, dump, std::env::var("STV_COMPARE_DUMP_DIR")) {
+                let path = std::path::Path::new(&dir).join(format!("{entry:08x}.txt"));
+                if !path.exists() {
+                    let show = |list: &[crate::compare::Access]| {
+                        list.iter().map(|e| format!("{} {} {} {:08x} {:08x}\n", e.depth, e.kind as char, e.size, e.addr, e.value)).collect::<String>()
+                    };
+                    let text = format!("{entry:08x} at depth {depth}, frame {frame:x?}: {what}\nstate {state:x?}\n{}", show(accesses));
+                    let _ = std::fs::write(&path, text);
+                    let _ = std::fs::write(path.with_extension("native.txt"), show(replay.trace.as_deref().unwrap_or_default()));
+                }
+            }
+            r
         };
         cmp.stepped(c, &self.cpu[c], frame, &mut log, &mut run);
         self.sys.access_log[c] = log;

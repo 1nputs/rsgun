@@ -4,7 +4,7 @@ now and then and presses start often, so each game over is continued. Bosses tha
 leave when their time runs out, so the game goes on to the end. For evidence of every stage's code
 (tools/port/check.sh's evidence runs), not for scoring.
 
-    python3 tools/port/marathon.py [--frames N] > out/port/marathon.txt
+    python3 tools/port/marathon.py [--frames N] > out/evidence/marathon-input.txt
 """
 import sys
 

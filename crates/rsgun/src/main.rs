@@ -2,9 +2,10 @@
 //! cabinet's controls, the settings EEPROM and backup RAM kept between runs.
 //!
 //!     rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute]
-//!           [--native] [--cold]
+//!           [--native] [--cold] [--cpu-speed N]
 //!     rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--evidence FILE]
-//!           [--dump F,F --dump-dir DIR] [--native | --compare REPORT] [--cold] [--rom DIR] [--save DIR]
+//!           [--dump F,F --dump-dir DIR] [--native | --compare REPORT] [--cold] [--cpu-speed N] [--rom DIR]
+//!           [--save DIR] [--load-state FILE] [--save-state FILE]
 //!
 //! `--rom`: the images tools/rom/mkcart.py makes (default build/rom). `--save`: where the EEPROM,
 //! the backup RAM and the boot state (boot.rs) are kept (default $XDG_DATA_HOME/rsgun or
@@ -16,7 +17,9 @@
 //! text form), and the memories at frames (`--dump`, as stv-check boot writes them). `--native` runs
 //! the port's code (build/port, tools/port) in place of the SH-2 code it was made from; `--compare`
 //! runs the SH-2 code and checks each call the port has against it (stv::compare), writing what it
-//! found to REPORT.
+//! found to REPORT. `--cpu-speed N` runs the SH-2s N times as fast as built: no slowdown.
+//! `--load-state FILE` starts a headless run from a save state (one `--save-state FILE` wrote at
+//! the end of another; not while native code is in a call, so not in native play).
 //!
 //! Keys: arrows move; Z, X, C are buttons A, B, C; A, S, D are A+B, A+C, B+C; space is all three;
 //! 5 and 6 insert coins, 1 and 2 start; F2 test, 9 service; P pauses, Tab runs fast while held,
@@ -28,6 +31,7 @@
 mod audio;
 mod boot;
 mod controls;
+mod game;
 
 // the port's generated code (crates/rsgun/build.rs)
 include!(concat!(env!("OUT_DIR"), "/port.rs"));
@@ -70,6 +74,9 @@ struct Options {
     native: bool,
     compare: Option<PathBuf>,
     cold: bool,
+    cpu_speed: u32,
+    load_state: Option<PathBuf>,
+    save_state: Option<PathBuf>,
 }
 
 fn default_save_dir() -> PathBuf {
@@ -99,6 +106,9 @@ fn parse_args() -> Result<Options, String> {
         native: false,
         compare: None,
         cold: false,
+        cpu_speed: 1,
+        load_state: None,
+        save_state: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut it = args.iter();
@@ -121,6 +131,9 @@ fn parse_args() -> Result<Options, String> {
             "--native" => o.native = true,
             "--compare" => o.compare = Some(PathBuf::from(value()?)),
             "--cold" => o.cold = true,
+            "--load-state" => o.load_state = Some(PathBuf::from(value()?)),
+            "--save-state" => o.save_state = Some(PathBuf::from(value()?)),
+            "--cpu-speed" => o.cpu_speed = value()?.parse().map_err(|_| "--cpu-speed: a number")?,
             "--mute" => o.mute = true,
             "-h" | "--help" => return Err(String::new()),
             _ => return Err(format!("unknown option {a}")),
@@ -139,18 +152,21 @@ fn load_machine(o: &Options) -> Result<(Machine, Option<Boot>), String> {
     let bios = read(o.rom.join("bios-epr20091.bin"))?;
     let cart = read(o.rom.join("rsgun-cart.bin"))?;
     let eeprom = fs::read(o.save.join("eeprom.bin")).or_else(|_| fs::read(o.rom.join("eeprom.bin"))).ok();
-    let key = stv::mem::fnv1a(eeprom.as_deref().unwrap_or_default());
+    // the boot state depends on the EEPROM and on the CPUs' speed
+    let key = stv::mem::fnv1a(eeprom.as_deref().unwrap_or_default()).wrapping_add((o.cpu_speed as u64 - 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     let mut m = Machine::new(bios, cart, 1, eeprom.as_deref());
+    m.cpu_speed = o.cpu_speed;
     if o.native || o.compare.is_some() {
         m.sys.natives.overlay = Some(overlay());
         generated::register(&mut m.sys.natives);
+        game::register(&mut m.sys.natives);
     }
     if let Ok(backup) = fs::read(o.save.join("backup.bin"))
         && backup.len() == m.sys.backup.len()
     {
         m.sys.backup = backup;
     }
-    let cold = o.cold || o.evidence.is_some() || o.compare.is_some();
+    let cold = o.cold || o.evidence.is_some() || o.compare.is_some() || o.load_state.is_some();
     let boot = (!cold).then(|| Boot::start(&mut m, o.save.join("boot.state"), key));
     Ok((m, boot))
 }
@@ -192,6 +208,10 @@ impl CoinPulse {
 
 fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
     let (mut m, mut boot) = load_machine(o)?;
+    if let Some(p) = &o.load_state {
+        let data = fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        m.load_state(&data).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
     let frames = if o.frames > 0 { o.frames } else { script.map_or(600, |s| s.last_frame() + 60) };
     if o.compare.is_some() {
         m.compare = Some(Default::default());
@@ -218,6 +238,11 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
         if o.wav.is_some() {
             sound.extend_from_slice(&samples);
         }
+    }
+    if let Some(p) = &o.save_state {
+        let data = m.save_state()?;
+        fs::write(p, data).map_err(|e| format!("{}: {e}", p.display()))?;
+        println!("state at frame {} written to {}", m.sys.frame, p.display());
     }
     let run = frames.saturating_sub(first);
     let ms = t.elapsed().as_secs_f64() * 1000.0 / run.max(1) as f64;
@@ -489,8 +514,8 @@ fn main() -> ExitCode {
             if !e.is_empty() {
                 eprintln!("rsgun: {e}");
             }
-            eprintln!("usage: rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute] [--native] [--cold]");
-            eprintln!("       rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--native] [--cold] [--rom DIR] [--save DIR]");
+            eprintln!("usage: rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute] [--native] [--cold] [--cpu-speed N]");
+            eprintln!("       rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--native] [--cold] [--cpu-speed N] [--rom DIR] [--save DIR]");
             return ExitCode::from(2);
         }
     };
