@@ -453,6 +453,8 @@ pub fn register(n: &mut Natives) {
         0x0604_8318 => shots::shot_a_exec[s] -> (),
         0x0604_8480 => shots::shot_a_side_exec[s] -> (),
         0x0604_860c => shots::shot_a_set[p] -> u32,
+        0x0604_8acc => shots::shot_b_exec[s] -> (),
+        0x0604_8d84 => shots::shot_b_set[p] -> u32,
         0x0604_7f60 => player::player_exec[p] -> (),
         0x0604_7b0c => player::control[p] -> (),
         0x0604_77ec => player::weapons_frame[p] -> (),

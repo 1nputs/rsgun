@@ -222,6 +222,198 @@ pub fn shot_a_side_exec(cpu: &mut Cpu, s: u32) {
     nested!(cpu, 0x0604_6558, effects::link_step(cpu, s + SPRITE, s + 0x74));
 }
 
+/// B's shot (homing): kind 3 in the kind's colour less 0x40 on, type 8 (B), growing to its size
+/// by B's level; its target's number (a byte), its turn limit (a word, growing while it homes).
+const B_ANIMATION: u32 = 0x0607_28b4;
+const B_TYPE: u8 = 8;
+const B_BOXES: u32 = 0x0607_283c;
+const B_COLOUR: u16 = 0x40;
+const TARGET: u32 = 0x70;
+const TURN: u32 = 0x6e;
+const TURN_START: u16 = 0x800;
+const TURN_MOST: u32 = 0x1800;
+const TURN_GROWTH: u32 = 0x80;
+const B_LINK: u32 = 0x74;
+const B_EDGE_X: i32 = 0xbf_ffff;
+const B_SPEED: u32 = 0xfffa_0000;
+const SEEKING: u16 = 1;
+const HOMING: u16 = 2;
+/// The ship's B shots alive.
+const ALIVE_B: u32 = 0x81;
+/// The numbered objects (actors.rs's), the flags that keep one from being homed on, its life.
+const NUMBERED: u32 = 0x0607_40f0;
+const UNHOMED: u32 = 0x010a_0000;
+const LIFE: u32 = 0x50;
+const B_LEVEL: u32 = LEVELS + 1;
+
+/// B's shot: it seeks the nearest thing to hit (on the other side, alive, not ending) and homes on
+/// it, turning toward it by at most its turn limit a frame (which grows while it homes), at 6
+/// pixels a frame; it grows to its size; ended off screen (seeking) or where it hits.
+pub fn shot_b_exec(cpu: &mut Cpu, s: u32) {
+    if cpu.read8(s + PHASE_LOW) == 0 {
+        cpu.write32(s + SCALES + 4, 0);
+        cpu.write32(s + SCALES, 0);
+        cpu.write8(s + KIND, A_KIND);
+        nested!(cpu, 0x0604_6530, effects::link_init(cpu, s + B_LINK, B_ANIMATION));
+        let kind = cpu.read8(s + KIND) as i8 as i32;
+        let colour = cpu.read16(KIND_COLOURS.wrapping_add((kind * 16) as u32)).wrapping_add(B_COLOUR);
+        cpu.write16(s + OWN_COLOUR, colour);
+        cpu.write16(s + COLOUR, colour);
+        cpu.write8(s + LIFT, 0);
+        cpu.write8(s + SIDE, 0);
+        cpu.write8(s + TYPE, B_TYPE);
+        cpu.write32(s + BOXES, B_BOXES);
+        cpu.write16(s + TURN, 0);
+        cpu.write16(s + PHASE, SEEKING);
+    }
+    if hit_here(cpu, s) {
+        end(cpu, s);
+        return;
+    }
+    let ship = cpu.read32(s + SHIP);
+    if cpu.read8(ship + OBJ_MODE) as i8 >= ENDING as i8 {
+        cpu.write32(s + SHIP, 0);
+    }
+    let ship = cpu.read32(s + SHIP);
+    if ship != 0 {
+        for field in [ALIVE_B, ALIVE_ALL] {
+            let n = cpu.read8(ship + field).wrapping_add(1);
+            cpu.write8(ship + field, n);
+        }
+    }
+    match cpu.read8(s + PHASE_LOW) as u16 {
+        SEEKING => {
+            let (x, y) = (cpu.read32(s + POSITION) as i32, cpu.read32(s + POSITION + 4) as i32);
+            if x.wrapping_abs() > B_EDGE_X || y.wrapping_abs() > EDGE_Y {
+                let n = number(cpu, s);
+                cpu.write32(WEAPON_HITS.wrapping_add((n * 28) as u32 + 4), 0);
+                end(cpu, s);
+                return;
+            }
+            let t = nested!(cpu, 0x0604_5fd8, super::aim::nearest(cpu, s, 0));
+            cpu.write8(s + TARGET, t as u8);
+            if t as u8 as i8 != -1 {
+                cpu.write16(s + PHASE, HOMING);
+            }
+        }
+        HOMING => home(cpu, s),
+        _ => {}
+    }
+    let f = cpu.stack();
+    cpu.write32(f, 0);
+    cpu.write32(f + 4, B_SPEED);
+    cpu.write32(f + 0x10, 0x1_0000);
+    cpu.write32(f + 0x0c, 0x1_0000);
+    cpu.write32(f + 0x14, 0);
+    let a = cpu.read16(s + ANGLE);
+    cpu.write16(f + 0x18, a);
+    cpu.call(SL_TURN, &[f]);
+    let (vx, vy) = (cpu.read32(f), cpu.read32(f + 4));
+    let x = cpu.read32(s + POSITION).wrapping_add(vx);
+    cpu.write32(s + POSITION, x);
+    let y = cpu.read32(s + POSITION + 4).wrapping_add(vy);
+    cpu.write32(s + POSITION + 4, y);
+    let (vx, vy) = (cpu.read32(f), cpu.read32(f + 4));
+    cpu.write32(s + SPEED, vx);
+    cpu.write32(s + SPEED + 4, vy);
+    let n = number(cpu, s);
+    let level = cpu.read8(B_LEVEL.wrapping_add((n * 3) as u32)) as i8 as i32;
+    let size = (level * 0x1f0 + 0xe000) as u32;
+    let w = cpu.read32(s + SCALES);
+    let w = nested!(cpu, 0x0604_6168, actors::approach(cpu, w, size, 0x2000));
+    cpu.write32(s + SCALES, w);
+    cpu.write32(s + SCALES + 4, w);
+    nested!(cpu, 0x0604_6558, effects::link_step(cpu, s + SPRITE, s + B_LINK));
+}
+
+/// One frame homing: the nearest target again (lost, or ending, not to be homed on or dead: back
+/// to seeking, the turn limit to its start); else turned toward it.
+fn home(cpu: &mut Cpu, s: u32) {
+    let t = nested!(cpu, 0x0604_5fd8, super::aim::nearest(cpu, s, 0));
+    cpu.write8(s + TARGET, t as u8);
+    let lost = |cpu: &mut Cpu| {
+        cpu.write16(s + TURN, TURN_START);
+        cpu.write16(s + PHASE, SEEKING);
+    };
+    if t as u8 as i8 == -1 {
+        lost(cpu);
+        return;
+    }
+    let n = cpu.read8(s + TARGET) as i8 as i32;
+    let target = cpu.read32(NUMBERED.wrapping_add((n * 4) as u32));
+    if cpu.read8(target + OBJ_MODE) as i8 >= ENDING as i8 || cpu.read32(target + FLAGS) & UNHOMED != 0 || cpu.read32(target + LIFE) as i32 <= 0 {
+        lost(cpu);
+        return;
+    }
+    let limit = (cpu.read16(s + TURN) as i16 as i32 + TURN_START as i32) as u32;
+    let to = nested!(cpu, 0x0604_5e30, super::aim::angle_to(cpu, s, target)) as i16 as i32 as u32;
+    let from = cpu.read16(s + ANGLE) as i16 as i32 as u32;
+    let d = nested!(cpu, 0x0604_6194, super::camera::angle_diff(cpu, from, to));
+    let d = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, d, limit));
+    let a = cpu.read16(s + ANGLE).wrapping_add(d as u16);
+    cpu.write16(s + ANGLE, a);
+    let turn = cpu.read16(s + TURN) as i16 as i32 as u32;
+    let turn = nested!(cpu, 0x0604_6168, actors::approach(cpu, turn, TURN_MOST, TURN_GROWTH));
+    cpu.write16(s + TURN, turn as u16);
+}
+
+const B_EXEC: u32 = 0x0604_8acc;
+
+/// B's shots from ship `p`: a pair at 5 pixels either side, turned out by an eighth of a turn,
+/// their power by B's level; a muzzle flash. The second shot (or 0).
+pub fn shot_b_set(cpu: &mut Cpu, p: u32) -> u32 {
+    let mut last = 0;
+    for (dx, angle) in [(0xfffb_0000u32, 0xe000u16), (0x5_0000, 0x2000)] {
+        let s = shot_in(cpu);
+        if s == 0 {
+            return 0;
+        }
+        cpu.write32(s + BEHAVIOUR, B_EXEC);
+        let x = cpu.read32(p + POSITION).wrapping_add(dx);
+        cpu.write32(s + POSITION, x);
+        let y = cpu.read32(p + POSITION + 4).wrapping_add(0xfff7_0000);
+        cpu.write32(s + POSITION + 4, y);
+        let z = cpu.read32(p + POSITION + 8);
+        cpu.write32(s + POSITION + 8, z);
+        cpu.write16(s + ANGLE, angle);
+        let n = cpu.read8(p + NUMBER);
+        cpu.write8(s + NUMBER, n);
+        let level = cpu.read8(B_LEVEL.wrapping_add((n as i8 as i32 * 3) as u32)) as i8 as i32;
+        cpu.write16(s + POWER, (level * 6 + 60) as u16);
+        cpu.write32(s + SHIP, p);
+        last = s;
+    }
+    muzzle(cpu, p, 0x40);
+    last
+}
+
+/// The muzzle flash at the ship (its scales and angle), kind 3's colour plus `colour`.
+fn muzzle(cpu: &mut Cpu, p: u32, colour: u16) {
+    let f = cpu.stack();
+    for k in 0..3 {
+        let v = cpu.read32(p + POSITION + 4 * k);
+        cpu.write32(f + 4 * k, v);
+    }
+    for k in 0..2 {
+        let v = cpu.read32(p + SCALES + 4 * k);
+        cpu.write32(f + 0x0c + 4 * k, v);
+    }
+    cpu.write32(f + 0x14, 3);
+    let a = cpu.read16(p + ANGLE);
+    cpu.write16(f + 0x18, a);
+    cpu.write16(f + 0x24, 0);
+    cpu.write8(f + 0x26, 0);
+    cpu.write8(f + 0x1c, A_KIND);
+    cpu.write8(f + 0x1d, 0);
+    let c = cpu.read16(MUZZLE_COLOUR).wrapping_add(colour);
+    cpu.write16(f + 0x20, c);
+    let n = cpu.read8(p + NUMBER);
+    cpu.write8(f + 0x1e, n);
+    cpu.write32(f + 0x28, MUZZLE);
+    cpu.write32(f + 0x3c, 0);
+    nested!(cpu, 0x0604_e1cc, effects::effect_set(cpu, f));
+}
+
 /// The ship's fields the makers read: shots fired in the state, scales, angle.
 const SHOTS: u32 = 0x89;
 /// A's side shots' angle tables (by count: two, four).
@@ -338,28 +530,6 @@ pub fn shot_a_set(cpu: &mut Cpu, p: u32) -> u32 {
         cpu.write32(s + SCALES + 4, h);
         cpu.write32(s + SHIP, p);
     }
-    let f = frame;
-    for k in 0..3 {
-        let v = cpu.read32(p + POSITION + 4 * k);
-        cpu.write32(f + 4 * k, v);
-    }
-    for k in 0..2 {
-        let v = cpu.read32(p + SCALES + 4 * k);
-        cpu.write32(f + 0x0c + 4 * k, v);
-    }
-    cpu.write32(f + 0x14, 3);
-    let a = cpu.read16(p + ANGLE);
-    cpu.write16(f + 0x18, a);
-    cpu.write16(f + 0x24, 0);
-    cpu.write8(f + 0x26, 0);
-    cpu.write8(f + 0x1c, A_KIND);
-    cpu.write8(f + 0x1d, 0);
-    let colour = cpu.read16(MUZZLE_COLOUR);
-    cpu.write16(f + 0x20, colour);
-    let n = cpu.read8(p + NUMBER);
-    cpu.write8(f + 0x1e, n);
-    cpu.write32(f + 0x28, MUZZLE);
-    cpu.write32(f + 0x3c, 0);
-    nested!(cpu, 0x0604_e1cc, effects::effect_set(cpu, f));
+    muzzle(cpu, p, 0);
     last
 }
