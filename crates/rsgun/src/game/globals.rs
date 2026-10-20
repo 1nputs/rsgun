@@ -23,6 +23,12 @@ pub fn bios_setting_is_1(cpu: &mut super::Cpu) -> bool {
     (cpu.read32(BIOS_SETTING) >> 12) & 0xF == 1
 }
 
+/// The ground's movement a frame (x, y, z): pointers to the longs (bg.rs's ground_still points them
+/// at zeros; a stage's code at its scroll's). Things standing on the ground move with it.
+pub const GROUND_DX_AT: u32 = 0x0607_4730;
+pub const GROUND_DY_AT: u32 = 0x0607_4704;
+pub const GROUND_DZ_AT: u32 = 0x0607_4700;
+
 /// The game mode (a byte; `mode`'s values).
 pub const GAME_MODE: u32 = 0x0600_ebb0;
 

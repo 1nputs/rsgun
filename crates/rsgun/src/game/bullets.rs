@@ -433,3 +433,236 @@ pub fn aimed_set(cpu: &mut Cpu, shot: u32) -> u32 {
     cpu.write32(b + POSITION + 8, 0);
     b
 }
+
+/// The accelerating bullets' fields: the frames left accelerating (a word), the acceleration (x, y
+/// words).
+const ACCEL_FRAMES: u32 = 0x8c;
+const ACCEL: u32 = 0x8e;
+
+/// A sixth of a pixel a frame along `angle` (x, y).
+fn sixth_along(cpu: &mut Cpu, b: u32, angle: u32) {
+    let s = cpu.call(SL_SIN, &[angle]) as i32;
+    cpu.write16(b + ACCEL, (s / 6) as u16);
+    let c = cpu.call(SL_COS, &[angle]) as i32;
+    cpu.write16(b + ACCEL + 2, (c.wrapping_neg() / 6) as u16);
+}
+
+/// The bullet sped up (while it still accelerates) and moved by its speed.
+fn accelerate(cpu: &mut Cpu, b: u32) {
+    let n = cpu.read16(b + ACCEL_FRAMES) as i16;
+    if n > 0 {
+        cpu.write16(b + ACCEL_FRAMES, (n - 1) as u16);
+        for k in 0..2 {
+            let v = cpu.read32(b + SPEED + 4 * k).wrapping_add(cpu.read16(b + ACCEL + 2 * k) as i16 as i32 as u32);
+            cpu.write32(b + SPEED + 4 * k, v);
+        }
+    }
+    for k in 0..2 {
+        let p = cpu.read32(b + POSITION + 4 * k).wrapping_add(cpu.read32(b + SPEED + 4 * k));
+        cpu.write32(b + POSITION + 4 * k, p);
+    }
+}
+
+/// A bullet set up from shot `shot` (its sprite and hits, its enemy fields cleared; its number,
+/// flags, place, lift 8, `frame`, kind 0, `boxes`, side and type, direction): it, or 0.
+fn bullet_in(cpu: &mut Cpu, shot: u32, exec: u32, frame: u8, boxes: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, BULLET_SIZE)) as i8 as i32 as u32;
+    let b = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, BULLET_LIST, blocks, ACTOR_EXEC));
+    if b == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, b + SPRITE));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, b + BOXES));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, b));
+    let number = cpu.read8(shot + S_NUMBER);
+    cpu.write8(b + NUMBER, number);
+    cpu.write32(b + BEHAVIOUR, exec);
+    cpu.write32(b + FLAGS, ACCEL_FLAGS);
+    for k in 0..3 {
+        let v = cpu.read32(shot + S_POSITION + 4 * k);
+        cpu.write32(b + POSITION + 4 * k, v);
+    }
+    cpu.write8(b + LIFT, BULLET_LIFT);
+    cpu.write8(b + FRAME, frame);
+    cpu.write8(b + KIND, 0);
+    cpu.write32(b + BOXES, boxes);
+    cpu.write8(b + SIDE, BULLET_SIDE);
+    cpu.write8(b + TYPE, BULLET_TYPE);
+    let angle = cpu.read16(shot + S_ANGLE);
+    cpu.write16(b + ANGLE, angle);
+    b
+}
+
+/// The accelerating bullets' flags: never culled, ....
+const ACCEL_FLAGS: u32 = 0x2000_0400;
+
+/// A pulsing bullet (frames 91-93 in turn, its size flickering from 0xc000 to 0xd000, its two
+/// colours in turn each frame: the first character's plus 0 and 0x90, or with shot flag 0x10 plus
+/// 0x20 and 0x30): it speeds up along its direction (a sixth of a pixel a frame) for as many frames
+/// as the shot flags' low 4 bits say; its lift flickers while its frame is not the first (shot flag
+/// 0x20 starts it on the second); ended off screen or with a spark where it hits the ground.
+const PULSE_EXEC: u32 = 0x0605_4b9c;
+const PULSE_BOXES: u32 = 0x0607_2f1c;
+const PULSE_FRAME: u8 = 91;
+const PULSE_SIZE: u32 = 0xc000;
+const PULSE_FLICKER: u32 = 0x1000;
+const PULSE_SCALE: u32 = 0xa000;
+const PULSE_SECOND: u16 = 0x20;
+const PULSE_BRIGHT: u16 = 0x10;
+const PULSE_ACCEL_FRAMES: u16 = 0xf;
+/// The pulsing bullet's frame index (a byte) and its two colours (words).
+const PULSE_INDEX: u32 = 0x88;
+const PULSE_COLOURS: u32 = 0xa6;
+
+pub fn pulse_exec(cpu: &mut Cpu, b: u32) {
+    if nested!(cpu, 0x0605_3b10, bullet_ends(cpu, b, 0)) as u8 != 0 {
+        return;
+    }
+    accelerate(cpu, b);
+    let i = (cpu.read8(b + PULSE_INDEX) as i8 as i32 + 1) as u32;
+    let i = (nested!(cpu, 0x0600_6a6e, math::remainder(cpu, i, 3)) as i32).wrapping_abs();
+    cpu.write8(b + PULSE_INDEX, i as u8);
+    cpu.write8(b + FRAME, (i + PULSE_FRAME as i32) as u8);
+    let s = nested!(cpu, 0x0604_5d90, math::random(cpu, PULSE_FLICKER)).wrapping_add(PULSE_SIZE);
+    cpu.write32(b + SCALES, s);
+    cpu.write32(b + SCALES + 4, s);
+    if cpu.read8(b + PULSE_INDEX) != 0 {
+        let lift = (cpu.read32(GAME_FRAMES) & 1) * 118 + 8;
+        cpu.write8(b + LIFT, lift as u8);
+    }
+    let which = if cpu.read32(GAME_FRAMES) & 1 != 0 { 0 } else { 2 };
+    let colour = cpu.read16(b + PULSE_COLOURS + which);
+    cpu.write16(b + OWN_COLOUR, colour);
+}
+
+/// Makes a pulsing bullet from the shot `shot`: the bullet, or 0 when there is no room.
+pub fn pulse_set(cpu: &mut Cpu, shot: u32) -> u32 {
+    let b = bullet_in(cpu, shot, PULSE_EXEC, 0, PULSE_BOXES);
+    if b == 0 {
+        return 0;
+    }
+    if cpu.read16(shot + S_FLAGS) & PULSE_SECOND != 0 {
+        cpu.write8(b + PULSE_INDEX, 1);
+    }
+    let first = cpu.read16(CHAR_BASE);
+    let (a, c) = if cpu.read16(shot + S_FLAGS) & PULSE_BRIGHT != 0 { (0x20, 0x30) } else { (0, 0x90) };
+    cpu.write16(b + PULSE_COLOURS, first.wrapping_add(a));
+    let first = cpu.read16(CHAR_BASE);
+    cpu.write16(b + PULSE_COLOURS + 2, first.wrapping_add(c));
+    let colour = cpu.read16(b + PULSE_COLOURS);
+    cpu.write16(b + OWN_COLOUR, colour);
+    cpu.write16(b + COLOUR, colour);
+    let n = cpu.read16(shot + S_FLAGS) & PULSE_ACCEL_FRAMES;
+    cpu.write16(b + ACCEL_FRAMES, n);
+    let angle = cpu.read16(shot + S_ANGLE) as i16 as i32 as u32;
+    let s = cpu.call(SL_SIN, &[angle]);
+    let ax = nested!(cpu, 0x0600_6a78, math::quotient(cpu, s, 6));
+    cpu.write16(b + ACCEL, ax as u16);
+    let angle = cpu.read16(shot + S_ANGLE) as i16 as i32 as u32;
+    let c = cpu.call(SL_COS, &[angle]);
+    let ay = nested!(cpu, 0x0600_6a78, math::quotient(cpu, c, (-6i32) as u32));
+    cpu.write16(b + ACCEL + 2, ay as u16);
+    cpu.write32(b + SCALES, PULSE_SCALE);
+    cpu.write32(b + SCALES + 4, PULSE_SCALE);
+    b
+}
+
+/// A rocket (frame 200, its width flickering on odd frames, its length growing out to its full
+/// length by the shot's flags, its colours in turn each 2 frames from a pair), speeding up along its
+/// direction (a sixth of a pixel a frame) for the frames the shot gives; with shot flag 8 it starts
+/// still on the ground (moving against the ground's movement). It leaves a puff of smoke where it
+/// starts. Ended off screen, or with a spark (turned back) where it hits the ground.
+const ROCKET_EXEC: u32 = 0x0605_5a68;
+const ROCKET_BOXES: u32 = 0x0607_2f42;
+const ROCKET_FRAME: u8 = 200;
+const ROCKET_COLOURS: u32 = 0x0607_2f4a;
+const ROCKET_START: u32 = 0x1000;
+/// The shot's word at S_SPEED gives a rocket's flags: its second colour pair, its full length (by
+/// sixteenths less, bits 4-7), from the ground.
+const S_ROCKET_FLAGS: u32 = S_SPEED;
+const ROCKET_PAIR: u16 = 1;
+const ROCKET_SHORTER: u16 = 0xf0;
+const ROCKET_GROUNDED: u16 = 8;
+/// The rocket's colour pair (a word: 0 or 2), its length's growth (a word) and full length.
+const ROCKET_PAIR_AT: u32 = 0x92;
+const ROCKET_GROWTH: u32 = 0x96;
+const ROCKET_LENGTH: u32 = 0xac;
+/// The puff of smoke (the shot's description, made a drifting effect): its animation, colour (an
+/// attribute bit, flipped at random), scales, speed (back), how far behind.
+const PUFF_SCRIPT: u32 = 0x0607_30d4;
+const PUFF_COLOUR: u16 = 0x80e0;
+const PUFF_FLIP: u32 = 0x2000;
+const PUFF_SCALES: [u32; 2] = [0xc000, 0x8000];
+const PUFF_SPEED: u32 = 0xfffe_0000;
+const PUFF_BEHIND: u32 = 100;
+
+pub fn rocket_exec(cpu: &mut Cpu, b: u32) {
+    if nested!(cpu, 0x0605_3b10, bullet_ends(cpu, b, 1)) as u8 != 0 {
+        return;
+    }
+    accelerate(cpu, b);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    let w = 0x1_0000u32.wrapping_sub((cpu.read32(GAME_FRAMES) & 1).wrapping_mul(r & 0x7fff));
+    cpu.write32(b + SCALES, w);
+    let (h, to, by) = (cpu.read32(b + SCALES + 4), cpu.read32(b + ROCKET_LENGTH), cpu.read16(b + ROCKET_GROWTH) as i16 as i32 as u32);
+    let h = nested!(cpu, 0x0604_6168, actors::approach(cpu, h, to, by));
+    cpu.write32(b + SCALES + 4, h);
+    let i = cpu.read16(b + ROCKET_PAIR_AT) as i16 as i32 + (cpu.read32(GAME_FRAMES) >> 1 & 1) as i32;
+    let colour = cpu.read16(CHAR_BASE).wrapping_add(cpu.read16(ROCKET_COLOURS.wrapping_add((i * 2) as u32)));
+    cpu.write16(b + OWN_COLOUR, colour);
+    // (the SH-2 code then writes its colour back unchanged)
+}
+
+/// Makes a rocket from the shot `shot` (whose description then makes its puff of smoke): the
+/// rocket, or 0 when there is no room.
+pub fn rocket_set(cpu: &mut Cpu, shot: u32) -> u32 {
+    let b = bullet_in(cpu, shot, ROCKET_EXEC, ROCKET_FRAME, ROCKET_BOXES);
+    if b == 0 {
+        return 0;
+    }
+    let n = cpu.read16(shot + S_FLAGS);
+    cpu.write16(b + ACCEL_FRAMES, n);
+    let angle = cpu.read16(shot + S_ANGLE) as i16 as i32 as u32;
+    sixth_along(cpu, b, angle);
+    let flags = cpu.read16(shot + S_ROCKET_FLAGS);
+    cpu.write16(b + ROCKET_PAIR_AT, (flags & ROCKET_PAIR) * 2);
+    let flags = cpu.read16(shot + S_ROCKET_FLAGS);
+    cpu.write32(b + ROCKET_LENGTH, 0x1_0000u32.wrapping_sub(((flags & ROCKET_SHORTER) as u32) << 8));
+    let flags = cpu.read16(shot + S_ROCKET_FLAGS);
+    cpu.write16(b + ROCKET_GROWTH, 0x1000u16.wrapping_sub((flags & ROCKET_SHORTER) << 4));
+    cpu.write32(b + SCALES + 4, ROCKET_START);
+    if cpu.read16(shot + S_ROCKET_FLAGS) & ROCKET_GROUNDED != 0 {
+        for (k, at) in [(0, super::globals::GROUND_DX_AT), (4, super::globals::GROUND_DY_AT)] {
+            let p = cpu.read32(at);
+            let v = cpu.read32(p).wrapping_neg();
+            cpu.write32(b + SPEED + k, v);
+        }
+    }
+    let pair = cpu.read16(b + ROCKET_PAIR_AT) as i16 as i32;
+    let colour = cpu.read16(CHAR_BASE).wrapping_add(cpu.read16(ROCKET_COLOURS.wrapping_add((pair * 2) as u32)));
+    cpu.write16(b + OWN_COLOUR, colour);
+    cpu.write16(b + COLOUR, colour);
+    cpu.write32(shot + E_SCRIPT, PUFF_SCRIPT);
+    let angle = cpu.read16(shot + S_ANGLE);
+    cpu.write16(shot + E_ANGLE, angle);
+    let z = cpu.read32(shot + E_POSITION + 8).wrapping_sub(PUFF_BEHIND);
+    cpu.write32(shot + E_POSITION + 8, z);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    cpu.write16(shot + E_COLOUR, ((r & PUFF_FLIP) as u16).wrapping_add(PUFF_COLOUR));
+    cpu.write32(shot + E_SCALES, PUFF_SCALES[0]);
+    cpu.write32(shot + E_SCALES + 4, PUFF_SCALES[1]);
+    cpu.write32(shot + E_SPEED, PUFF_SPEED);
+    let e = nested!(cpu, 0x0605_7454, actors::drift_effect(cpu, shot));
+    if e != 0 {
+        cpu.write8(e + LIFT, BULLET_LIFT);
+    }
+    b
+}
+
+/// A rocket that speeds up for 13 frames, plain (the shot's flags so set first).
+pub fn rocket_set_plain(cpu: &mut Cpu, shot: u32) -> u32 {
+    cpu.write16(shot + S_FLAGS, 13);
+    cpu.write16(shot + S_ROCKET_FLAGS, 0);
+    nested!(cpu, 0x0605_5b5c, rocket_set(cpu, shot))
+}
+

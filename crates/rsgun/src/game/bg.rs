@@ -530,3 +530,15 @@ pub fn edge_window(cpu: &mut Cpu, table: u32, y: u32, angle: u32) {
         }
     }
 }
+
+/// The ground still: its movement pointed at zeros (globals.rs's GROUND_*_AT). 1.
+const GROUND_STILL: [u32; 3] = [0x0607_2f5c, 0x0607_2f60, 0x0607_2f64];
+
+pub fn ground_still(cpu: &mut Cpu) -> u32 {
+    use super::globals::{GROUND_DX_AT, GROUND_DY_AT, GROUND_DZ_AT};
+    for (at, to) in [GROUND_DX_AT, GROUND_DY_AT, GROUND_DZ_AT].into_iter().zip(GROUND_STILL) {
+        cpu.write32(at, to);
+    }
+    1
+}
+
