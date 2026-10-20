@@ -313,3 +313,128 @@ pub fn ride(cpu: &mut Cpu, o: u32) {
     cpu.write32(o + POSITION + 8, z);
 }
 
+
+/// A ground enemy (a tank or the like) moving along its route script: it dies where the ground's
+/// map says it cannot be (its life -1) or when its life runs out (an explosion by its kind; the
+/// second kind, above the middle difficulty, a parting shot first), ends off its area if its
+/// route says so; its frame follows its direction (by its kind and settings: the first kind's
+/// turning on by a frame each frame or picked from its direction by 32nds, 16ths or 8ths; the
+/// second's and third's from their tables), its angle its direction (mirrored by its side), and
+/// while firing it fires a plain bullet at the player every so often (by its settings).
+const LIFE: u32 = 0x50;
+const KIND_OF: u32 = 0xa6;
+const SETTINGS: u32 = 0x7c;
+const FIRE_WAIT: u32 = 0x8a;
+const FRAME: u32 = 0x2f;
+const ANGLE: u32 = 0x30;
+const NUMBER: u32 = 0x32;
+/// The settings: frames between shots (by 8s, less 8: the low 4 bits), how the first kind's frame
+/// follows its direction (bits 4-5).
+const FIRE_EVERY: u8 = 0xf;
+const FRAME_BY: u8 = 0x30;
+/// The area a ground enemy that ends off it keeps to (top, bottom, left, right).
+const GROUND_AREA: [u32; 4] = [0xff80_0000, 0x0080_0000, 0xff44_0000, 0x00bc_0000];
+/// The second and third kinds' frames by direction (every other byte).
+const KIND_1_FRAMES: u32 = 0x0607_3481;
+const KIND_2_FRAMES: u32 = 0x0607_34c1;
+const FLIPPED_Y: u32 = 0x20;
+/// Not rewritten yet: a parting shot, the kinds' explosions.
+const PARTING_SHOT: u32 = 0x0605_6070;
+const BLOWN_UP_1: u32 = 0x0605_9e9c;
+const BLOWN_UP: u32 = 0x0605_9e4c;
+const DIFFICULTY: u32 = 0x0600_ed84;
+/// The shot's description (bullets.rs's): its place, number, direction.
+const S_NUMBER: u32 = 0x1e;
+const S_ANGLE: u32 = 0x2c;
+const AIM_DELAY: u32 = 16;
+
+pub fn ground_exec(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let (x, y) = (cpu.read32(o + POSITION), cpu.read32(o + POSITION + 4));
+    if nested!(cpu, 0x0605_ef90, super::bg::map_hit(cpu, x, y)) != 0 {
+        cpu.write32(o + LIFE, u32::MAX);
+    }
+    let alive = |cpu: &mut Cpu| cpu.read32(o + LIFE) as i32 > 0;
+    let leaves = alive(cpu)
+        && cpu.read16(o + ROUTE_FLAGS) & ROUTE_1000 != 0
+        && {
+            let [top, bottom, left, right] = GROUND_AREA;
+            cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + SPRITE, top, bottom, left, right)) as u8 != 0
+        };
+    if !alive(cpu) || leaves {
+        if !alive(cpu) {
+            let kind = cpu.read16(o + KIND_OF) as i16;
+            if kind == 2 && cpu.read8(DIFFICULTY) as i8 > 2 {
+                cpu.call(PARTING_SHOT, &[o, 0]);
+            }
+            let blown = if cpu.read16(o + KIND_OF) == 1 { BLOWN_UP_1 } else { BLOWN_UP };
+            cpu.call(blown, &[o]);
+        }
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    let script = cpu.read32(o + SCRIPT);
+    match nested!(cpu, 0x0605_a000, route_step(cpu, o, script)) & 0xff {
+        START_FIRING => {
+            let fl = cpu.read16(o + ROUTE_FLAGS) | FIRING;
+            cpu.write16(o + ROUTE_FLAGS, fl);
+        }
+        STOP_FIRING => {
+            let fl = cpu.read16(o + ROUTE_FLAGS) & !FIRING;
+            cpu.write16(o + ROUTE_FLAGS, fl);
+            cpu.write16(o + FIRE_WAIT, 0);
+        }
+        _ => {}
+    }
+    nested!(cpu, 0x0605_a460, route_move(cpu, o));
+    let direction = |cpu: &mut Cpu| cpu.read16(o + DIRECTION) as i16 as i32;
+    match cpu.read16(o + KIND_OF) as i16 {
+        0 => {
+            let frame = match cpu.read8(o + SETTINGS) & FRAME_BY {
+                0 => Some(cpu.read8(o + FRAME) as i32 + 1),
+                0x10 => Some(direction(cpu) / 0x400),
+                0x20 => Some(direction(cpu) / 0x200),
+                0x30 => Some(direction(cpu) / 0x100),
+                _ => None,
+            };
+            if let Some(frame) = frame {
+                cpu.write8(o + FRAME, (frame & 31) as u8);
+            }
+        }
+        1 => {
+            let flags = cpu.read32(o + FLAGS) | FLIPPED_Y;
+            cpu.write32(o + FLAGS, flags);
+            let i = (direction(cpu).wrapping_neg() / 0x800) & 31;
+            let frame = cpu.read8(KIND_1_FRAMES + 2 * i as u32);
+            cpu.write8(o + FRAME, frame);
+        }
+        2 => {
+            let i = (direction(cpu) / 0x1000) & 15;
+            let frame = cpu.read8(KIND_2_FRAMES + 2 * i as u32);
+            cpu.write8(o + FRAME, frame);
+        }
+        _ => {}
+    }
+    let mirror = cpu.read8(o + MIRROR) as i8 as i16;
+    let d = cpu.read16(o + DIRECTION) as i16;
+    cpu.write16(o + ANGLE, mirror.wrapping_mul(d) as u16);
+    if cpu.read16(o + ROUTE_FLAGS) & FIRING == 0 {
+        return;
+    }
+    let wait = cpu.read16(o + FIRE_WAIT).wrapping_sub(1);
+    cpu.write16(o + FIRE_WAIT, wait);
+    if wait as i16 >= 0 {
+        return;
+    }
+    let n = cpu.read8(o + NUMBER);
+    cpu.write8(f + S_NUMBER, n);
+    let every = (cpu.read8(o + SETTINGS) & FIRE_EVERY) as u16;
+    cpu.write16(o + FIRE_WAIT, every.wrapping_mul(8).wrapping_sub(8));
+    for k in 0..3 {
+        let v = cpu.read32(o + POSITION + 4 * k);
+        cpu.write32(f + 4 * k, v);
+    }
+    let a = nested!(cpu, 0x0605_6ad4, aim::angle_to_target(cpu, o, AIM_DELAY));
+    cpu.write16(f + S_ANGLE, a as u16);
+    nested!(cpu, 0x0605_3f48, super::bullets::bullet_set_plain(cpu, f));
+}

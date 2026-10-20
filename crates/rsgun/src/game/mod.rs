@@ -521,6 +521,7 @@ pub fn register(n: &mut Natives) {
         0x0605_a000 => ground::route_step[o, script] -> u32,
         0x0605_a340 => ground::aim_step[o, script, keep] -> u32,
         0x0605_a460 => ground::route_move[o] -> (),
+        0x0605_a4cc => ground::ground_exec[o] -> (),
         0x0605_be90 => ground::route_exec[o] -> (),
         0x0605_c700 => ground::ride[o] -> (),
         0x0606_38c0 => aim::point_area_wide[p] -> u32,
