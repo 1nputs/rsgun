@@ -506,9 +506,7 @@ impl Sys {
                 self.sound_reset_pending = true;
             }
             if (prev ^ cur) & 0x08 != 0 {
-                let ram = std::mem::take(&mut self.scsp.ram);
-                self.scsp = Scsp::new();
-                self.scsp.ram = ram;
+                self.scsp.reset();
             }
             self.sound_on = cur == 0;
         }

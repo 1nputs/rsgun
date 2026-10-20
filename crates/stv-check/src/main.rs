@@ -740,6 +740,99 @@ fn vdp1(dir: &Path) -> Result<bool, String> {
     Ok(bad == 0)
 }
 
+/// Replays a sound log (tools/oracle/run.py --sound, or a probe) through the SCSP and compares its
+/// samples with the oracle's (by default samples.bin beside the log): equal samples, the first
+/// difference, the error's level against the signal's.
+fn scsp(log: &Path, expected: Option<&Path>) -> Result<bool, String> {
+    let rd = |p: &Path| fs::read(p).map_err(|e| format!("{}: {e}", p.display()));
+    let recs = rd(log)?;
+    let want_path = expected.map(Path::to_path_buf).unwrap_or_else(|| log.with_file_name("samples.bin"));
+    let want = rd(&want_path)?;
+    let n = want.len() / 4;
+    let mut s = stv::scsp::Scsp::new();
+    let mut r = 0;
+    let be32 = |b: &[u8]| u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+    let (mut equal, mut first) = (0usize, None);
+    let (mut err, mut sig) = (0f64, 0f64);
+    let mut worst_second = (0usize, 0f64);
+    let (mut sec_err, mut sec_sig) = (0f64, 0f64);
+    let mut ours = Vec::with_capacity(n);
+    for i in 0..n {
+        while r + 16 <= recs.len() && be32(&recs[r..]) as usize <= i {
+            let (tag, size, a, v) = (recs[r + 4], recs[r + 5], be32(&recs[r + 8..]), be32(&recs[r + 12..]));
+            match (tag, size) {
+                (b'R', _) => {
+                    if a != 0 {
+                        s = stv::scsp::Scsp::new();
+                    } else {
+                        s.reset();
+                    }
+                }
+                (b'W', 1) => s.write8(a & 0x1F_FFFF, v as u8),
+                (b'W', 2) => s.write16_bus(a & 0x1F_FFFF, v as u16),
+                _ => {}
+            }
+            r += 16;
+        }
+        let debug = std::env::var("STV_SCSP_DEBUG").ok().and_then(|v| v.parse::<usize>().ok());
+        if let Some(d) = debug
+            && i + 3 >= d
+            && i <= d + 3
+        {
+            print!("before sample {i}:\n{}", s.describe_slots());
+        }
+        s.sample();
+        if let Ok(spec) = std::env::var("STV_SCSP_REGS")
+            && let Some((at, path)) = spec.split_once(':')
+            && at.parse::<usize>() == Ok(i)
+        {
+            let regs: Vec<u8> = (0..0x1000u32).step_by(2).flat_map(|a| s.read16(0x10_0000 | a).to_be_bytes()).collect();
+            fs::write(path, regs).map_err(|e| format!("{path}: {e}"))?;
+        }
+        let [l, rr] = s.out.pop().unwrap_or_default();
+        s.out.clear();
+        ours.push((l, rr));
+        let w = &want[4 * i..4 * i + 4];
+        let (wl, wr) = (i16::from_be_bytes([w[0], w[1]]), i16::from_be_bytes([w[2], w[3]]));
+        if (l, rr) == (wl, wr) {
+            equal += 1;
+        } else if first.is_none() {
+            first = Some(i);
+        }
+        let e = (l as f64 - wl as f64).powi(2) + (rr as f64 - wr as f64).powi(2);
+        let g = (wl as f64).powi(2) + (wr as f64).powi(2);
+        err += e;
+        sig += g;
+        sec_err += e;
+        sec_sig += g;
+        if (i + 1) % 44100 == 0 {
+            let snr = 10.0 * (sec_sig / sec_err.max(1.0)).log10();
+            if sec_sig > 0.0 && (worst_second.1 == 0.0 || snr < worst_second.1) {
+                worst_second = (i / 44100, snr);
+            }
+            (sec_err, sec_sig) = (0.0, 0.0);
+        }
+    }
+    if let Ok(path) = std::env::var("STV_SCSP_RAM") {
+        fs::write(&path, &s.ram).map_err(|e| format!("{path}: {e}"))?;
+    }
+    if let Ok(path) = std::env::var("STV_SCSP_SAVE") {
+        let bytes: Vec<u8> = ours.iter().flat_map(|(l, r)| [l.to_be_bytes(), r.to_be_bytes()].concat()).collect();
+        fs::write(&path, bytes).map_err(|e| format!("{path}: {e}"))?;
+    }
+    println!("{equal} of {n} samples equal; signal to error {:.1} dB (worst second: {} at {:.1} dB)",
+        10.0 * (sig / err.max(1.0)).log10(), worst_second.0, worst_second.1);
+    if let Some(f) = first {
+        println!("first difference at sample {f} ({:.3} s):", f as f64 / 44100.0);
+        for i in f.saturating_sub(2)..(f + 10).min(n) {
+            let w = &want[4 * i..4 * i + 4];
+            println!("  {i}: oracle {:6} {:6}  ours {:6} {:6}", i16::from_be_bytes([w[0], w[1]]), i16::from_be_bytes([w[2], w[3]]),
+                ours[i].0, ours[i].1);
+        }
+    }
+    Ok(equal == n)
+}
+
 /// Runs two machines from power on, one playing the loops its CPUs spin in and one executing every
 /// instruction, and requires them equal after every frame: memories, CPUs, steps, timers.
 fn spin(frames: u64, rom: &Path) -> Result<bool, String> {
@@ -794,7 +887,7 @@ fn spin(frames: u64, rom: &Path) -> Result<bool, String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: stv-check trace DIR [--cpu m|s|k] [--rom DIR]\n       stv-check boot ORACLE.hashes [--frames N] [--rom DIR] [--dump F,F --dump-dir DIR]\n       stv-check vdp2 DUMP_DIR\n       stv-check vdp1 DUMP_DIR\n       stv-check spin [--frames N] [--rom DIR]";
+    let usage = "usage: stv-check trace DIR [--cpu m|s|k] [--rom DIR]\n       stv-check boot ORACLE.hashes [--frames N] [--rom DIR] [--dump F,F --dump-dir DIR]\n       stv-check vdp2 DUMP_DIR\n       stv-check vdp1 DUMP_DIR\n       stv-check spin [--frames N] [--rom DIR]\n       stv-check scsp WRITES.bin [SAMPLES.bin]";
     let Some(cmd) = args.first() else {
         eprintln!("{usage}");
         return ExitCode::from(2);
@@ -805,6 +898,7 @@ fn main() -> ExitCode {
     let mut dumps: Vec<u64> = Vec::new();
     let mut dump_dir = PathBuf::from("out/machine");
     let mut dir = None;
+    let mut extra: Option<PathBuf> = None;
     let mut it = args[1..].iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -813,6 +907,7 @@ fn main() -> ExitCode {
             "--frames" => frames = it.next().and_then(|f| f.parse().ok()).unwrap_or(frames),
             "--dump" => dumps = it.next().map(|l| l.split(',').filter_map(|f| f.parse().ok()).collect()).unwrap_or_default(),
             "--dump-dir" => dump_dir = it.next().map(PathBuf::from).unwrap_or(dump_dir),
+            _ if dir.is_some() => extra = Some(PathBuf::from(a)),
             _ => dir = Some(PathBuf::from(a)),
         }
     }
@@ -822,6 +917,7 @@ fn main() -> ExitCode {
         ("vdp2", Some(d)) => vdp2(&d),
         ("vdp1", Some(d)) => vdp1(&d),
         ("spin", None) => spin(frames, &rom),
+        ("scsp", Some(d)) => scsp(&d, extra.as_deref()),
         _ => Err(usage.into()),
     };
     match result {

@@ -1,10 +1,12 @@
 /* The oracle's SCSP on its own: replays a sound log's writes and resets (tools/oracle/run.py --sound,
  * or a crafted probe in the same format) and writes the samples it makes.
  *
- *   scsp_oracle WRITES.bin OUT.bin [SAMPLES]
+ *   scsp_oracle WRITES.bin OUT.bin [SAMPLES [RAM.bin]]
  *
  * OUT.bin: two big-endian 16-bit words a sample, left and right, as the log's samples.bin. SAMPLES
  * defaults to the log's last stamp. Before making sample n, every record stamped n is applied.
+ * RAM.bin: sound RAM at the end (big-endian), for the DSP's ring buffer. With SCSP_ORACLE_REGS=N:PATH
+ * in the environment, the registers as the CPUs read them (0x000-0xFFF, big-endian) after sample N.
  *
  * A development tool only: it compiles Mednafen's SCSP (GPL-2.0-or-later) in, like oracle.inc, and is
  * never shipped or linked into the port. Built by tools/scsp/build.sh into build/scsp_oracle.
@@ -12,6 +14,8 @@
 #include <mednafen/mednafen.h>
 #include <mednafen/state.h>
 #include <stdio.h>
+#include <string.h>
+#include <string>
 #include <vector>
 
 using namespace Mednafen;
@@ -90,6 +94,17 @@ int main(int argc, char** argv)
   return 2;
  }
  SCSP.Reset(true);
+ uint64 regs_at = ~(uint64)0;
+ std::string regs_path;
+ if(const char* e = getenv("SCSP_ORACLE_REGS"))
+ {
+  const char* colon = strchr(e, ':');
+  if(colon)
+  {
+   regs_at = strtoull(e, nullptr, 10);
+   regs_path = colon + 1;
+  }
+ }
  size_t r = 0;
  std::vector<uint8> obuf;
  for(uint64 s = 0; s < total; s++)
@@ -115,6 +130,19 @@ int main(int argc, char** argv)
   }
   int16 lr[2];
   SCSP.RunSample(lr);
+  if(s == regs_at)
+  {
+   FILE* rf = fopen(regs_path.c_str(), "wb");
+   for(uint32 a = 0; a < 0x1000 && rf; a += 2)
+   {
+    uint16 v;
+    SCSP.RW<uint16, false>(0x100000 | a, v);
+    fputc(v >> 8, rf);
+    fputc(v & 0xFF, rf);
+   }
+   if(rf)
+    fclose(rf);
+  }
   const uint8 o[4] = { (uint8)((uint16)lr[0] >> 8), (uint8)lr[0], (uint8)((uint16)lr[1] >> 8), (uint8)lr[1] };
   obuf.insert(obuf.end(), o, o + 4);
   if(obuf.size() >= (1U << 20))
@@ -125,5 +153,21 @@ int main(int argc, char** argv)
  }
  fwrite(obuf.data(), 1, obuf.size(), out);
  fclose(out);
+ if(argc > 4)
+ {
+  FILE* rf = fopen(argv[4], "wb");
+  if(!rf)
+  {
+   perror(argv[4]);
+   return 2;
+  }
+  const uint16* ram = SCSP.GetRAMPtr();
+  for(unsigned i = 0; i < 0x40000; i++)
+  {
+   fputc(ram[i] >> 8, rf);
+   fputc(ram[i] & 0xFF, rf);
+  }
+  fclose(rf);
+ }
  return 0;
 }
