@@ -24,7 +24,7 @@ const TURN_SIGN: u32 = 0x0605_6554;
 const ANGLE_BETWEEN: u32 = 0x0605_6580;
 const QUOTIENT: u32 = 0x0600_6a78;
 const APPROACH: u32 = 0x0604_6168;
-const AREA_FLAGS: u32 = 0x0605_69f8;
+pub(super) const AREA_FLAGS: u32 = 0x0605_69f8;
 
 /// SGL's (as far as can be told): the angle of a vector (x, y), and the sine and cosine of an
 /// angle.
@@ -243,6 +243,33 @@ pub fn area_flags(cpu: &mut Cpu, s: u32, top: u32, bottom: u32, left: u32, right
     f
 }
 
+/// Where the point `p` (x, y: 16.16) lies against the screen's edges, 128 pixels up and down and
+/// 176 across (as area_flags: bit 0 above, 1 below, 2 left, 3 right).
+pub fn point_area_wide(cpu: &mut Cpu, p: u32) -> u32 {
+    point_area_in(cpu, p, [0xff80_0000, 0x0080_0000, 0xff50_0000, 0x00b0_0000])
+}
+
+/// point_area_wide against edges 8 units inside 112 pixels up and down and 176 across.
+pub fn point_area(cpu: &mut Cpu, p: u32) -> u32 {
+    point_area_in(cpu, p, [0xff90_0008, 0x006f_fff8, 0xff50_0008, 0x00af_fff8])
+}
+
+fn point_area_in(cpu: &mut Cpu, p: u32, [top, bottom, left, right]: [u32; 4]) -> u32 {
+    let y = cpu.read32(p + 4) as i32;
+    let mut f = (y < top as i32) as u32;
+    if y > bottom as i32 {
+        f |= 2;
+    }
+    let x = cpu.read32(p) as i32;
+    if x < left as i32 {
+        f |= 4;
+    }
+    if x > right as i32 {
+        f |= 8;
+    }
+    f
+}
+
 /// The screen's edges (16.16 from its centre: top, bottom, left, right).
 const SCREEN: [u32; 4] = [0xff80_0000, 0x0080_0000, 0xff50_0000, 0x00b0_0000];
 
@@ -251,7 +278,7 @@ pub fn off_screen(cpu: &mut Cpu, s: u32) -> u32 {
     let f = cpu.nested_with_stack(&AREA_FLAGS_PROLOGUE, AREA_FLAGS, &[SCREEN[3]], |cpu| area_flags(cpu, s, SCREEN[0], SCREEN[1], SCREEN[2], SCREEN[3]));
     f & 0xff
 }
-static AREA_FLAGS_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
+pub(super) static AREA_FLAGS_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
 
 /// Turns the angle at `angle` from `from` toward `to` (16-bit angles; words at `angle` and `speed`):
 /// the turn left (at most `most`), the turning speed eased toward that over `ease` (its sign the

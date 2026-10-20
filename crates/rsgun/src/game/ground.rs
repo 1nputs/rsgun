@@ -10,6 +10,10 @@
 
 use super::{actors, aim, math, nested, Cpu};
 
+/// The objects' mode byte (ending).
+const OBJ_MODE: u32 = 3;
+const ENDING: u8 = 0x70;
+
 /// An actor's flags, position, its route flags (a word), speed (x, y), direction and speed (words:
 /// 16-bit angle, speed by 256ths), frames left in the segment, turn and speed change a frame
 /// (words), the script's place (a word), its base direction (a word), height change a frame and
@@ -248,3 +252,64 @@ pub fn aim_step(cpu: &mut Cpu, o: u32, script: u32, keep: u32) -> u32 {
     cpu.write16(o + AIM_FRAMES_LEFT, n);
     flags
 }
+
+/// The route flags: ends once outside its area (with 0x1000), firing (0x10). The flag bytes that
+/// start and stop firing.
+const FIRING: u16 = 0x10;
+const START_FIRING: u32 = 7;
+const STOP_FIRING: u32 = 9;
+/// The area a route that ends leaving it keeps to (top, bottom, left, right: 16.16).
+const ROUTE_AREA: [u32; 4] = [0xff20_0000, 0x00e0_0000, 0xfee0_0000, 0x0120_0000];
+const SPRITE: u32 = 0x10;
+/// The route script's address.
+const SCRIPT: u32 = 0x6c;
+
+/// A thing moving along its route script (ending once outside its area if its route says so),
+/// told by the script when to fire.
+pub fn route_exec(cpu: &mut Cpu, o: u32) {
+    if cpu.read16(o + ROUTE_FLAGS) & ROUTE_1000 != 0 {
+        let [top, bottom, left, right] = ROUTE_AREA;
+        let f = cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + SPRITE, top, bottom, left, right));
+        if f as u8 != 0 {
+            cpu.write8(o + OBJ_MODE, ENDING);
+            return;
+        }
+    }
+    let script = cpu.read32(o + SCRIPT);
+    match nested!(cpu, 0x0605_a000, route_step(cpu, o, script)) & 0xff {
+        START_FIRING => {
+            let f = cpu.read16(o + ROUTE_FLAGS) | FIRING;
+            cpu.write16(o + ROUTE_FLAGS, f);
+        }
+        STOP_FIRING => {
+            let f = cpu.read16(o + ROUTE_FLAGS) & !FIRING;
+            cpu.write16(o + ROUTE_FLAGS, f);
+        }
+        _ => {}
+    }
+    nested!(cpu, 0x0605_a460, route_move(cpu, o));
+}
+
+/// A thing riding on another (at +0x6c), at its offset from it (pixel words at +0x8a, +0x8c), not
+/// hittable while that one is not; ended once that one ends.
+const RIDES_ON: u32 = 0x6c;
+const RIDE_OFFSET: u32 = 0x8a;
+
+pub fn ride(cpu: &mut Cpu, o: u32) {
+    let on = cpu.read32(o + RIDES_ON);
+    if cpu.read8(on + OBJ_MODE) as i8 >= ENDING as i8 {
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    let flags = cpu.read32(o + FLAGS) & !NO_HITS;
+    cpu.write32(o + FLAGS, flags);
+    let hits = cpu.read32(on + FLAGS) & NO_HITS;
+    cpu.write32(o + FLAGS, flags | hits);
+    for k in 0..2 {
+        let p = cpu.read32(on + POSITION + 4 * k).wrapping_add((cpu.read16(o + RIDE_OFFSET + 2 * k) as i16 as i32 as u32) << 16);
+        cpu.write32(o + POSITION + 4 * k, p);
+    }
+    let z = cpu.read32(on + POSITION + 8);
+    cpu.write32(o + POSITION + 8, z);
+}
+
