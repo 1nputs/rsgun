@@ -566,6 +566,45 @@ fn count_alive(cpu: &mut Cpu, s: u32, field: u32) {
     }
 }
 
+/// A burst growing (C's shot, B+C's): hitting everything again, an eighth of the way (and 0x200) to
+/// its size; there, its sizes summed (at `summed`) and shrink cleared, its power halved: true.
+fn burst_grown(cpu: &mut Cpu, s: u32, summed: u32) -> bool {
+    hit_set(cpu, s, u32::MAX);
+    let size = cpu.read32(s + SCALES) as i32;
+    let to = cpu.read32(s + C_SIZE) as i32;
+    let size = size.wrapping_add(to.wrapping_sub(size.wrapping_sub(0x200)) / 8);
+    cpu.write32(s + SCALES, size as u32);
+    if size < cpu.read32(s + C_SIZE) as i32 {
+        return false;
+    }
+    cpu.write32(s + summed, 0);
+    cpu.write32(s + C_SHRINK, 0);
+    let power = cpu.read16(s + POWER) as i16;
+    cpu.write16(s + POWER, (power / 2) as u16);
+    true
+}
+
+/// A burst shrinking: its sizes summed (hitting everything again each time they reach twice its
+/// size), shrinking ever faster away; ended once gone.
+fn burst_shrinks(cpu: &mut Cpu, s: u32, summed: u32) {
+    let sum = cpu.read32(s + summed).wrapping_add(cpu.read32(s + SCALES));
+    cpu.write32(s + summed, sum);
+    let twice = cpu.read32(s + C_SIZE).wrapping_mul(2);
+    if sum as i32 >= twice as i32 {
+        hit_set(cpu, s, u32::MAX);
+        cpu.write32(s + summed, sum.wrapping_sub(twice));
+    }
+    let step = cpu.read32(s + C_SHRINK);
+    let step = nested!(cpu, 0x0604_6168, actors::approach(cpu, step, C_SHRINK_MOST, C_SHRINK_GROWTH));
+    cpu.write32(s + C_SHRINK, step);
+    let size = cpu.read32(s + SCALES);
+    let size = nested!(cpu, 0x0604_6168, actors::approach(cpu, size, 0, step));
+    cpu.write32(s + SCALES, size);
+    if size as i32 <= 0 {
+        end(cpu, s);
+    }
+}
+
 pub fn shot_c_exec(cpu: &mut Cpu, s: u32) {
     let ship = cpu.read32(s + SHIP);
     if cpu.read8(ship + OBJ_MODE) as i8 >= ENDING as i8 {
@@ -593,17 +632,8 @@ pub fn shot_c_exec(cpu: &mut Cpu, s: u32) {
                 cpu.write16(s + PHASE, GROWING);
             }
             count_alive(cpu, s, ALIVE_C);
-            hit_set(cpu, s, u32::MAX);
-            let size = cpu.read32(s + SCALES) as i32;
-            let to = cpu.read32(s + C_SIZE) as i32;
-            let size = size.wrapping_add(to.wrapping_sub(size.wrapping_sub(0x200)) / 8);
-            cpu.write32(s + SCALES, size as u32);
-            if size >= cpu.read32(s + C_SIZE) as i32 {
-                cpu.write32(s + C_SUMMED, 0);
-                cpu.write32(s + C_SHRINK, 0);
+            if burst_grown(cpu, s, C_SUMMED) {
                 cpu.write16(s + TURN, 0);
-                let power = cpu.read16(s + POWER) as i16;
-                cpu.write16(s + POWER, (power / 2) as u16);
                 cpu.write16(s + PHASE, SHRINKING);
             }
         }
@@ -611,22 +641,7 @@ pub fn shot_c_exec(cpu: &mut Cpu, s: u32) {
             if cpu.read32(s + SCALES) as i32 > C_COUNTED {
                 count_alive(cpu, s, ALIVE_C);
             }
-            let summed = cpu.read32(s + C_SUMMED).wrapping_add(cpu.read32(s + SCALES));
-            cpu.write32(s + C_SUMMED, summed);
-            let twice = cpu.read32(s + C_SIZE).wrapping_mul(2);
-            if summed as i32 >= twice as i32 {
-                hit_set(cpu, s, u32::MAX);
-                cpu.write32(s + C_SUMMED, summed.wrapping_sub(twice));
-            }
-            let step = cpu.read32(s + C_SHRINK);
-            let step = nested!(cpu, 0x0604_6168, actors::approach(cpu, step, C_SHRINK_MOST, C_SHRINK_GROWTH));
-            cpu.write32(s + C_SHRINK, step);
-            let size = cpu.read32(s + SCALES);
-            let size = nested!(cpu, 0x0604_6168, actors::approach(cpu, size, 0, step));
-            cpu.write32(s + SCALES, size);
-            if size as i32 <= 0 {
-                end(cpu, s);
-            }
+            burst_shrinks(cpu, s, C_SUMMED);
         }
         _ => {}
     }
@@ -1733,8 +1748,8 @@ pub fn shot_ac_set(cpu: &mut Cpu, p: u32) -> u32 {
 /// growing toward 96 pixels and 1 more each B level. It takes the things to hit within it (on the
 /// other side, alive, not ending, not to be homed on; at most a fifth of C's level plus 4) as its
 /// targets, each keeping its wait from the last frame, and sends a bolt at each whose wait is over
-/// (then 19 frames) unless as many were sent this frame. Once the ship lets go (not in B+C's state)
-/// or ends it shrinks away.
+/// (then 19 frames) unless as many bolts are out. Once the ship lets go (not in B+C's state) or
+/// ends it shrinks away.
 const RING_EXEC: u32 = 0x0604_b98c;
 const RING_DRAW: u32 = 0x0604_b830;
 const RING_COLOUR: u16 = 0x30;
@@ -1745,9 +1760,10 @@ const RING_REACH: i32 = -0x60_0000;
 const RING_WAIT: u8 = 19;
 const RING_FADING: u16 = 5;
 const RING_SHRINK: u32 = 0x2000;
-/// The ring's bolts sent this frame (a byte, cleared each frame), its radius (16.16, negative: up
-/// from it), its targets' numbers (10 bytes, the last -1) and their waits.
-const RING_SENT: u32 = 0x70;
+/// The ring's bolts out (a byte: each counts itself each frame, cleared after the ring's frame), its
+/// radius (16.16, negative: up from it), its targets' numbers (10 bytes, the last -1) and their
+/// waits.
+const RING_BOLTS: u32 = 0x70;
 const RING_RADIUS: u32 = 0x60;
 const RING_5C: u32 = 0x5c;
 const RING_TARGETS: u32 = 0x74;
@@ -1804,7 +1820,7 @@ pub fn ring_exec(cpu: &mut Cpu, s: u32) {
                 cpu.write8(s + LIFT, 4);
                 cpu.write8(s + SIDE, 0);
                 cpu.write8(s + TYPE, RING_TYPE);
-                cpu.write8(s + RING_SENT, 0);
+                cpu.write8(s + RING_BOLTS, 0);
                 cpu.write32(s + RING_RADIUS, 0);
                 cpu.write32(s + RING_5C, 0);
                 cpu.write16(s + TURN, 0);
@@ -1824,7 +1840,7 @@ pub fn ring_exec(cpu: &mut Cpu, s: u32) {
         }
         _ => {}
     }
-    cpu.write8(s + RING_SENT, 0);
+    cpu.write8(s + RING_BOLTS, 0);
     let lift = if cpu.read32(GAME_FRAMES) & 1 != 0 { 0 } else { 0x7f };
     cpu.write8(s + LIFT, lift);
 }
@@ -1894,7 +1910,7 @@ fn ring_targets(cpu: &mut Cpu, s: u32) {
         }
         cpu.write8(s + count + RING_TARGETS, 0xff);
     }
-    if cpu.read8(s + RING_SENT) as i8 as i32 >= ring_most(cpu, s) || count == 0 {
+    if cpu.read8(s + RING_BOLTS) as i8 as i32 >= ring_most(cpu, s) || count == 0 {
         return;
     }
     cpu.write32(f + 0x20, RING_WAITS);
@@ -2005,4 +2021,516 @@ pub fn shot_bc_set(cpu: &mut Cpu, p: u32) -> u32 {
     cpu.write16(s + POWER, 0);
     cpu.write32(s + SHIP, p);
     s
+}
+
+/// B+C's bolt (the ring's, at a target): kind 3 in the kind's colour plus 0x30, frame 30, unturned,
+/// type 14, counted in its ring each frame. It flies in from the ring onto its target (a quarter of
+/// the way a frame, for 16 frames) and stays on it (while it is alive, not ending and not to be
+/// homed on), calls a strike down from the ship (sound 6), waits while the strike lives, then
+/// shrinks away; it shrinks at once if the ship ends. Its lift flickers.
+const MARK_ANIMATION: u32 = 0x0607_28f4;
+const MARK_LINK: u32 = 0x90;
+/// The bolt's frames flying in (a word), whether a strike counted itself this frame, frames
+/// between strikes, strikes called (bytes); the phase's high byte (between strikes).
+const MARK_FRAMES: u32 = 0x6e;
+const MARK_STRUCK: u32 = 0x74;
+const MARK_GAP: u32 = 0x75;
+const MARK_STRIKES: u32 = 0x76;
+const PHASE_HIGH: u32 = 0x6c;
+const MARK_IN: i16 = 15;
+const MARK_GAPS: i8 = 6;
+const MARK_SHRINK: u32 = 0x1000;
+const MARK_SHRINKING: u16 = 4;
+const SE_STRIKE: u32 = 6;
+const STRIKE_SIZE: u32 = 0x47c;
+const STRIKE_EXEC: u32 = 0x0604_b0e4;
+
+pub fn bc_bolt_exec(cpu: &mut Cpu, s: u32) {
+    let mut target = cpu.read32(s + BC_TARGET);
+    let ship = cpu.read32(s + SHIP);
+    if cpu.read8(ship + OBJ_MODE) as i8 >= ENDING as i8 {
+        cpu.write16(s + PHASE, MARK_SHRINKING);
+    }
+    let ring = cpu.read32(s + BC_RING);
+    if ring != 0 {
+        let n = cpu.read8(ring + RING_BOLTS).wrapping_add(1);
+        cpu.write8(ring + RING_BOLTS, n);
+        if cpu.read8(ring + OBJ_MODE) as i8 >= ENDING as i8 {
+            cpu.write32(s + BC_RING, 0);
+        }
+    }
+    if target != 0
+        && (cpu.read8(target + OBJ_MODE) as i8 >= ENDING as i8 || cpu.read32(target + FLAGS) & UNHOMED != 0 || cpu.read32(target + LIFE) as i32 <= 0)
+    {
+        cpu.write32(s + BC_TARGET, 0);
+        target = 0;
+    }
+    let phase = cpu.read8(s + PHASE_LOW);
+    match phase {
+        0 | 1 => {
+            if phase == 0 {
+                let flags = cpu.read32(s + FLAGS) | UNTURNED;
+                cpu.write32(s + FLAGS, flags);
+                cpu.write8(s + KIND, A_KIND);
+                cpu.write8(s + FRAME, RING_FRAME);
+                let kind = cpu.read8(s + KIND) as i8 as i32;
+                let colour = cpu.read16(KIND_COLOURS.wrapping_add((kind * 16) as u32)).wrapping_add(RING_COLOUR);
+                cpu.write16(s + OWN_COLOUR, colour);
+                cpu.write16(s + COLOUR, colour);
+                cpu.write8(s + LIFT, 4);
+                cpu.write8(s + SIDE, 0);
+                cpu.write8(s + TYPE, RING_TYPE);
+                cpu.write8(s + MARK_STRUCK, 0);
+                cpu.write8(s + MARK_STRIKES, 0);
+                nested!(cpu, 0x0604_6530, effects::link_init(cpu, s + MARK_LINK, MARK_ANIMATION));
+                cpu.write16(s + MARK_FRAMES, 0);
+                cpu.write16(s + PHASE, 1);
+            }
+            for k in 0..2 {
+                let d = cpu.read32(s + BC_FROM + 4 * k) as i32;
+                cpu.write32(s + BC_FROM + 4 * k, d.wrapping_add(d.wrapping_neg() / 4) as u32);
+            }
+            if target != 0 {
+                for k in 0..2 {
+                    let p = cpu.read32(target + POSITION + 4 * k).wrapping_add(cpu.read32(s + BC_FROM + 4 * k));
+                    cpu.write32(s + POSITION + 4 * k, p);
+                }
+            }
+            let n = cpu.read16(s + MARK_FRAMES).wrapping_add(1);
+            cpu.write16(s + MARK_FRAMES, n);
+            if n as i16 > MARK_IN {
+                cpu.write16(s + MARK_FRAMES, 0);
+                cpu.write16(s + PHASE, 2);
+            }
+        }
+        2 => {
+            if target != 0 {
+                for k in 0..2 {
+                    let v = cpu.read32(target + POSITION + 4 * k);
+                    cpu.write32(s + POSITION + 4 * k, v);
+                }
+            }
+            if cpu.read8(s + PHASE_HIGH) == 0 {
+                strike(cpu, s, ship);
+            } else {
+                let gap = cpu.read8(s + MARK_GAP).wrapping_add(1);
+                cpu.write8(s + MARK_GAP, gap);
+                if gap as i8 > MARK_GAPS {
+                    cpu.write8(s + MARK_GAP, 0);
+                    cpu.write8(s + PHASE_HIGH, 0);
+                }
+            }
+        }
+        3 => {
+            let target = cpu.read32(s + BC_TARGET);
+            if target != 0 {
+                for k in 0..2 {
+                    let v = cpu.read32(target + POSITION + 4 * k);
+                    cpu.write32(s + POSITION + 4 * k, v);
+                }
+            }
+            if cpu.read8(s + MARK_STRUCK) == 0 {
+                cpu.write16(s + PHASE, MARK_SHRINKING);
+            }
+        }
+        4 => {
+            let w = cpu.read32(s + SCALES);
+            let w = nested!(cpu, 0x0604_6168, actors::approach(cpu, w, 0, MARK_SHRINK));
+            cpu.write32(s + SCALES, w);
+            cpu.write32(s + SCALES + 4, w);
+            if cpu.read32(s + SCALES) == 0 {
+                end(cpu, s);
+            }
+        }
+        _ => {}
+    }
+    cpu.write8(s + MARK_STRUCK, 0);
+    nested!(cpu, 0x0604_6558, effects::link_step(cpu, s + SPRITE, s + MARK_LINK));
+    let lift = if cpu.read32(GAME_FRAMES) & 1 != 0 { 0 } else { 0xf7 };
+    cpu.write8(s + LIFT, lift);
+}
+
+/// The strike called down from `ship`'s nose (its power half B's and C's levels summed plus 10);
+/// then on to waiting for it (after a gap, another, while its count stays below 1).
+fn strike(cpu: &mut Cpu, s: u32, ship: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, STRIKE_SIZE)) as i8 as i32 as u32;
+    let t = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 1, blocks, ACTOR_EXEC));
+    if t == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_62ac, actors::actor_setup(cpu, t));
+    cpu.write32(t + BEHAVIOUR, STRIKE_EXEC);
+    let x = cpu.read32(ship + POSITION);
+    cpu.write32(t + POSITION, x);
+    let y = cpu.read32(ship + POSITION + 4).wrapping_add(0xfff7_0000);
+    cpu.write32(t + POSITION + 4, y);
+    let z = cpu.read32(ship + POSITION + 8);
+    cpu.write32(t + POSITION + 8, z);
+    nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_STRIKE));
+    let n = cpu.read8(ship + NUMBER);
+    cpu.write8(t + NUMBER, n);
+    let levels = LEVELS.wrapping_add((n as i8 as i32 * 3) as u32);
+    let sum = cpu.read8(levels + 1) as i8 as i32 + cpu.read8(levels + 2) as i8 as i32;
+    cpu.write16(t + POWER, (sum / 2 + 10) as u16);
+    cpu.write32(t + SHIP, ship);
+    cpu.write32(t + STRIKE_MARK, s);
+    cpu.write8(s + MARK_GAP, 0);
+    let strikes = cpu.read8(s + MARK_STRIKES).wrapping_add(1);
+    cpu.write8(s + MARK_STRIKES, strikes);
+    if strikes as i8 > 0 {
+        cpu.write16(s + PHASE, 3);
+    } else {
+        cpu.write8(s + PHASE_HIGH, 1);
+    }
+}
+
+/// The strike (a trail: 5 pieces 3 places apart, drawn by its own draw, kind 0 in its colour, type
+/// 13, its own boxes; no hits of its own). Its speed (turned by its angle): a random drift to the
+/// side and 4 pixels back, slowing for 18 frames; then gaining toward 24 pixels a frame ahead as it
+/// widens, steering toward its bolt (a share of the turn a frame, growing over 32 frames, while
+/// more than 16 pixels away; then all of it) until the bolt lies within reach (its distance less
+/// than twice the speed, with 24 pixels and up to 8 at random): there it bursts and fades. Its bolt
+/// gone, it flies on straight and fades off screen. It counts itself in its bolt each frame.
+const STRIKE_BOXES: u32 = 0x0607_2854;
+const STRIKE_FLAGS: u32 = 0x8_0004;
+const STRIKE_DRAW: u32 = 0x0604_aef8;
+/// A sprite's flags for a polygon of its character, four corners.
+const TEXTURED_QUAD: u32 = 5;
+const STRIKE_TYPE: u8 = 13;
+const STRIKE_START: u32 = 0x1000;
+const STRIKE_PIECES: u32 = 5;
+const STRIKE_SPACING: u32 = 3;
+/// The strike's bolt, speed (x, y), frames launching then steering (a word), frames left fading.
+const STRIKE_MARK: u32 = 0x78;
+const STRIKE_SPEED: u32 = 0x5c;
+const STRIKE_FRAMES: u32 = 0x6e;
+const STRIKE_LEFT: u32 = 0x70;
+const STRIKE_DRIFT: u32 = 0x4_0000;
+const STRIKE_LAUNCH: u16 = 18;
+const STRIKE_FASTEST: u32 = 0xffe8_0000;
+const STRIKE_ACCEL: u32 = 0x8000;
+const STRIKE_WIDEST: u32 = 0x4000;
+const STRIKE_WIDENING: u32 = 0x400;
+const STRIKE_STEERS: i16 = 31;
+const STRIKE_CLOSE: i32 = 0xf_ffff;
+const STRIKE_REACH: u32 = 0x18_0000;
+const STRIKE_REACH_RANDOM: u32 = 0x8_0000;
+const BURST_EXEC: u32 = 0x0604_ad2c;
+/// SGL's (as far as can be told): a 16.16 division.
+const SL_DIV: u32 = 0x0606_62d8;
+
+pub fn strike_exec(cpu: &mut Cpu, t: u32) {
+    let f = cpu.stack();
+    let mark = cpu.read32(t + STRIKE_MARK);
+    let record = |cpu: &mut Cpu| {
+        let a = cpu.read16(t + ANGLE) as i16 as i32 as u32;
+        nested!(cpu, 0x0604_da00, actors::trail_record(cpu, t, a));
+    };
+    let phase = cpu.read8(t + PHASE_LOW);
+    match phase {
+        0 | 1 => {
+            if phase == 0 {
+                nested!(cpu, 0x0604_d95c, actors::trail_init(cpu, t, STRIKE_PIECES, STRIKE_SPACING, STRIKE_BOXES));
+                let flags = cpu.read32(t + FLAGS) | STRIKE_FLAGS;
+                cpu.write32(t + FLAGS, flags);
+                cpu.write32(t + BEAM_DRAW, STRIKE_DRAW);
+                cpu.write8(t + LIFT, 0);
+                cpu.write8(t + KIND, 0);
+                cpu.write8(t + FRAME, 0);
+                cpu.write32(t + SCALES, STRIKE_START);
+                cpu.write32(t + SCALES + 4, STRIKE_START);
+                let kind = cpu.read8(t + KIND) as i8 as i32;
+                let colour = cpu.read16(KIND_COLOURS.wrapping_add((kind * 16) as u32));
+                cpu.write16(t + OWN_COLOUR, colour);
+                cpu.write16(t + COLOUR, colour);
+                cpu.write8(t + SIDE, 0);
+                cpu.write8(t + TYPE, STRIKE_TYPE);
+                cpu.write32(t + BOXES, STRIKE_BOXES);
+                hit_set(cpu, t, 0);
+                let r = nested!(cpu, 0x0604_5d90, math::random(cpu, STRIKE_DRIFT));
+                cpu.write32(t + STRIKE_SPEED, r);
+                cpu.write32(t + STRIKE_SPEED + 4, STRIKE_DRIFT);
+                cpu.write16(t + STRIKE_FRAMES, STRIKE_LAUNCH);
+                cpu.write16(t + PHASE, 1);
+            }
+            record(cpu);
+            for k in 0..2 {
+                let v = cpu.read32(t + STRIKE_SPEED + 4 * k) as i32;
+                cpu.write32(t + STRIKE_SPEED + 4 * k, v.wrapping_add(v.wrapping_neg() / 8) as u32);
+            }
+            let n = cpu.read16(t + STRIKE_FRAMES).wrapping_sub(1);
+            cpu.write16(t + STRIKE_FRAMES, n);
+            if n as i16 <= 0 {
+                cpu.write32(t + STRIKE_SPEED + 4, 0);
+                cpu.write32(t + STRIKE_SPEED, 0);
+                cpu.write16(t + STRIKE_FRAMES, 0);
+                cpu.write16(t + PHASE, 2);
+            }
+        }
+        2 => {
+            record(cpu);
+            let to = nested!(cpu, 0x0604_5e30, super::aim::angle_to(cpu, t, mark)) as i16 as i32 as u32;
+            let from = cpu.read16(t + ANGLE) as i16 as i32 as u32;
+            let d = nested!(cpu, 0x0604_6194, super::camera::angle_diff(cpu, from, to));
+            cpu.write32(f + 0x14, d);
+            let v = cpu.read32(t + STRIKE_SPEED + 4);
+            let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, STRIKE_FASTEST, STRIKE_ACCEL));
+            cpu.write32(t + STRIKE_SPEED + 4, v);
+            let w = cpu.read32(t + SCALES + 4);
+            let w = nested!(cpu, 0x0604_6168, actors::approach(cpu, w, STRIKE_WIDEST, STRIKE_WIDENING));
+            cpu.write32(t + SCALES + 4, w);
+            let steered = cpu.read16(t + STRIKE_FRAMES) as i16;
+            if steered <= STRIKE_STEERS && nested!(cpu, 0x0604_5ee4, super::aim::distance(cpu, t, mark)) as i32 > STRIKE_CLOSE {
+                let share = 8 - (cpu.read16(t + STRIKE_FRAMES) as i16 / 4) as i32;
+                let d = cpu.read32(f + 0x14);
+                let turn = cpu.call(SL_DIV, &[d, share as u32]);
+                let a = cpu.read16(t + ANGLE).wrapping_add(turn as u16);
+                cpu.write16(t + ANGLE, a);
+                let n = cpu.read16(t + STRIKE_FRAMES).wrapping_add(1);
+                cpu.write16(t + STRIKE_FRAMES, n);
+            } else {
+                let a = cpu.read16(t + ANGLE).wrapping_add(cpu.read16(f + 0x16));
+                cpu.write16(t + ANGLE, a);
+            }
+            let r = nested!(cpu, 0x0604_5d90, math::random(cpu, STRIKE_REACH_RANDOM));
+            let d = nested!(cpu, 0x0604_5ee4, super::aim::distance(cpu, t, mark));
+            let reach = d.wrapping_add(r).wrapping_add(STRIKE_REACH) as i32;
+            let speed = (cpu.read32(t + STRIKE_SPEED + 4) as i32).wrapping_mul(2).wrapping_abs();
+            if reach <= speed {
+                cpu.write16(t + PHASE, 4);
+            }
+        }
+        3 => {
+            record(cpu);
+            let v = cpu.read32(t + STRIKE_SPEED + 4);
+            let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, STRIKE_FASTEST, STRIKE_ACCEL));
+            cpu.write32(t + STRIKE_SPEED + 4, v);
+            let (x, y) = (cpu.read32(t + POSITION) as i32, cpu.read32(t + POSITION + 4) as i32);
+            if x.wrapping_abs() > WIDE_EDGE_X || y.wrapping_abs() > EDGE_Y {
+                cpu.write16(t + PHASE, 5);
+            }
+        }
+        4 => {
+            record(cpu);
+            let b = shot_in(cpu);
+            if b != 0 {
+                cpu.write32(b + BEHAVIOUR, BURST_EXEC);
+                for k in 0..3 {
+                    let v = cpu.read32(t + POSITION + 4 * k);
+                    cpu.write32(b + POSITION + 4 * k, v);
+                }
+                let n = cpu.read8(t + NUMBER);
+                cpu.write8(b + NUMBER, n);
+                let level = cpu.read8(LEVEL_C.wrapping_add((n as i8 as i32 * 3) as u32)) as i8 as i32;
+                cpu.write16(b + POWER, (level * 2 + 20) as u16);
+                let ship = cpu.read32(t + SHIP);
+                cpu.write32(b + SHIP, ship);
+                let mark = cpu.read32(t + STRIKE_MARK);
+                cpu.write32(b + BURST_MARK, mark);
+                cpu.write16(t + PHASE, 5);
+            }
+        }
+        5 => {
+            record(cpu);
+            if cpu.read8(t + PHASE_HIGH) == 0 {
+                let left = cpu.read8(t + actors::TRAIL_PIECES) as u32 * cpu.read8(t + actors::TRAIL_SPACING) as u32;
+                cpu.write32(t + STRIKE_LEFT, left);
+                cpu.write8(t + PHASE_HIGH, 1);
+            }
+            let left = cpu.read32(t + STRIKE_LEFT).wrapping_sub(1);
+            cpu.write32(t + STRIKE_LEFT, left);
+            if left as i32 <= 0 {
+                end(cpu, t);
+                cpu.write16(t + PHASE, 6);
+            }
+        }
+        _ => {}
+    }
+    if cpu.read8(t + PHASE_LOW) as i8 > 3 {
+        return;
+    }
+    if mark != 0 {
+        let n = cpu.read8(mark + MARK_STRUCK).wrapping_add(1);
+        cpu.write8(mark + MARK_STRUCK, n);
+        if cpu.read8(mark + OBJ_MODE) as i8 >= ENDING as i8 {
+            cpu.write32(t + STRIKE_MARK, 0);
+            if cpu.read8(t + PHASE_LOW) as i8 <= 2 {
+                cpu.write16(t + PHASE, 3);
+            }
+        }
+    }
+    for k in 0..2 {
+        let v = cpu.read32(t + STRIKE_SPEED + 4 * k);
+        cpu.write32(f + 4 * k, v);
+    }
+    cpu.write32(f + 0x10, 0x1_0000);
+    cpu.write32(f + 0x0c, 0x1_0000);
+    cpu.write32(f + 0x14, 0);
+    let a = cpu.read16(t + ANGLE);
+    cpu.write16(f + 0x18, a);
+    cpu.call(SL_TURN, &[f]);
+    for k in 0..2 {
+        let p = cpu.read32(t + POSITION + 4 * k).wrapping_add(cpu.read32(f + 4 * k));
+        cpu.write32(t + POSITION + 4 * k, p);
+    }
+}
+
+/// The strike's own draw (sprite `sp`): its pieces back along its kept places (each a 4-pixel-wide
+/// textured polygon from one place to the next, its colour brighter by up to 15 along it, the last
+/// a different frame).
+pub fn strike_draw(cpu: &mut Cpu, sp: u32) {
+    let t = sp.wrapping_sub(SPRITE);
+    let f = cpu.stack();
+    let c = f + 0x2c;
+    for (k, v) in [(0xc, 0xfffeu16), (0, 0xfffe), (8, 2), (4, 2), (6, 0), (2, 0)] {
+        cpu.write16(c + k, v);
+    }
+    cpu.write32(f + 0x48, c + 0xa);
+    cpu.write16(c + 0xe, 8);
+    cpu.write16(c + 0xa, 8);
+    cpu.write32(f, TEXTURED_QUAD);
+    cpu.write8(f + 0x1e, 0);
+    cpu.write32(f + 0x24, c);
+    cpu.write32(f + 0x14, 0x1_0000);
+    cpu.write32(f + 0x10, 0x1_0000);
+    let lift = cpu.read8(sp + 0x23);
+    cpu.write8(f + 0x23, lift);
+    let own = cpu.read16(sp + 0x1a);
+    cpu.write16(f + 0x1a, own);
+    cpu.write16(f + 0x18, own);
+    let mut kept = cpu.read16(t + actors::TRAIL_KEPT) as i16 as i32;
+    let mut next = cpu.read16(t + actors::TRAIL_NEXT) as i16 as i32;
+    for k in 0..3 {
+        let v = cpu.read32(t + POSITION + 4 * k);
+        cpu.write32(f + 4 + 4 * k, v);
+    }
+    cpu.write8(f + 0x1f, 0xae);
+    let pieces = |cpu: &mut Cpu| cpu.read8(t + actors::TRAIL_PIECES) as i32;
+    let mut i = 0;
+    if pieces(cpu) <= 0 {
+        return;
+    }
+    cpu.write32(f + 0x3c, c + 0xa);
+    cpu.write32(f + 0x40, c + 0xe);
+    cpu.write32(f + 0x44, actors::TRAIL_PIECES);
+    while i < pieces(cpu) {
+        if kept <= 0 {
+            return;
+        }
+        let spacing = cpu.read8(t + actors::TRAIL_SPACING) as i32;
+        if kept >= spacing {
+            next -= spacing;
+            kept -= spacing;
+        } else {
+            next -= kept;
+            kept = 0;
+        }
+        if next < 0 {
+            next += 0x80;
+        }
+        let px = (cpu.read16(t + actors::TRAIL_X + 2 * next as u32) as u32) << 16;
+        let py = (cpu.read16(t + actors::TRAIL_Y + 2 * next as u32) as u32) << 16;
+        let (dx, dy) = (cpu.read32(f + 4).wrapping_sub(px), cpu.read32(f + 8).wrapping_sub(py));
+        let len = nested!(cpu, 0x0604_5e60, super::aim::length(cpu, dx, dy));
+        let len = (len as i32 / 0x1_0000) as u16;
+        cpu.write16(c + 0xe, len);
+        cpu.write16(c + 0xa, len);
+        let (dx, dy) = (cpu.read32(f + 4).wrapping_sub(px), cpu.read32(f + 8).wrapping_sub(py));
+        let a = cpu.call(SL_ATAN, &[dx, dy]).wrapping_add(0x4000);
+        cpu.write16(f + 0x20, a as u16);
+        let frame = if kept > 0 && i + 1 < pieces(cpu) { 0xaf } else { 0xb3 };
+        cpu.write8(f + 0x1f, frame);
+        nested!(cpu, 0x0604_0960, sprites::draw(cpu, f));
+        cpu.write32(f + 4, px);
+        cpu.write32(f + 8, py);
+        i += 1;
+        let n = pieces(cpu) as u32;
+        let along = nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, i as u32, n));
+        let shade = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, 15, along));
+        let colour = (shade as u16).wrapping_add(cpu.read16(f + 0x1a));
+        cpu.write16(f + 0x18, colour);
+    }
+}
+
+/// B+C's burst (where a strike lands): drawn by its own draw (kind 3 frame 56, the first kind's
+/// colour, spinning, its lift flickering), type 13, its own boxes; grows and shrinks away as C's
+/// shot does (its size by C's level), keeping its bolt (until grown, or the bolt ends).
+const BURST_DRAW: u32 = 0x0604_ac8c;
+const BURST_BOXES: u32 = 0x0607_285c;
+const BURST_TYPE: u8 = 13;
+const BURST_COLOUR: u16 = 0x20;
+const BURST_START: u32 = 0x1000;
+const BURST_5C: u32 = 0x3_0000;
+const BURST_MARK: u32 = 0x78;
+const BURST_SUMMED: u32 = 0x7c;
+const BURST_FRAME: u8 = 56;
+const BURST_SPIN: u16 = 0x1000;
+const VBLANKS: u32 = super::globals::VBLANKS;
+
+pub fn burst_exec(cpu: &mut Cpu, b: u32) {
+    let mark = cpu.read32(b + BURST_MARK);
+    let phase = cpu.read8(b + PHASE_LOW) as i8;
+    match phase {
+        0 | 1 => {
+            if phase == 0 {
+                cpu.write8(b + LIFT, 0);
+                cpu.write8(b + KIND, A_KIND);
+                let flags = cpu.read32(b + FLAGS) | OWN_MODEL;
+                cpu.write32(b + FLAGS, flags);
+                cpu.write32(b + BEAM_DRAW, BURST_DRAW);
+                let kind = cpu.read8(b + KIND) as i8 as i32;
+                let colour = cpu.read16(KIND_COLOURS.wrapping_add((kind * 16) as u32)).wrapping_add(BURST_COLOUR);
+                cpu.write16(b + OWN_COLOUR, colour);
+                cpu.write16(b + COLOUR, colour);
+                cpu.write8(b + SIDE, 0);
+                cpu.write8(b + TYPE, BURST_TYPE);
+                cpu.write32(b + BOXES, BURST_BOXES);
+                cpu.write32(b + SPEED + 4, BURST_5C);
+                cpu.write32(b + SPEED, BURST_5C);
+                cpu.write32(b + SCALES + 4, BURST_START);
+                cpu.write32(b + SCALES, BURST_START);
+                let n = number(cpu, b);
+                let level = cpu.read8(LEVEL_C.wrapping_add((n * 3) as u32)) as i8 as i32;
+                cpu.write32(b + C_SIZE, (level * 0x2e8 + 0xc000) as u32);
+                cpu.write32(b + BURST_SUMMED, 0);
+                cpu.write16(b + PHASE, GROWING);
+            }
+            if burst_grown(cpu, b, BURST_SUMMED) {
+                cpu.write32(b + BURST_MARK, 0);
+                cpu.write16(b + PHASE, SHRINKING);
+            }
+        }
+        2 => burst_shrinks(cpu, b, BURST_SUMMED),
+        _ => {}
+    }
+    let w = cpu.read32(b + SCALES);
+    cpu.write32(b + SCALES + 4, w);
+    if mark != 0 && cpu.read8(mark + OBJ_MODE) as i8 >= ENDING as i8 {
+        cpu.write32(b + BURST_MARK, 0);
+    }
+}
+
+/// The burst's own draw (sprite `sp`): one sprite, turned on a sixteenth of a turn each frame.
+pub fn burst_draw(cpu: &mut Cpu, sp: u32) {
+    let b = sp.wrapping_sub(SPRITE);
+    let f = cpu.stack();
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, f));
+    for k in 0..5 {
+        let v = cpu.read32(b + POSITION + 4 * k);
+        cpu.write32(f + 4 + 4 * k, v);
+    }
+    let a = cpu.read16(sp + 0x20);
+    cpu.write16(f + 0x20, a);
+    let kind = cpu.read8(sp + 0x1e);
+    cpu.write8(f + 0x1e, kind);
+    cpu.write8(f + 0x1f, BURST_FRAME);
+    let lift = cpu.read8(sp + 0x23);
+    cpu.write8(f + 0x23, lift);
+    let colour = cpu.read16(KIND_COLOURS);
+    cpu.write16(f + 0x18, colour);
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, f));
+    let a = cpu.read16(sp + 0x20).wrapping_sub(BURST_SPIN);
+    cpu.write16(sp + 0x20, a);
+    let lift = if cpu.read32(VBLANKS) & 1 != 0 { 0 } else { 0xf7 };
+    cpu.write8(sp + 0x23, lift);
 }

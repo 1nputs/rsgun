@@ -392,32 +392,32 @@ pub fn move_by_angle(cpu: &mut Cpu, actor: u32, speed: u32, angle: u32) {
     }
 }
 
-/// A trail (an actor that draws itself, with a box per piece): its boxes (24, from +0xb4), two
-/// bytes of its own, how many of its places are kept (to 128) and the next one's index (words),
-/// and its last 128 places (x, y in pixels, and angles: words).
+/// A trail (an actor that draws itself, with a box per piece): its boxes (24, from +0xb4), how many
+/// pieces it draws and how many places apart (bytes), how many of its places are kept (to 128)
+/// and the next one's index (words), and its last 128 places (x, y in pixels, and angles: words).
 const TRAIL_BOXES: u32 = 0xb4;
 const TRAIL_BOX_COUNT: u32 = 24;
-const TRAIL_A: u32 = 0x174;
-const TRAIL_B: u32 = 0x175;
-const TRAIL_KEPT: u32 = 0x176;
-const TRAIL_NEXT: u32 = 0x178;
-const TRAIL_X: u32 = 0x17a;
-const TRAIL_Y: u32 = 0x27a;
+pub const TRAIL_PIECES: u32 = 0x174;
+pub const TRAIL_SPACING: u32 = 0x175;
+pub const TRAIL_KEPT: u32 = 0x176;
+pub const TRAIL_NEXT: u32 = 0x178;
+pub const TRAIL_X: u32 = 0x17a;
+pub const TRAIL_Y: u32 = 0x27a;
 const TRAIL_ANGLE: u32 = 0x37a;
 const TRAIL_PLACES: u32 = 0x80;
 /// A trail's flags: a model drawn by its own function, its boxes not flipped.
 const TRAIL_FLAGS: u32 = IS_MODEL | OWN_DRAW | 0x1_0000;
 
-/// The actor set up as a trail: its two bytes, no places kept, and (with `boxes`) each of its
-/// boxes that one box.
-pub fn trail_init(cpu: &mut Cpu, actor: u32, a: u32, b: u32, boxes: u32) {
+/// The actor set up as a trail: its pieces and their spacing, no places kept, and (with `boxes`)
+/// each of its boxes that one box.
+pub fn trail_init(cpu: &mut Cpu, actor: u32, pieces: u32, spacing: u32, boxes: u32) {
     let flags = cpu.read32(actor + FLAGS) | TRAIL_FLAGS;
     cpu.write32(actor + FLAGS, flags);
     cpu.write32(actor + 0x3c, actor + TRAIL_BOXES);
     cpu.write16(actor + TRAIL_KEPT, 0);
     cpu.write16(actor + TRAIL_NEXT, 0);
-    cpu.write8(actor + TRAIL_A, a as u8);
-    cpu.write8(actor + TRAIL_B, b as u8);
+    cpu.write8(actor + TRAIL_PIECES, pieces as u8);
+    cpu.write8(actor + TRAIL_SPACING, spacing as u8);
     if boxes == 0 {
         return;
     }
