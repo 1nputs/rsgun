@@ -23,6 +23,7 @@ mod hits;
 mod hud;
 mod main_loop;
 mod math;
+mod models;
 mod objects;
 mod pads;
 mod play;
@@ -392,6 +393,18 @@ pub fn register(n: &mut Natives) {
         0x0605_f794 => bg::draw_models[n, list] -> (),
         0x0605_f860 => bg::edge_line[angle] -> u32,
         0x0605_f8c4 => bg::edge_window[table, y, angle] -> (),
+        0x0605_2908 => models::model_init[obj] -> (),
+        0x0605_2970 => models::follow_parent[obj] -> (),
+        0x0605_29ac => models::model_boxes[obj] -> (),
+        0x0605_2b08 => models::beam_boxes[obj, src] -> (),
+        0x0605_2b88 => models::beam_length[obj, length] -> (),
+        0x0605_2c44 => models::model_point[obj, p] -> (),
+        0x0605_2ca0 => models::model_screen_point[obj, p] -> (),
+        0x0605_2d04 => models::group_draw[s] -> (),
+        0x0605_2d6c => models::part_draw[s] -> (),
+        0x0605_2e50 => models::model_draw[s] -> (),
+        0x0605_2f3c => models::group_end[s] -> (),
+        0x0605_2f54 => models::end_with_parent[obj] -> (),
         0x0605_ecb4 => screen::queue_fill[src, dst, size] -> u32,
         0x0605_ecf0 => screen::queue_copy[src, dst, size] -> u32,
         0x0605_ed2c => screen::queue_long_copy[src, dst, size, piece] -> u32,
