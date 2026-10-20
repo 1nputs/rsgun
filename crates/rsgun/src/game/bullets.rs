@@ -3,7 +3,7 @@
 //! then cycling its frames; ended off screen, or with a spark where it hits the ground.
 
 use super::actors::{E_ANGLE, E_COLOUR, E_POSITION, E_SCALES, E_SCRIPT, E_SPEED};
-use super::{actors, aim, bg, hits, math, nested, objects, sprites, Cpu};
+use super::{actors, aim, bg, effects, hits, math, nested, objects, sprites, Cpu};
 
 /// The objects' mode byte (ending).
 const OBJ_MODE: u32 = 3;
@@ -317,4 +317,119 @@ pub fn shootable_bullet(cpu: &mut Cpu, b: u32) {
         nested!(cpu, DRIFT_EFFECT, actors::drift_effect(cpu, e));
     }
     cpu.write8(b + OBJ_MODE, ENDING);
+}
+
+/// An aimed bullet's stage (a word; its low byte read), its link (effects.rs's) and the
+/// animation it plays, its speed (move_by_angle's).
+const AIMED_STAGE: u32 = 0x6c;
+const AIMED_STAGE_LOW: u32 = 0x6d;
+const AIMED_LINK: u32 = 0x80;
+const AIMED_ANIMATION: u32 = 0x0607_2bb0;
+const ANGLE_SPEED: u32 = 0x5c;
+/// Off the screen's edges (x, y beyond these from its centre) it ends.
+const EDGE_X: i32 = 0xb3_ffff;
+const EDGE_Y: i32 = 0x73_ffff;
+/// The main loop's passes (globals.rs's): its lift flickers by them.
+const LOOPS: u32 = super::globals::LOOPS;
+
+/// An aimed bullet's behaviour: ended where it hit something or the ground; grown in over its
+/// first frames (a frame small, one larger, then whole with its animation started), then moved
+/// by its speed with its animation played and its lift flickering; ended off screen.
+pub fn aimed_exec(cpu: &mut Cpu, b: u32) {
+    let hit = cpu.read16(b + HIT_FLAGS) & HIT_SOMETHING != 0 || {
+        let (x, y) = (cpu.read32(b + POSITION), cpu.read32(b + POSITION + 4));
+        nested!(cpu, 0x0605_ef90, bg::map_hit(cpu, x, y)) != 0
+    };
+    if hit {
+        cpu.write8(b + OBJ_MODE, ENDING);
+    }
+    let stage = cpu.read8(b + AIMED_STAGE_LOW);
+    match stage {
+        0 => {
+            cpu.write8(b + FRAME, BULLET_FRAME_0);
+            cpu.write32(b + SCALES + 4, BULLET_SCALE);
+            cpu.write32(b + SCALES, BULLET_SCALE);
+            cpu.write16(b + AIMED_STAGE, 1);
+        }
+        1 => {
+            cpu.write32(b + SCALES + 4, GROWING);
+            cpu.write32(b + SCALES, GROWING);
+            cpu.write16(b + AIMED_STAGE, 2);
+        }
+        2 | 3 => {
+            if stage == 2 {
+                cpu.write32(b + SCALES + 4, FULL);
+                cpu.write32(b + SCALES, FULL);
+                nested!(cpu, 0x0604_6530, effects::link_init(cpu, b + AIMED_LINK, AIMED_ANIMATION));
+                cpu.write16(b + AIMED_STAGE, 3);
+            }
+            for k in 0..2 {
+                let p = cpu.read32(b + POSITION + 4 * k).wrapping_add(cpu.read32(b + ANGLE_SPEED + 4 * k));
+                cpu.write32(b + POSITION + 4 * k, p);
+            }
+            nested!(cpu, 0x0604_6558, effects::link_step(cpu, b + SPRITE, b + AIMED_LINK));
+            let lift = if cpu.read32(LOOPS) & 1 != 0 { LIFT_HIGH } else { LIFT_LOW };
+            cpu.write8(b + LIFT, lift);
+        }
+        _ => {}
+    }
+    let (x, y) = (cpu.read32(b + POSITION) as i32, cpu.read32(b + POSITION + 4) as i32);
+    if x.wrapping_abs() > EDGE_X || y.wrapping_abs() > EDGE_Y {
+        cpu.write8(b + OBJ_MODE, ENDING);
+    }
+}
+
+/// An aimed shot's description (the shooter's): its position (x, y), its flags (a long: bit 0
+/// aims at the player), its direction (a word), its speed, the shooter.
+const AS_POSITION: u32 = 0x00;
+const AS_FLAGS: u32 = 0x14;
+const AS_ANGLE: u32 = 0x18;
+const AS_SPEED: u32 = 0x30;
+const AS_SHOOTER: u32 = 0x3c;
+const AIMS: u32 = 1;
+/// How far back the aim looks (aim.rs's delay).
+const AIM_DELAY: u32 = 20;
+/// An aimed bullet's size, flags, boxes.
+const AIMED_SIZE: u32 = 0xb4;
+const AIMED_FLAGS: u32 = 0x3000_0400;
+const AIMED_BOXES: u32 = 0x0607_2ba8;
+const AIMED_EXEC: u32 = 0x0604_daa8;
+
+/// Makes an aimed bullet from the shot `shot` (aimed at the player it picks if the shot says so,
+/// the direction then kept in the shot): the bullet, or 0 when there is no room.
+pub fn aimed_set(cpu: &mut Cpu, shot: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, AIMED_SIZE)) as i8 as i32 as u32;
+    let b = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, BULLET_LIST, blocks, ACTOR_EXEC));
+    if b == 0 {
+        return 0;
+    }
+    let shooter = cpu.read32(shot + AS_SHOOTER);
+    nested!(cpu, 0x0604_62ac, actors::actor_setup(cpu, b));
+    let flags = cpu.read32(b + FLAGS) | AIMED_FLAGS;
+    cpu.write32(b + FLAGS, flags);
+    cpu.write32(b + BEHAVIOUR, AIMED_EXEC);
+    cpu.write8(b + LIFT, BULLET_LIFT);
+    let number = cpu.read8(shooter + NUMBER);
+    cpu.write8(b + NUMBER, number);
+    cpu.write8(b + KIND, 0);
+    let colour = cpu.read16(CHAR_BASE).wrapping_add(BULLET_COLOUR);
+    cpu.write16(b + OWN_COLOUR, colour);
+    cpu.write16(b + COLOUR, colour);
+    cpu.write32(b + BOXES, AIMED_BOXES);
+    let side = cpu.read8(shooter + SIDE);
+    cpu.write8(b + SIDE, side);
+    cpu.write8(b + TYPE, BULLET_TYPE);
+    if cpu.read32(shot + AS_FLAGS) & AIMS != 0 {
+        let angle = nested!(cpu, 0x0604_0df0, aim::aim(cpu, b, AIM_DELAY));
+        cpu.write16(shot + AS_ANGLE, angle as u16);
+    }
+    let angle = cpu.read16(shot + AS_ANGLE) as i16 as i32 as u32;
+    let speed = cpu.read32(shot + AS_SPEED);
+    nested!(cpu, 0x0604_d8d8, actors::move_by_angle(cpu, b, speed, angle));
+    for k in 0..2 {
+        let v = cpu.read32(shot + AS_POSITION + 4 * k);
+        cpu.write32(b + POSITION + 4 * k, v);
+    }
+    cpu.write32(b + POSITION + 8, 0);
+    b
 }

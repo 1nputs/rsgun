@@ -368,6 +368,104 @@ pub fn enemy_clear(cpu: &mut Cpu, enemy: u32) {
     }
 }
 
+/// An actor's speed for move_by_angle (x, y).
+const ANGLE_SPEED: u32 = 0x5c;
+
+/// The actor's speed set to `speed` in the direction `angle` (16-bit; 0 straight up), and the
+/// actor moved by it.
+pub fn move_by_angle(cpu: &mut Cpu, actor: u32, speed: u32, angle: u32) {
+    let angle = angle as i16 as i32 as u32;
+    if angle == 0 {
+        cpu.write32(actor + ANGLE_SPEED, 0);
+        cpu.write32(actor + ANGLE_SPEED + 4, speed.wrapping_neg());
+    } else {
+        let s = cpu.call(SL_SIN, &[angle]);
+        let dx = nested!(cpu, 0x0600_6a58, super::math::fixed_mul(cpu, speed, s));
+        cpu.write32(actor + ANGLE_SPEED, dx);
+        let c = cpu.call(SL_COS, &[angle]);
+        let dy = nested!(cpu, 0x0600_6a58, super::math::fixed_mul(cpu, speed.wrapping_neg(), c));
+        cpu.write32(actor + ANGLE_SPEED + 4, dy);
+    }
+    for k in 0..2 {
+        let p = cpu.read32(actor + POSITION + 4 * k).wrapping_add(cpu.read32(actor + ANGLE_SPEED + 4 * k));
+        cpu.write32(actor + POSITION + 4 * k, p);
+    }
+}
+
+/// A trail (an actor that draws itself, with a box per piece): its boxes (24, from +0xb4), two
+/// bytes of its own, how many of its places are kept (to 128) and the next one's index (words),
+/// and its last 128 places (x, y in pixels, and angles: words).
+const TRAIL_BOXES: u32 = 0xb4;
+const TRAIL_BOX_COUNT: u32 = 24;
+const TRAIL_A: u32 = 0x174;
+const TRAIL_B: u32 = 0x175;
+const TRAIL_KEPT: u32 = 0x176;
+const TRAIL_NEXT: u32 = 0x178;
+const TRAIL_X: u32 = 0x17a;
+const TRAIL_Y: u32 = 0x27a;
+const TRAIL_ANGLE: u32 = 0x37a;
+const TRAIL_PLACES: u32 = 0x80;
+/// A trail's flags: a model drawn by its own function, its boxes not flipped.
+const TRAIL_FLAGS: u32 = IS_MODEL | OWN_DRAW | 0x1_0000;
+
+/// The actor set up as a trail: its two bytes, no places kept, and (with `boxes`) each of its
+/// boxes that one box.
+pub fn trail_init(cpu: &mut Cpu, actor: u32, a: u32, b: u32, boxes: u32) {
+    let flags = cpu.read32(actor + FLAGS) | TRAIL_FLAGS;
+    cpu.write32(actor + FLAGS, flags);
+    cpu.write32(actor + 0x3c, actor + TRAIL_BOXES);
+    cpu.write16(actor + TRAIL_KEPT, 0);
+    cpu.write16(actor + TRAIL_NEXT, 0);
+    cpu.write8(actor + TRAIL_A, a as u8);
+    cpu.write8(actor + TRAIL_B, b as u8);
+    if boxes == 0 {
+        return;
+    }
+    for k in 0..TRAIL_BOX_COUNT {
+        let dst = actor + TRAIL_BOXES + 8 * k;
+        for i in [0, 1] {
+            let v = cpu.read8(boxes + i);
+            cpu.write8(dst + i, v);
+        }
+        for i in [2, 4] {
+            let v = cpu.read16(boxes + i);
+            cpu.write16(dst + i, v);
+        }
+        for i in [6, 7] {
+            let v = cpu.read8(boxes + i);
+            cpu.write8(dst + i, v);
+        }
+    }
+}
+
+/// The whole pixels of a 16.16 value, rounded toward zero.
+fn pixels(v: u32) -> u16 {
+    let v = v as i32;
+    ((if v < 0 { v.wrapping_add(0xffff) } else { v }) >> 16) as u16
+}
+
+/// The trail's place this frame kept (its position and `angle`, which it takes).
+pub fn trail_record(cpu: &mut Cpu, actor: u32, angle: u32) {
+    let next = cpu.read16(actor + TRAIL_NEXT) as i16 as i32 as u32;
+    let x = pixels(cpu.read32(actor + POSITION));
+    cpu.write16(actor + TRAIL_X + 2 * next, x);
+    let next = cpu.read16(actor + TRAIL_NEXT) as i16 as i32 as u32;
+    let y = pixels(cpu.read32(actor + POSITION + 4));
+    cpu.write16(actor + TRAIL_Y + 2 * next, y);
+    let next = cpu.read16(actor + TRAIL_NEXT) as i16 as i32 as u32;
+    cpu.write16(actor + TRAIL_ANGLE + 2 * next, angle as u16);
+    cpu.write16(actor + ANGLE, angle as u16);
+    let kept = cpu.read16(actor + TRAIL_KEPT);
+    if kept as i16 <= 127 {
+        cpu.write16(actor + TRAIL_KEPT, kept.wrapping_add(1));
+    }
+    let next = cpu.read16(actor + TRAIL_NEXT).wrapping_add(1);
+    cpu.write16(actor + TRAIL_NEXT, next);
+    let next = cpu.read16(actor + TRAIL_NEXT) as i16 as i32 as u32;
+    let next = nested!(cpu, 0x0600_6a6e, super::math::remainder(cpu, next, TRAIL_PLACES));
+    cpu.write16(actor + TRAIL_NEXT, next as u16);
+}
+
 /// An actor set up: its sprite, its hit fields, the word at +0x6c cleared.
 pub fn actor_setup(cpu: &mut Cpu, actor: u32) {
     nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, actor + SPRITE));
