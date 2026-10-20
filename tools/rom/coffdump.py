@@ -1,8 +1,14 @@
-"""Dump an SH COFF object's symbols as C-like declarations: coffdump.py IMAGE OFFSET [--raw]."""
-import sys, struct
+"""Dump an SH COFF object's symbols as C-like declarations: coffdump.py IMAGE OFFSET [--raw | --header].
+
+--header writes the types as a C header a parser takes (Ghidra's: tools/ghidra/project.py): names
+without the leading underscore COFF adds, anonymous tags named anonN, the symbols left out; each
+struct's size stays in a comment after it, to check the parser's layout against.
+"""
+import re, sys, struct
 d = open(sys.argv[1], "rb").read()
 base = int(sys.argv[2], 16)
 raw = "--raw" in sys.argv
+header = "--header" in sys.argv
 magic, nscns, tdat, symptr, nsyms, opthdr, flags = struct.unpack(">HHIIIHH", d[base:base + 20])
 secs = []
 for i in range(nscns):
@@ -56,6 +62,17 @@ def fmt(name, typ, aux):
     return f"{t} {s}"
 SCL = {1: "auto", 2: "extern", 3: "static", 4: "register", 8: "member", 9: "arg", 10: "struct", 11: "umember",
        12: "union", 13: "typedef", 15: "enum", 16: "enumval", 18: "field", 100: "block", 101: "fcn", 102: "eos", 103: "file", 6: "label", 17: "regparm"}
+if header:
+    _print = print
+    def unmangle(text):
+        text = re.sub(r"\.(\d+)fake", r"anon\1", text)
+        return re.sub(r"(?<![\w.])_(?=[A-Za-z_])", "", text)
+    def print(line=""):
+        if line.startswith(("/* file", "/* section", "/* extern", "/* static")):
+            return
+        line = re.sub(r"= (\d+),$", lambda m: f"= {struct.unpack('>i', struct.pack('>I', int(m.group(1))))[0]},", line)
+        _print(unmangle(line).replace("? ", "int "))
+    _print("/* The types of the cart's leftover dma.c object (tools/rom/coffdump.py --header). */")
 for (i, name, val, scn, typ, scl, aux) in syms:
     k = SCL.get(scl, str(scl))
     if raw:
