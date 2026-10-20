@@ -5,7 +5,7 @@
 
 use super::nested;
 use super::globals::{GAME_FLAGS, HELD};
-use super::{hits, objects, Cpu};
+use super::{hits, objects, sprites, Cpu};
 
 /// The objects' mode byte: new, running, ending, ended.
 const OBJ_MODE: u32 = 3;
@@ -38,7 +38,7 @@ const FLASH_COLOUR: u16 = 0xe0;
 const END_FLAGS: u32 = 0x0607_405c;
 /// end_by_flags's SH-2 entry (for nested!).
 const END_BY_FLAGS: u32 = 0x0604_6138;
-/// The draw (an actor's sprite or model, by its flags; not rewritten yet beyond sprites.rs's).
+/// The draw's SH-2 entry (for nested!).
 const DRAW: u32 = 0x0604_0960;
 
 /// Ends `actor` if it has any of the flags to end: 1, else 0.
@@ -119,5 +119,5 @@ pub fn actor_exec(cpu: &mut Cpu, actor: u32) {
         let model = cpu.read32(models + 4 * flash);
         cpu.write32(actor + MODEL, model);
     }
-    cpu.call(DRAW, &[actor + SPRITE]);
+    nested!(cpu, DRAW, sprites::draw(cpu, actor + SPRITE));
 }

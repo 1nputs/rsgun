@@ -396,6 +396,7 @@ pub fn register(n: &mut Natives) {
         0x0604_5fd8 => aim::nearest[obj, out] -> u32,
         0x0604_03c4 => sprites::draw_sprite[s] -> (),
         0x0604_030c => sprites::draw_model[s] -> (),
+        0x0604_0960 => sprites::draw[s] -> (),
         0x0604_6138 => actors::end_by_flags[actor] -> u32,
         0x0604_6168 => actors::approach[from, to, step] -> u32,
         0x0604_d780 => actors::actor_exec[actor] -> (),

@@ -2,6 +2,7 @@
 //! character and frame, placed (the frame's offset turned with the sprite), brought into view
 //! space, culled off screen.
 
+use super::nested;
 use super::Cpu;
 
 /// A sprite (in an object): flags (SPRITE_*) with the attributes in their low word (ATTR_*), its
@@ -211,4 +212,164 @@ pub fn draw_model(cpu: &mut Cpu, s: u32) {
     let model = cpu.read32(s + MODEL);
     cpu.call(SL_PUT_POLYGON, &[model]);
     cpu.call(SL_POP_MATRIX, &[]);
+}
+
+/// The flags that pick the draw: none (bit 31), a polygon (any of POLYGON_BITS: 4 the character's
+/// own size, 3 two corners (a line), else four), a model (IS_MODEL), a distorted sprite (bit 30).
+const NO_DRAW: u32 = 0x8000_0000;
+const POLYGON_BITS: u32 = 7;
+const SPRITE_POLYGON: u32 = 4;
+const TWO_CORNERS: u32 = 3;
+const IS_MODEL: u32 = 0x80_0000;
+const DISTORTED: u32 = 0x4000_0000;
+/// A polygon's corners (x, y words, pixels, turned with the sprite: four, or two for a line).
+const CORNERS: u32 = 0x24;
+/// The draw's frame: SGL's polygon command (its type: 2 a textured quad, else 3-6 by the
+/// attributes' low bits; its attributes, colour, the character's size, the corners, two words),
+/// the turn struct a corner is placed with, where SGL puts a corner brought into view, the count of
+/// corners, whether one is on screen, the corners' address.
+const C_TYPE: u32 = 0;
+const C_ATTRS: u32 = 4;
+const C_COLOUR: u32 = 6;
+const C_SIZE: u32 = 8;
+const C_CORNERS: u32 = 0xc;
+const C_1C: u32 = 0x1c;
+const T: u32 = 0x20;
+const T_Z: u32 = 8;
+const VIEW: u32 = 0x60;
+const COUNT: u32 = 0x68;
+const SEEN: u32 = 0x6c;
+const CORNERS_AT: u32 = 0x70;
+/// The polygon's attributes: SGL's base, and the bit cleared for a textured quad.
+const POLYGON_ATTRS: u16 = 0xc0;
+const TEXTURED_CLEARS: u16 = 0x40;
+/// A corner on screen: within these of the centre (pixels).
+const CORNER_X: i32 = 0xaf;
+const CORNER_Y: i32 = 0x6f;
+/// Not rewritten yet: the distorted sprite's draw. SGL's (as far as can be told): a point brought
+/// into view (its screen place at VIEW +2, +6; its depth back), and the polygon command drawn.
+const DRAW_DISTORTED: u32 = 0x0604_0604;
+const SL_CONVERT_2D: u32 = 0x0606_76fc;
+const SL_POLYGON: u32 = 0x0606_778c;
+/// The rewrites' SH-2 entries (for nested!).
+const DRAW_SPRITE: u32 = 0x0604_03c4;
+const DRAW_MODEL: u32 = 0x0604_030c;
+
+/// Draws the sprite, model or polygon at `s` by its flags; a polygon's flag OFF_SCREEN says
+/// whether it was culled (no corner on screen).
+pub fn draw(cpu: &mut Cpu, s: u32) {
+    let flags = cpu.read32(s + FLAGS);
+    if flags & NO_DRAW != 0 {
+        return;
+    }
+    if flags & (IS_MODEL | POLYGON_BITS) == 0 {
+        if flags & DISTORTED == 0 {
+            nested!(cpu, DRAW_SPRITE, draw_sprite(cpu, s));
+        } else {
+            cpu.call(DRAW_DISTORTED, &[s]);
+        }
+        return;
+    }
+    if flags & IS_MODEL != 0 {
+        nested!(cpu, DRAW_MODEL, draw_model(cpu, s));
+        return;
+    }
+    if flags & POLYGON_BITS == 0 {
+        return;
+    }
+    let f = cpu.stack();
+    let corners = cpu.read32(s + CORNERS);
+    cpu.write32(f + CORNERS_AT, corners);
+    if corners == 0 {
+        return;
+    }
+    cpu.write16(f + C_ATTRS, POLYGON_ATTRS);
+    let mut attrs = cpu.read16(s + ATTRS) & ATTR_KEPT | POLYGON_ATTRS;
+    cpu.write16(f + C_ATTRS, attrs);
+    let colour = cpu.read16(s + COLOUR);
+    cpu.write16(f + C_COLOUR, colour);
+    cpu.write16(f + C_1C, 0);
+    cpu.write16(f + C_1C + 2, 0);
+    if cpu.read32(s + FLAGS) & SPRITE_POLYGON != 0 {
+        cpu.write16(f + C_TYPE, 2);
+        attrs &= !TEXTURED_CLEARS;
+        cpu.write16(f + C_ATTRS, attrs);
+        let kind = KINDS.wrapping_add((cpu.read8(s + KIND) as i8 as i32 * 16) as u32);
+        let first = cpu.read16(kind + KIND_CHAR) as i16 as i32;
+        let frames = cpu.read32(kind + KIND_FRAMES);
+        let n = cpu.read8(s + FRAME) as u32;
+        let frame = cpu.read32(frames + 8 * n);
+        let ch = first + cpu.read8(frame) as i32;
+        let size = CHAR_SIZES.wrapping_add((8 * ch) as u32);
+        let w = cpu.read16(size + 4);
+        cpu.write16(f + C_SIZE, w);
+        let h = cpu.read16(size + 6);
+        cpu.write16(f + C_SIZE + 2, h);
+    } else {
+        let t = (cpu.read16(s + ATTRS) & 3) + 3;
+        cpu.write16(f + C_TYPE, t);
+    }
+    let t = f + T;
+    let sx = cpu.read32(s + SCALE_X);
+    cpu.write32(t + O_SCALES, sx);
+    let sy = cpu.read32(s + SCALE_Y);
+    cpu.write32(t + O_SCALES + 4, sy);
+    let flip = cpu.read32(s + FLAGS) & FLIP as u32;
+    cpu.write32(t + O_FLIP, flip);
+    let angle = if cpu.read32(s + FLAGS) & UNTURNED != 0 { 0 } else { cpu.read16(s + ANGLE) };
+    cpu.write16(t + O_ANGLE, angle);
+    let count = if cpu.read32(s + FLAGS) & 3 == TWO_CORNERS { 2 } else { 4 };
+    cpu.write32(f + COUNT, count);
+    let z = cpu.read32(s + POS + 8);
+    cpu.write32(t + T_Z, z);
+    let seen = cpu.read32(s + FLAGS) & UNCULLED;
+    cpu.write32(f + SEEN, seen);
+    let mut depth = 0;
+    for i in 0..count {
+        let corners = cpu.read32(f + CORNERS_AT);
+        let cx = cpu.read16(corners + 4 * i) as i16 as i32;
+        cpu.write32(t, cx as u32);
+        let cy = cpu.read16(corners + 4 * i + 2) as i16 as i32;
+        cpu.write32(t + 4, cy as u32);
+        if cx != 0 || cy != 0 {
+            cpu.write32(t, (cx << 16) as u32);
+            cpu.write32(t + 4, (cy << 16) as u32);
+            cpu.call(SL_TURN, &[t]);
+        }
+        let x = cpu.read32(t).wrapping_add(cpu.read32(s + POS));
+        cpu.write32(t, x);
+        let y = cpu.read32(t + 4).wrapping_add(cpu.read32(s + POS + 4));
+        cpu.write32(t + 4, y);
+        let corner = f + C_CORNERS + 4 * i;
+        if cpu.read32(t + T_Z) == 0 {
+            cpu.write16(corner, ((x as i32) / 0x1_0000) as u16);
+            let y = cpu.read32(t + 4);
+            cpu.write16(corner + 2, ((y as i32) / 0x1_0000) as u16);
+            depth = FLAT_Z;
+        } else {
+            depth = cpu.call(SL_CONVERT_2D, &[t, f + VIEW]);
+            let vx = cpu.read16(f + VIEW + 2);
+            cpu.write16(corner, vx);
+            let vy = cpu.read16(f + VIEW + 6);
+            cpu.write16(corner + 2, vy);
+        }
+        if cpu.read32(f + SEEN) == 0 {
+            let x = (cpu.read16(corner) as i16 as i32).abs();
+            if x <= CORNER_X {
+                let y = (cpu.read16(corner + 2) as i16 as i32).abs();
+                if y <= CORNER_Y {
+                    cpu.write32(f + SEEN, 1);
+                }
+            }
+        }
+    }
+    if cpu.read32(f + SEEN) != 0 {
+        let lift = (cpu.read8(s + LIFT) as i8 as i32) << 16;
+        cpu.call(SL_POLYGON, &[f, depth.wrapping_sub(lift as u32)]);
+        let flags = cpu.read32(s + FLAGS);
+        cpu.write32(s + FLAGS, flags & !OFF_SCREEN);
+    } else {
+        let flags = cpu.read32(s + FLAGS);
+        cpu.write32(s + FLAGS, flags | OFF_SCREEN);
+    }
 }
