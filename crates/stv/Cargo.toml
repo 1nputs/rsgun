@@ -7,3 +7,7 @@ version.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# native code's own stacks, so a ported function can wait for the machine (native.rs)
+corosensei = "0.3.4"

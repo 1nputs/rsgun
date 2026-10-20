@@ -2,12 +2,15 @@
 //! cabinet's controls, the settings EEPROM and backup RAM kept between runs.
 //!
 //!     rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute]
-//!     rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--rom DIR] [--save DIR]
+//!     rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--evidence FILE]
+//!           [--dump F,F --dump-dir DIR] [--rom DIR] [--save DIR]
 //!
 //! `--rom`: the images tools/rom/mkcart.py makes (default build/rom). `--save`: where the EEPROM
 //! and backup RAM are kept (default $XDG_DATA_HOME/rsgun or ~/.local/share/rsgun). `--script`:
 //! an input script (controls.rs) played instead of the keyboard and pads. `--headless`: no window;
-//! runs N frames and writes the last picture (`--shot`) and the sound (`--wav`).
+//! runs N frames and writes the last picture (`--shot`), the sound (`--wav`) and the evidence of what
+//! code ran (`--evidence`, stv::evidence's text form), and the memories at frames (`--dump`, as
+//! stv-check boot writes them).
 //!
 //! Keys: arrows move; Z, X, C are buttons A, B, C; A, S, D are A+B, A+C, B+C; space is all three;
 //! 5 and 6 insert coins, 1 and 2 start; F2 test, 9 service; P pauses, Tab runs fast while held,
@@ -18,6 +21,15 @@
 
 mod audio;
 mod controls;
+
+// the port's generated code (crates/rsgun/build.rs)
+include!(concat!(env!("OUT_DIR"), "/port.rs"));
+
+/// Where the game loads its modes' and stages' code: work RAM-H from 0x06080000; the window's first
+/// 4 KB is code in each of them (tools/port/overlays.py).
+fn overlay() -> stv::evidence::Overlay {
+    stv::evidence::Overlay { window: 0x0608_0000..0x060A_5000, print: 0x0608_0000..0x0608_1000 }
+}
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,6 +56,10 @@ struct Options {
     shot: Option<PathBuf>,
     wav: Option<PathBuf>,
     mute: bool,
+    evidence: Option<PathBuf>,
+    dumps: Vec<u64>,
+    dump_dir: PathBuf,
+    native: bool,
 }
 
 fn default_save_dir() -> PathBuf {
@@ -67,6 +83,10 @@ fn parse_args() -> Result<Options, String> {
         shot: None,
         wav: None,
         mute: false,
+        evidence: None,
+        dumps: Vec::new(),
+        dump_dir: PathBuf::from("out/machine"),
+        native: false,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut it = args.iter();
@@ -83,6 +103,10 @@ fn parse_args() -> Result<Options, String> {
             "--frames" => o.frames = value()?.parse().map_err(|_| "--frames: a number")?,
             "--shot" => o.shot = Some(PathBuf::from(value()?)),
             "--wav" => o.wav = Some(PathBuf::from(value()?)),
+            "--evidence" => o.evidence = Some(PathBuf::from(value()?)),
+            "--dump" => o.dumps = value()?.split(',').filter_map(|f| f.parse().ok()).collect(),
+            "--dump-dir" => o.dump_dir = PathBuf::from(value()?),
+            "--native" => o.native = true,
             "--mute" => o.mute = true,
             "-h" | "--help" => return Err(String::new()),
             _ => return Err(format!("unknown option {a}")),
@@ -101,6 +125,10 @@ fn load_machine(o: &Options) -> Result<Machine, String> {
     let cart = read(o.rom.join("rsgun-cart.bin"))?;
     let eeprom = fs::read(o.save.join("eeprom.bin")).or_else(|_| fs::read(o.rom.join("eeprom.bin"))).ok();
     let mut m = Machine::new(bios, cart, 1, eeprom.as_deref());
+    if o.native {
+        m.sys.natives.overlay = Some(overlay());
+        generated::register(&mut m.sys.natives);
+    }
     if let Ok(backup) = fs::read(o.save.join("backup.bin"))
         && backup.len() == m.sys.backup.len()
     {
@@ -147,12 +175,19 @@ impl CoinPulse {
 fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
     let mut m = load_machine(o)?;
     let frames = if o.frames > 0 { o.frames } else { script.map_or(600, |s| s.last_frame() + 60) };
+    if o.evidence.is_some() {
+        m.evidence = Some(Box::new(stv::evidence::Evidence { overlay: Some(overlay()), ..Default::default() }));
+    }
     let t = Instant::now();
     let mut sound = Vec::new();
     for f in 0..frames {
         let held = script.map_or([0; 2], |s| s.held(f));
         m.sys.inputs = controls::ports(held);
         m.run_frame();
+        if o.dumps.contains(&(f + 1)) {
+            let d = o.dump_dir.join(format!("f{:06}", f + 1));
+            m.dump(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+        }
         let samples = std::mem::take(&mut m.sys.scsp.out);
         if o.wav.is_some() {
             sound.extend_from_slice(&samples);
@@ -160,9 +195,17 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
     }
     let ms = t.elapsed().as_secs_f64() * 1000.0 / frames as f64;
     println!("{frames} frames, {ms:.2} ms a frame");
+    if o.native {
+        let n = &m.sys.natives;
+        println!("native: {} functions, {} calls run natively, {} passed to the interpreter", n.len(), n.native_calls, n.interpreted_calls);
+    }
     if let Some(p) = &o.shot {
         write_ppm(p, &m.picture)?;
         println!("picture {}x{} written to {}", m.picture.0, m.picture.1, p.display());
+    }
+    if let (Some(p), Some(e)) = (&o.evidence, &m.evidence) {
+        fs::write(p, e.to_text()).map_err(|err| format!("{}: {err}", p.display()))?;
+        println!("evidence: {} addresses, {} transfers written to {}", e.executed.len(), e.transfers.len(), p.display());
     }
     if let Some(p) = &o.wav {
         audio::write_wav(p, &sound)?;

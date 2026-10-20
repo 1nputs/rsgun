@@ -2,8 +2,10 @@
 
 pub mod m68k;
 pub mod eeprom;
+pub mod evidence;
 pub mod machine;
 pub mod mem;
+pub mod native;
 pub mod onchip;
 pub mod scsp;
 pub mod scu;

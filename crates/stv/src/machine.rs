@@ -11,6 +11,8 @@ use crate::smpc::{Effect, Smpc};
 use crate::scsp::{Scsp, SoundBus};
 use crate::spin::SpinBus;
 use crate::video::{Vdp1, Vdp2};
+use corosensei::stack::DefaultStack;
+use corosensei::{Coroutine, CoroutineResult, Yielder};
 
 /// NTSC: 263 lines a frame.
 const LINES: u32 = 263;
@@ -68,6 +70,8 @@ pub struct Sys {
     pub trace: Option<[Vec<u8>; 2]>,
     /// What each SH-2's accesses tell its loop watch (spin.rs).
     spin: [SpinBus; 2],
+    /// The game's functions ported to Rust (native.rs).
+    pub natives: crate::native::Natives,
 }
 
 impl Sys {
@@ -77,6 +81,47 @@ impl Sys {
             b.extend_from_slice(&[tag, size, 0, 0]);
             b.extend_from_slice(&a.to_be_bytes());
             b.extend_from_slice(&v.to_be_bytes());
+        }
+    }
+}
+
+impl Sys {
+    fn new(bios: Vec<u8>, cart: Vec<u8>, area: u8, eeprom: Option<&[u8]>) -> Sys {
+        Sys {
+            bios,
+            wram_l: vec![0; 0x10_0000],
+            wram_h: vec![0; 0x10_0000],
+            backup: vec![0; 0x1_0000],
+            cart,
+            prot: [0; 16],
+            prot_on: false,
+            prot_counter: 0,
+            io: [0; 0x80],
+            inputs: [0xFF; 8],
+            onchip: [OnChip::new(false), OnChip::new(true)],
+            cache_data: [vec![0; 0x1000], vec![0; 0x1000]],
+            scu: Scu::default(),
+            smpc: Smpc::new(area, eeprom),
+            vdp1: Vdp1::new(),
+            vdp2: Vdp2::new(),
+            scsp: Scsp::new(),
+            m68k: M68k::default(),
+            sound_on: false,
+            sound_reset_pending: false,
+            sound_owed: 0,
+            sound_in_sample: 0,
+            sound_steps: 0,
+            slave_on: false,
+            clock352: false,
+            line: 0,
+            frame: 0,
+            reset_pending: false,
+            nmi_pending: [false; 2],
+            slave_reset_pending: false,
+            wait: 0,
+            trace: None,
+            spin: Default::default(),
+            natives: Default::default(),
         }
     }
 }
@@ -232,7 +277,10 @@ impl Sys {
             0x05D0_0000..=0x05D7_FFFF | 0x05FE_0000..=0x05FE_FFFF => {
                 // byte writes to word or long registers: not expected
             }
-            0x0600_0000..=0x07FF_FFFF => self.wram_h[(p & 0xF_FFFF) as usize] = v,
+            0x0600_0000..=0x07FF_FFFF => {
+                self.natives.wrote(p & 0xF_FFFF);
+                self.wram_h[(p & 0xF_FFFF) as usize] = v
+            }
             _ => {}
         }
     }
@@ -260,7 +308,10 @@ impl Sys {
                 let nl = if p & 2 == 0 { (l & 0xFFFF) | ((v as u32) << 16) } else { (l & 0xFFFF_0000) | v as u32 };
                 self.ext_write32(p & !3, nl);
             }
-            0x0600_0000..=0x07FF_FFFF => wr16(&mut self.wram_h, (p & 0xF_FFFF) as usize, v),
+            0x0600_0000..=0x07FF_FFFF => {
+                self.natives.wrote(p & 0xF_FFFF);
+                wr16(&mut self.wram_h, (p & 0xF_FFFF) as usize, v)
+            }
             _ => {
                 self.ext_write8(p, (v >> 8) as u8);
                 self.ext_write8(p + 1, v as u8);
@@ -275,7 +326,10 @@ impl Sys {
                 self.scu.write32(p, v);
                 self.run_scu_dma();
             }
-            0x0600_0000..=0x07FF_FFFF => wr32(&mut self.wram_h, (p & 0xF_FFFF) as usize, v),
+            0x0600_0000..=0x07FF_FFFF => {
+                self.natives.wrote(p & 0xF_FFFF);
+                wr32(&mut self.wram_h, (p & 0xF_FFFF) as usize, v)
+            }
             _ => {
                 self.ext_write16(p, (v >> 16) as u16);
                 self.ext_write16(p + 2, v as u16);
@@ -596,6 +650,21 @@ impl Bus for CpuBus<'_> {
         self.sys.record(self.cpu, b'W', 4, a, v);
         self.sys.cpu_write32(self.cpu, a, v)
     }
+    fn native_at(&mut self, a: u32) -> Option<crate::native::NativeFn> {
+        let sys = &mut *self.sys;
+        let n = sys.natives.get(a, &sys.wram_h)?;
+        sys.natives.native_calls += 1;
+        Some(n.f)
+    }
+    fn tick(&mut self, cycles: u32) {
+        self.sys.wait += cycles;
+    }
+    fn take_interrupt(&mut self, cpu: &mut Sh2) -> bool {
+        take_interrupt(self.sys, cpu, self.cpu).is_some()
+    }
+    fn note_interpreted(&mut self) {
+        self.sys.natives.interpreted_calls += 1;
+    }
     fn fetch16(&mut self, a: u32) -> u16 {
         if self.sys.spin[self.cpu].recording {
             self.sys.spin[self.cpu].fetch(a);
@@ -622,7 +691,7 @@ pub struct FrameHashes(pub [u64; 7]);
 
 pub struct Machine {
     pub cpu: [Sh2; 2],
-    pub sys: Sys,
+    pub sys: Box<Sys>,
     /// Cycles each CPU has run into the current line.
     time: [u32; 2],
     pub steps: [u64; 2],
@@ -630,10 +699,116 @@ pub struct Machine {
     pub picture: (usize, usize, Vec<u8>),
     /// When on, the addresses each SH-2 has executed (development).
     pub coverage: Option<[std::collections::HashSet<u32>; 2]>,
+    /// When on, the evidence of what the program runs: addresses, transfers, interrupts.
+    pub evidence: Option<Box<crate::evidence::Evidence>>,
     /// Play the loops the CPUs spin in instead of executing them (spin.rs); off, every instruction
     /// is executed (the checks compare the two).
     pub spin_enabled: bool,
     watch: [Watch; 2],
+    /// Each CPU's native call in progress (native.rs), with the stacks kept for the next, and the
+    /// system's stand-in while a call runs (the call has the system: it is moved in and out).
+    fibers: [Option<Fiber>; 2],
+    stacks: [Option<DefaultStack>; 2],
+    spare: Option<Box<Sys>>,
+}
+
+/// A native call running on its own stack, so that it can wait for the machine: given the system
+/// and the cycles its CPU may run, it runs until it has used them (and gives the system back) or
+/// returns (with the CPU's state).
+type Fiber = Coroutine<(Box<Sys>, u32), Box<Sys>, (Sh2, Box<Sys>)>;
+
+/// The stack a native call runs on (reserved, not committed until used).
+const FIBER_STACK: usize = 64 << 20;
+
+/// A native call's bus: the CPU's bus while the call has the system; spending its cycles hands
+/// the system back to the machine until it is the CPU's turn again.
+struct FiberBus<'y> {
+    sys: Option<Box<Sys>>,
+    cpu: usize,
+    budget: u32,
+    yielder: &'y Yielder<(Box<Sys>, u32), Box<Sys>>,
+}
+
+impl FiberBus<'_> {
+    #[inline]
+    fn bus(&mut self) -> CpuBus<'_> {
+        CpuBus { sys: self.sys.as_mut().expect("a native call runs with the system"), cpu: self.cpu }
+    }
+}
+
+impl Bus for FiberBus<'_> {
+    fn read8(&mut self, a: u32) -> u8 {
+        self.bus().read8(a)
+    }
+    fn read16(&mut self, a: u32) -> u16 {
+        self.bus().read16(a)
+    }
+    fn read32(&mut self, a: u32) -> u32 {
+        self.bus().read32(a)
+    }
+    fn write8(&mut self, a: u32, v: u8) {
+        self.bus().write8(a, v)
+    }
+    fn write16(&mut self, a: u32, v: u16) {
+        self.bus().write16(a, v)
+    }
+    fn write32(&mut self, a: u32, v: u32) {
+        self.bus().write32(a, v)
+    }
+    fn fetch16(&mut self, a: u32) -> u16 {
+        self.bus().fetch16(a)
+    }
+    fn native_at(&mut self, a: u32) -> Option<crate::native::NativeFn> {
+        self.bus().native_at(a)
+    }
+    fn tick(&mut self, cycles: u32) {
+        let sys = self.sys.as_mut().expect("a native call runs with the system");
+        sys.wait += cycles;
+        if sys.wait >= self.budget {
+            let (sys, budget) = self.yielder.suspend(self.sys.take().expect("the system"));
+            self.sys = Some(sys);
+            self.budget = budget;
+        }
+    }
+    fn take_interrupt(&mut self, cpu: &mut Sh2) -> bool {
+        let c = self.cpu;
+        take_interrupt(self.sys.as_mut().expect("the system"), cpu, c).is_some()
+    }
+    fn note_interpreted(&mut self) {
+        self.bus().note_interpreted()
+    }
+}
+
+/// Takes the interrupt due on CPU `c` (between instructions: no delayed branch waiting), if one is:
+/// an NMI, the SCU's or the on-chip modules', above the CPU's mask. Returns the vector and handler.
+fn take_interrupt(sys: &mut Sys, cpu: &mut Sh2, c: usize) -> Option<(u32, u32)> {
+    if sys.nmi_pending[c] {
+        sys.nmi_pending[c] = false;
+        cpu.nmi(&mut CpuBus { sys, cpu: c });
+        return Some((crate::sh2::VEC_NMI, cpu.pc));
+    }
+    let onchip = sys.onchip[c].pending_irq();
+    let external = if c == 0 { sys.scu.pending() } else { None };
+    let take_external = match (external, onchip) {
+        (Some((le, _)), Some(o)) => le >= o.level,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    if take_external {
+        let (level, source) = external.unwrap_or_default();
+        if level > cpu.level() {
+            let vector = sys.scu.acknowledge(source);
+            sys.record(c, b'X', vector as u8, cpu.pc, 9);
+            cpu.interrupt(&mut CpuBus { sys, cpu: c }, vector, level);
+            return Some((vector, cpu.pc));
+        }
+    } else if let Some(o) = onchip
+        && o.level > cpu.level()
+    {
+        cpu.interrupt(&mut CpuBus { sys, cpu: c }, o.vector, o.level);
+        return Some((o.vector, cpu.pc));
+    }
+    None
 }
 
 /// One CPU's loop watch (spin.rs).
@@ -658,50 +833,19 @@ const SPIN_MAX_BACK: u32 = 256;
 impl Machine {
     /// `eeprom`: the settings EEPROM's contents at power on (the oracle's: tools/oracle/eeprom.py).
     pub fn new(bios: Vec<u8>, cart: Vec<u8>, area: u8, eeprom: Option<&[u8]>) -> Machine {
-        let sys = Sys {
-            bios,
-            wram_l: vec![0; 0x10_0000],
-            wram_h: vec![0; 0x10_0000],
-            backup: vec![0; 0x1_0000],
-            cart,
-            prot: [0; 16],
-            prot_on: false,
-            prot_counter: 0,
-            io: [0; 0x80],
-            inputs: [0xFF; 8],
-            onchip: [OnChip::new(false), OnChip::new(true)],
-            cache_data: [vec![0; 0x1000], vec![0; 0x1000]],
-            scu: Scu::default(),
-            smpc: Smpc::new(area, eeprom),
-            vdp1: Vdp1::new(),
-            vdp2: Vdp2::new(),
-            scsp: Scsp::new(),
-            m68k: M68k::default(),
-            sound_on: false,
-            sound_reset_pending: false,
-            sound_owed: 0,
-            sound_in_sample: 0,
-            sound_steps: 0,
-            slave_on: false,
-            clock352: false,
-            line: 0,
-            frame: 0,
-            reset_pending: false,
-            nmi_pending: [false; 2],
-            slave_reset_pending: false,
-            wait: 0,
-            trace: None,
-            spin: Default::default(),
-        };
         let mut m = Machine {
             cpu: [Sh2::default(), Sh2::default()],
-            sys,
+            sys: Box::new(Sys::new(bios, cart, area, eeprom)),
             time: [0; 2],
             steps: [0; 2],
             picture: (0, 0, Vec::new()),
             coverage: None,
+            evidence: None,
             spin_enabled: true,
             watch: Default::default(),
+            fibers: Default::default(),
+            stacks: Default::default(),
+            spare: None,
         };
         let mut bus = CpuBus { sys: &mut m.sys, cpu: 0 };
         m.cpu[0].reset(&mut bus, 0);
@@ -716,6 +860,9 @@ impl Machine {
 
     /// Runs to the end of the next frame.
     pub fn run_frame(&mut self) {
+        if let Some(e) = &mut self.evidence {
+            e.overlay_now = None;
+        }
         loop {
             self.run_line();
             self.sys.line = (self.sys.line + 1) % LINES;
@@ -793,12 +940,14 @@ impl Machine {
             self.sys.onchip[0].reset();
             self.sys.onchip[1].reset();
             self.sys.slave_on = false;
+            self.fibers = Default::default();
             let mut bus = CpuBus { sys: &mut self.sys, cpu: 0 };
             self.cpu[0].reset(&mut bus, 2);
         }
         if self.sys.slave_reset_pending {
             self.sys.slave_reset_pending = false;
             self.sys.onchip[1].reset();
+            self.fibers[1] = None;
             let mut bus = CpuBus { sys: &mut self.sys, cpu: 1 };
             self.cpu[1] = Sh2::default();
             self.cpu[1].reset(&mut bus, 0);
@@ -842,7 +991,7 @@ impl Machine {
     /// Runs CPU `c` to `target` cycles into the line: playing its loop while it spins, else
     /// instruction by instruction, watching for a loop to spin in.
     fn advance(&mut self, c: usize, target: u32) {
-        let watch = self.spin_enabled && self.sys.trace.is_none() && self.coverage.is_none();
+        let watch = self.spin_enabled && self.sys.trace.is_none() && self.coverage.is_none() && self.evidence.is_none();
         while self.time[c] < target {
             if let Watch::Spinning { .. } = self.watch[c] {
                 if self.sys.spin[c].broken {
@@ -853,9 +1002,9 @@ impl Machine {
                 continue;
             }
             let from = self.cpu[c].pc;
-            let cycles = self.step(c);
+            let cycles = self.step(c, target - self.time[c]);
             self.time[c] += cycles;
-            if watch {
+            if watch && self.fibers[c].is_none() {
                 self.watch_step(c, from, cycles);
             }
         }
@@ -990,41 +1139,21 @@ impl Machine {
         self.sys.spin[c].clear();
     }
 
-    /// One instruction (or an interrupt taken) on a CPU; returns the cycles it took.
-    fn step(&mut self, c: usize) -> u32 {
+    /// One instruction (or an interrupt taken, or a native call's turn) on a CPU, which may run
+    /// `budget` cycles; returns the cycles it took.
+    fn step(&mut self, c: usize, budget: u32) -> u32 {
         self.sys.wait = 0;
-        let cpu = &mut self.cpu[c];
-        if cpu.delay.is_none() && self.sys.nmi_pending[c] {
-            self.sys.nmi_pending[c] = false;
-            let mut bus = CpuBus { sys: &mut self.sys, cpu: c };
-            cpu.nmi(&mut bus);
-            return 4;
+        if self.fibers[c].is_some() {
+            return self.resume_fiber(c, budget);
         }
-        if cpu.delay.is_none() {
-            let onchip = self.sys.onchip[c].pending_irq();
-            let external = if c == 0 { self.sys.scu.pending() } else { None };
-            let take_external = match (external, onchip) {
-                (Some((le, _)), Some(o)) => le >= o.level,
-                (Some(_), None) => true,
-                _ => false,
-            };
-            if take_external {
-                let (level, source) = external.unwrap_or_default();
-                if level > cpu.level() {
-                    let vector = self.sys.scu.acknowledge(source);
-                    let pc = cpu.pc;
-                    self.sys.record(c, b'X', vector as u8, pc, 9);
-                    let mut bus = CpuBus { sys: &mut self.sys, cpu: c };
-                    cpu.interrupt(&mut bus, vector, level);
-                    return 4;
-                }
-            } else if let Some(o) = onchip
-                && o.level > cpu.level()
-            {
-                let mut bus = CpuBus { sys: &mut self.sys, cpu: c };
-                cpu.interrupt(&mut bus, o.vector, o.level);
-                return 4;
+        let cpu = &mut self.cpu[c];
+        if cpu.delay.is_none()
+            && let Some((vector, handler)) = take_interrupt(&mut self.sys, cpu, c)
+        {
+            if vector != crate::sh2::VEC_NMI {
+                self.note_interrupt(c, vector, handler);
             }
+            return 4;
         }
         if cpu.sleeping {
             self.sys.onchip[c].clock_frt(8);
@@ -1032,6 +1161,26 @@ impl Machine {
         }
         if let Some(cov) = &mut self.coverage {
             cov[c].insert(cpu.pc);
+        }
+        if self.evidence.is_some() {
+            self.note_step(c);
+        }
+        let cpu = &mut self.cpu[c];
+        if cpu.delay.is_none() && self.sys.natives.maybe(cpu.pc) {
+            let mut bus = CpuBus { sys: &mut self.sys, cpu: c };
+            if let Some(f) = bus.native_at(cpu.pc) {
+                // a ported function: it runs on its own stack, to its return, in turns
+                let state = cpu.clone();
+                let stack = self.stacks[c].take().unwrap_or_else(|| DefaultStack::new(FIBER_STACK).expect("a stack for native code"));
+                self.fibers[c] = Some(Coroutine::with_stack(stack, move |yielder, (sys, budget)| {
+                    let mut cpu = state;
+                    let mut bus = FiberBus { sys: Some(sys), cpu: c, budget, yielder };
+                    f(&mut cpu, &mut bus);
+                    (cpu, bus.sys.take().expect("the system"))
+                }));
+                self.steps[c] += 1;
+                return self.resume_fiber(c, budget);
+            }
         }
         let pc = cpu.pc;
         self.sys.record(c, b'P', 0, pc, 0);
@@ -1041,6 +1190,61 @@ impl Machine {
         let cycles = 1 + self.sys.wait;
         self.sys.onchip[c].clock_frt(cycles);
         cycles
+    }
+
+    /// CPU `c`'s native call runs its turn of `budget` cycles (or to its return).
+    fn resume_fiber(&mut self, c: usize, budget: u32) -> u32 {
+        let spare = self.spare.take().unwrap_or_else(|| Box::new(Sys::new(Vec::new(), Vec::new(), 0, None)));
+        let sys = std::mem::replace(&mut self.sys, spare);
+        let fiber = self.fibers[c].as_mut().expect("a native call");
+        let sys = match fiber.resume((sys, budget.max(1))) {
+            CoroutineResult::Yield(sys) => sys,
+            CoroutineResult::Return((cpu, sys)) => {
+                self.cpu[c] = cpu;
+                let fiber = self.fibers[c].take().expect("a native call");
+                self.stacks[c] = Some(fiber.into_stack());
+                sys
+            }
+        };
+        self.spare = Some(std::mem::replace(&mut self.sys, sys));
+        let cycles = self.sys.wait.max(1);
+        self.sys.onchip[c].clock_frt(cycles);
+        cycles
+    }
+
+    /// Evidence: the instruction CPU `c` is about to run, and the transfer it makes.
+    fn note_step(&mut self, c: usize) {
+        let cpu = &self.cpu[c];
+        let (pc, r, pr) = (cpu.pc, cpu.r, cpu.pr);
+        let op = CpuBus { sys: &mut self.sys, cpu: c }.fetch16(pc);
+        let in_overlay = self.evidence.as_ref().and_then(|e| e.overlay.as_ref()).is_some_and(|o| o.holds(pc));
+        let fp = if in_overlay { self.overlay_fingerprint() } else { 0 };
+        let Some(e) = &mut self.evidence else { return };
+        *e.executed.entry((c as u8, fp, pc)).or_default() += 1;
+        if let Some((kind, target)) = crate::evidence::transfer(op, pc, &r, pr) {
+            *e.transfers.entry((c as u8, kind, pc, target)).or_default() += 1;
+        }
+    }
+
+    fn note_interrupt(&mut self, c: usize, vector: u32, handler: u32) {
+        if let Some(e) = &mut self.evidence {
+            *e.interrupts.entry((c as u8, vector, handler)).or_default() += 1;
+        }
+    }
+
+    /// The overlay window's fingerprint this frame (taken once).
+    fn overlay_fingerprint(&mut self) -> u64 {
+        let frame = self.sys.frame;
+        let w = &self.sys.wram_h;
+        let Some(e) = &mut self.evidence else { return 0 };
+        if let Some(fp) = e.overlay_now {
+            return fp;
+        }
+        let Some(o) = &e.overlay else { return 0 };
+        let fp = o.fingerprint(w);
+        e.overlay_now = Some(fp);
+        e.overlays.entry(fp).or_insert(frame);
+        fp
     }
 
     /// Writes the memories as the oracle's dumps name them (tools/patches/mednafen/oracle.inc).

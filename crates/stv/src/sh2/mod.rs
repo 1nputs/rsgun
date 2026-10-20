@@ -18,6 +18,19 @@ pub trait Bus {
     fn write16(&mut self, addr: u32, value: u16);
     fn write32(&mut self, addr: u32, value: u32);
     fn fetch16(&mut self, addr: u32) -> u16;
+    /// Native code (crate::native): the Rust function registered at an entry address, if any.
+    fn native_at(&mut self, _addr: u32) -> Option<crate::native::NativeFn> {
+        None
+    }
+    /// Native code's cost in cycles, for the machine's clock (the machine may run on meanwhile).
+    fn tick(&mut self, _cycles: u32) {}
+    /// Takes the interrupt due, if one is (between instructions): SR and the CPU's PC pushed, PC at
+    /// the handler.
+    fn take_interrupt(&mut self, _cpu: &mut Sh2) -> bool {
+        false
+    }
+    /// Native code passed a call to the interpreter (counted).
+    fn note_interpreted(&mut self) {}
 }
 
 pub const SR_T: u32 = 0x001;
@@ -99,19 +112,19 @@ impl Sh2 {
         self.sr = (self.sr & !SR_T) | t as u32;
     }
 
-    fn q(&self) -> bool {
+    pub fn q(&self) -> bool {
         self.sr & SR_Q != 0
     }
 
-    fn m(&self) -> bool {
+    pub fn m(&self) -> bool {
         self.sr & SR_M != 0
     }
 
-    fn set_q(&mut self, q: bool) {
+    pub fn set_q(&mut self, q: bool) {
         self.sr = (self.sr & !SR_Q) | ((q as u32) << 8);
     }
 
-    fn set_m(&mut self, m: bool) {
+    pub fn set_m(&mut self, m: bool) {
         self.sr = (self.sr & !SR_M) | ((m as u32) << 9);
     }
 
@@ -121,7 +134,7 @@ impl Sh2 {
     }
 
     /// Takes an exception: SR and `saved_pc` pushed, PC from the vector at VBR + 4 × `vector`.
-    fn exception<B: Bus>(&mut self, bus: &mut B, vector: u32, saved_pc: u32) {
+    fn exception<B: Bus + ?Sized>(&mut self, bus: &mut B, vector: u32, saved_pc: u32) {
         self.r[15] = self.r[15].wrapping_sub(4);
         bus.write32(self.r[15], self.sr);
         self.r[15] = self.r[15].wrapping_sub(4);
@@ -134,7 +147,7 @@ impl Sh2 {
 
     /// A power-on or manual reset: PC and R15 from the vector pair at `vector` × 4 (0 power on, 2
     /// manual reset), VBR 0, interrupts masked.
-    pub fn reset<B: Bus>(&mut self, bus: &mut B, vector: u32) {
+    pub fn reset<B: Bus + ?Sized>(&mut self, bus: &mut B, vector: u32) {
         self.pc = bus.read32(vector << 2);
         self.r[15] = bus.read32((vector + 1) << 2);
         self.vbr = 0;
@@ -145,7 +158,7 @@ impl Sh2 {
 
     /// Takes an interrupt between instructions: the machine calls this when one is pending at a
     /// higher level than the mask and no delayed branch is waiting for its slot.
-    pub fn interrupt<B: Bus>(&mut self, bus: &mut B, vector: u32, level: u32) {
+    pub fn interrupt<B: Bus + ?Sized>(&mut self, bus: &mut B, vector: u32, level: u32) {
         debug_assert!(self.delay.is_none());
         let saved = self.pc;
         self.exception(bus, vector, saved);
@@ -153,7 +166,7 @@ impl Sh2 {
     }
 
     /// Takes an NMI (vector 11): not maskable; the mask becomes 15.
-    pub fn nmi<B: Bus>(&mut self, bus: &mut B) {
+    pub fn nmi<B: Bus + ?Sized>(&mut self, bus: &mut B) {
         debug_assert!(self.delay.is_none());
         let saved = self.pc;
         self.exception(bus, VEC_NMI, saved);
@@ -161,7 +174,7 @@ impl Sh2 {
     }
 
     /// Executes one instruction (or, asleep, nothing).
-    pub fn step<B: Bus>(&mut self, bus: &mut B) {
+    pub fn step<B: Bus + ?Sized>(&mut self, bus: &mut B) {
         if self.sleeping {
             return;
         }
@@ -189,11 +202,11 @@ impl Sh2 {
         self.delay = Some(Delay { target, branch });
     }
 
-    fn illegal<B: Bus>(&mut self, bus: &mut B, addr: u32) {
+    fn illegal<B: Bus + ?Sized>(&mut self, bus: &mut B, addr: u32) {
         self.exception(bus, VEC_ILLEGAL, addr);
     }
 
-    fn execute<B: Bus>(&mut self, bus: &mut B, op: u16, addr: u32, slot: Option<Delay>) {
+    fn execute<B: Bus + ?Sized>(&mut self, bus: &mut B, op: u16, addr: u32, slot: Option<Delay>) {
         let op = op as u32;
         let n = ((op >> 8) & 0xF) as usize;
         let m = ((op >> 4) & 0xF) as usize;
@@ -440,7 +453,7 @@ impl Sh2 {
         }
     }
 
-    fn op4<B: Bus>(&mut self, bus: &mut B, op: u32, n: usize, m: usize, addr: u32) {
+    fn op4<B: Bus + ?Sized>(&mut self, bus: &mut B, op: u32, n: usize, m: usize, addr: u32) {
         if op & 0xF == 0xF {
             self.mac_w(bus, n, m);
             return;
@@ -538,7 +551,7 @@ impl Sh2 {
         }
     }
 
-    fn op_c<B: Bus>(&mut self, bus: &mut B, op: u32, n: usize, d8: u32, pc4: u32, addr: u32) {
+    fn op_c<B: Bus + ?Sized>(&mut self, bus: &mut B, op: u32, n: usize, d8: u32, pc4: u32, addr: u32) {
         let gbr = self.gbr;
         match n {
             0x0 => bus.write8(gbr.wrapping_add(d8), self.r[0] as u8),
@@ -571,7 +584,7 @@ impl Sh2 {
     }
 
     /// DIV1: one step of the non-restoring division, as the manual defines it.
-    fn div1(&mut self, n: usize, m: usize) {
+    pub fn div1(&mut self, n: usize, m: usize) {
         let old_q = self.q();
         let mut q = self.r[n] >> 31 != 0;
         let divisor = self.r[m];
@@ -594,7 +607,7 @@ impl Sh2 {
     }
 
     /// MAC.L @Rm+,@Rn+. The oracle reads @Rm first (the manual's pseudo-code reads @Rn first).
-    fn mac_l<B: Bus>(&mut self, bus: &mut B, n: usize, m: usize) {
+    pub fn mac_l<B: Bus + ?Sized>(&mut self, bus: &mut B, n: usize, m: usize) {
         let b = bus.read32(self.r[m]) as i32 as i64;
         self.r[m] = self.r[m].wrapping_add(4);
         let a = bus.read32(self.r[n]) as i32 as i64;
@@ -609,7 +622,7 @@ impl Sh2 {
     }
 
     /// MAC.W @Rm+,@Rn+, reading @Rm first as MAC.L does (not yet seen in a trace).
-    fn mac_w<B: Bus>(&mut self, bus: &mut B, n: usize, m: usize) {
+    pub fn mac_w<B: Bus + ?Sized>(&mut self, bus: &mut B, n: usize, m: usize) {
         let b = bus.read16(self.r[m]) as i16 as i64;
         self.r[m] = self.r[m].wrapping_add(2);
         let a = bus.read16(self.r[n]) as i16 as i64;
