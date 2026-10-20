@@ -437,8 +437,7 @@ const FLASH: u32 = 80;
 const FLASH_FADE: u32 = 300;
 const SE_BIG: u32 = 19;
 const SE_SMALL: u32 = 0x0607_31c6;
-/// Makers of other pieces (not rewritten yet).
-const BIG_PIECE_SET: u32 = 0x0605_8e1c;
+/// The maker of another piece (not rewritten yet).
 const SMALL_PIECE_SET: u32 = 0x0605_7da4;
 /// The explosion's own flags bit (an attribute, at random) and colours.
 const COLOUR_ALT: u16 = 0x10;
@@ -514,7 +513,7 @@ pub fn explosion_exec(cpu: &mut Cpu, x: u32) {
                 cpu.write32(d + D_2C, 0x1800);
                 cpu.write32(d + D_TURN, -80i32 as u32);
                 cpu.write32(d + D_SCALE_SPEED, 0x20);
-                cpu.call(BIG_PIECE_SET, &[d]);
+                nested!(cpu, 0x0605_8e1c, blast_set(cpu, d));
                 nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_BIG));
             } else if power & 0xf00 == 0 {
                 cpu.write16(d + D_20, 0);
@@ -586,3 +585,156 @@ pub fn explosion_exec(cpu: &mut Cpu, x: u32) {
     cpu.write16(x + COLOUR, if r & 7 != 0 { base } else { base + COLOUR_ALT });
 }
 static ORBIT_SET_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
+
+const EXPLOSION_SIZE: u32 = 0x5c;
+const EXPLOSION_EXEC: u32 = 0x0605_88d4;
+const POWER_0: u32 = 0x3000;
+
+/// Makes an explosion at `p` (x, y, z; following the object at +0x3c, if any): in list 3, else 2.
+pub fn explosion_set(cpu: &mut Cpu, p: u32) {
+    let x = piece_in(cpu, &[3, 2], EXPLOSION_SIZE);
+    if x == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, x + SPRITE));
+    cpu.write32(x + BEHAVIOUR, EXPLOSION_EXEC);
+    cpu.write32(x + FLAGS, PIECE_FLAGS);
+    cpu.write16(x + STATE, GROWING);
+    cpu.write8(x + FRAME, 1);
+    cpu.write8(x + KIND, 0);
+    let base = cpu.read16(CHAR_BASE);
+    cpu.write16(x + COLOUR, base);
+    for k in 0..3 {
+        let v = cpu.read32(p + 4 * k);
+        cpu.write32(x + POSITION + 4 * k, v);
+    }
+    let follows = cpu.read32(p + 0x3c);
+    cpu.write32(x + FOLLOWS, follows);
+    cpu.write32(x + POWER, POWER_0);
+}
+
+/// A blast (the explosion's flash at full power): a ring of shards drawn by its own draw, around
+/// what it follows; its size grows by its growth, which changes by its change; once the growth
+/// turns back it lasts its count of frames more (and draws as many shards).
+const BLAST_FOLLOWS: u32 = 0x3c;
+const BLAST_GROWTH: u32 = 0x40;
+const BLAST_CHANGE: u32 = 0x44;
+const BLAST_COUNT: u32 = 0x48;
+const BLAST_SIZE: u32 = 0x4c;
+const BLAST_EXEC: u32 = 0x0605_8c5c;
+const BLAST_DRAW: u32 = 0x0605_8d00;
+/// Its flags: a model drawn by its own function (the draw at +0x34).
+const OWN_MODEL: u32 = 0xc0_0000;
+const DRAW_AT: u32 = 0x34;
+/// The colours it flickers between.
+const BLAST_ALT: u16 = 8;
+
+/// Makes a blast from `d`: its growth (+0x2c), the growth's change (+0x30), its count (+0x34),
+/// what it follows (+0x3c); in list 3.
+pub fn blast_set(cpu: &mut Cpu, d: u32) {
+    let o = piece_in(cpu, &[3], BLAST_SIZE);
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    cpu.write32(o + BEHAVIOUR, BLAST_EXEC);
+    cpu.write32(o + DRAW_AT, BLAST_DRAW);
+    cpu.write32(o + FLAGS, OWN_MODEL);
+    for k in 0..3 {
+        let v = cpu.read32(d + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    for (from, to) in [(0x3c, BLAST_FOLLOWS), (0x2c, BLAST_GROWTH), (0x30, BLAST_CHANGE), (0x34, BLAST_COUNT)] {
+        let v = cpu.read32(d + from);
+        cpu.write32(o + to, v);
+    }
+    cpu.write32(o + SCALES, 0);
+    cpu.write32(o + SCALES + 4, 0);
+}
+
+/// A blast's behaviour: ended once the screen is handed over, or (its growth turned back) its
+/// count runs out; else grown (both scales), turned at random, placed on what it follows, its
+/// colour flickering.
+pub fn blast_exec(cpu: &mut Cpu, o: u32) {
+    if handed_over(cpu) {
+        end(cpu, o);
+        return;
+    }
+    if (cpu.read32(o + BLAST_GROWTH) as i32) < 0 {
+        let n = cpu.read32(o + BLAST_COUNT) as i32;
+        if n <= 0 {
+            end(cpu, o);
+            return;
+        }
+        cpu.write32(o + BLAST_COUNT, (n - 1) as u32);
+    }
+    let size = cpu.read32(o + SCALES).wrapping_add(cpu.read32(o + BLAST_GROWTH));
+    cpu.write32(o + SCALES, size);
+    let g = cpu.read32(o + BLAST_GROWTH).wrapping_add(cpu.read32(o + BLAST_CHANGE));
+    cpu.write32(o + BLAST_GROWTH, g);
+    let size = cpu.read32(o + SCALES);
+    cpu.write32(o + SCALES + 4, size);
+    let r = random(cpu, 0x10000);
+    cpu.write16(o + ANGLE, r as u16);
+    let follows = cpu.read32(o + BLAST_FOLLOWS);
+    if follows != 0 {
+        for k in 0..3 {
+            let v = cpu.read32(follows + POSITION + 4 * k);
+            cpu.write32(o + POSITION + 4 * k, v);
+        }
+    }
+    let r = random(cpu, 0x10000);
+    let colour = ((r as u16) & BLAST_ALT).wrapping_add(cpu.read16(CHAR_BASE));
+    cpu.write16(o + COLOUR, colour);
+}
+
+/// The shard's sprite (in the draw's frame, sprites.rs's struct): its flags, position, colour,
+/// angle, corners and lift; the corners after it (a thin quad, 3 pixels either side).
+const S_FLAGS: u32 = 0x00;
+const S_POSITION: u32 = 0x04;
+const S_COLOUR: u32 = 0x18;
+const S_ANGLE: u32 = 0x20;
+const S_LIFT: u32 = 0x23;
+const S_CORNERS_AT: u32 = 0x24;
+const SHARD_CORNERS: u32 = 0x2c;
+const SHARD: [u16; 8] = [0, 0xfffd, 0, 0xfffd, 0, 3, 0, 3];
+const SHARD_POLYGON: u32 = 2;
+const SHARD_LIFT: u8 = 8;
+const SHARD_REACH: u32 = 32;
+
+/// A blast's draw (sprite `s`): its count of shards, each at a random angle at 32 times its size
+/// from its centre, pointing outward.
+pub fn blast_draw(cpu: &mut Cpu, s: u32) {
+    let o = s - SPRITE;
+    let shard = cpu.stack();
+    for (i, v) in SHARD.into_iter().enumerate() {
+        cpu.write16(shard + SHARD_CORNERS + 2 * i as u32, v);
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, shard));
+    let colour = cpu.read16(s + S_COLOUR);
+    cpu.write16(shard + S_COLOUR, colour);
+    let flags = cpu.read32(o + FLAGS) & ATTR_100 | SHARD_POLYGON;
+    cpu.write32(shard + S_FLAGS, flags);
+    cpu.write32(shard + S_CORNERS_AT, shard + SHARD_CORNERS);
+    cpu.write8(shard + S_LIFT, SHARD_LIFT);
+    let z = cpu.read32(o + POSITION + 8);
+    cpu.write32(shard + S_POSITION + 8, z);
+    let mut n: i32 = 0;
+    while n < cpu.read32(o + BLAST_COUNT) as i32 {
+        let a = random(cpu, 0x10000) as u16;
+        let angle = a as i16 as i32 as u32;
+        let reach = cpu.read32(o + SCALES).wrapping_mul(SHARD_REACH);
+        let s_ = cpu.call(SL_SIN, &[angle]);
+        let dx = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, s_, reach));
+        let x = cpu.read32(o + POSITION).wrapping_add(dx);
+        cpu.write32(shard + S_POSITION, x);
+        let reach = cpu.read32(o + SCALES + 4).wrapping_mul(SHARD_REACH);
+        let c = cpu.call(SL_COS, &[angle]);
+        let dy = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, c, reach));
+        let y = cpu.read32(o + POSITION + 4).wrapping_sub(dy);
+        cpu.write32(shard + S_POSITION + 4, y);
+        cpu.write16(shard + S_ANGLE, a.wrapping_add(0x4000));
+        nested!(cpu, 0x0604_0960, sprites::draw(cpu, shard));
+        n = (n + 1) as i8 as i32;
+    }
+}
