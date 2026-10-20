@@ -1,6 +1,7 @@
 //! The players' status lines (into each player's line buffers, text.rs, which the VBlank sends):
 //! the score (its last digit the continues used: Radiant Silvergun's count), the lives, a
-//! weapon's level with its icon (cycling through the weapons), and the gauge beside them.
+//! weapon's level with its icon (cycling through the weapons), and the gauge beside them. And the
+//! boss's life gauge (an object: a bar at the screen's bottom left).
 
 use super::nested;
 use super::globals::{self, mode, CONTINUES, GAME_MODE, PLAY_DATA, PLAY_DATA_SIZE, SCORE, VBLANKS};
@@ -172,3 +173,133 @@ pub fn draw_status(cpu: &mut Cpu, p: u32) {
 
 /// The players' own line buffers (text.rs's).
 const STATUS_BUFFERS: [u32; 2] = [0x0607_3614, 0x0607_3662];
+
+/// The boss's life gauge (an object of list 4, its own exec; 0 when there is none): a line of
+/// 224 pixels at (-112, 92), its length by the life shown over the most, in the first kind's colour
+/// (0x40 on above half) shimmering with the passes; the life shown rises toward the life by a
+/// sixteenth of the way (at least 1) and drops to it at once. It ends once the life shown is 0.
+const BOSS_GAUGE: u32 = 0x0607_46ec;
+const BOSS_GAUGE_EXEC: u32 = 0x0604_62dc;
+const BOSS_GAUGE_SIZE: u32 = 0x80;
+const BG_LIST: u32 = 4;
+/// The gauge's mode (objects.rs's), sprite (flags: a line; its corners), phase, life, most life,
+/// life shown, its line's corners.
+const BG_MODE: u32 = 3;
+const BG_SPRITE: u32 = 0x10;
+const BG_FLAGS: u32 = 0x10;
+const BG_POSITION: u32 = 0x14;
+const BG_SCALE_X: u32 = 0x20;
+const BG_COLOUR: u32 = 0x28;
+const BG_NUMBER: u32 = 0x32;
+const BG_LIFT: u32 = 0x33;
+const BG_CORNERS_AT: u32 = 0x34;
+const BG_PHASE: u32 = 0x3c;
+const BG_LIFE: u32 = 0x60;
+const BG_MOST: u32 = 0x64;
+const BG_SHOWN: u32 = 0x68;
+const BG_CORNERS: u32 = 0x70;
+const LINE: u32 = 3;
+const BG_X: u32 = 0xff90_0000;
+const BG_Y: u32 = 0x5c_0000;
+const BG_LENGTH: u16 = 0xe0;
+const BG_HALF: i32 = 0x8000;
+const BG_HIGH: u16 = 0x40;
+const BG_RUNNING: u8 = 1;
+const BG_ENDING: u8 = 0x70;
+const BG_ENDED: u8 = 0x73;
+const FIRST_COLOUR: u32 = 0x0607_41fc;
+
+/// The boss's life gauge made, `most` its full life: it (also kept at BOSS_GAUGE), or 0.
+pub fn boss_gauge_set(cpu: &mut Cpu, most: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, BOSS_GAUGE_SIZE)) as i8 as i32 as u32;
+    let g = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, BG_LIST, blocks, BOSS_GAUGE_EXEC));
+    if g != 0 {
+        nested!(cpu, 0x0604_dd50, super::effects::actor_init(cpu, g));
+        cpu.write32(g + BG_MOST, most);
+    }
+    cpu.write32(BOSS_GAUGE, g);
+    g
+}
+
+/// The boss's life given to its gauge (if there is one; not below 0).
+pub fn boss_gauge_life(cpu: &mut Cpu, life: u32) {
+    let g = cpu.read32(BOSS_GAUGE);
+    if g != 0 {
+        cpu.write32(g + BG_LIFE, (life as i32).max(0) as u32);
+    }
+}
+
+pub fn boss_gauge_exec(cpu: &mut Cpu, g: u32) {
+    match cpu.read8(g + BG_MODE) {
+        BG_RUNNING => {}
+        0 => {
+            if cpu.read32(globals::GAME_FLAGS) & globals::HELD != 0 {
+                return;
+            }
+            cpu.write8(g + BG_MODE, BG_RUNNING);
+        }
+        BG_ENDING => {
+            cpu.write8(g + BG_MODE, BG_ENDED);
+            return;
+        }
+        BG_ENDED => {
+            nested!(cpu, 0x0600_579c, super::objects::obj_free(cpu, g));
+            return;
+        }
+        _ => return,
+    }
+    let phase = cpu.read8(g + BG_PHASE);
+    match phase {
+        0 | 1 => {
+            if phase == 0 {
+                cpu.write32(g + BG_CORNERS_AT, g + BG_CORNERS);
+                let flags = cpu.read32(g + BG_FLAGS) | LINE;
+                cpu.write32(g + BG_FLAGS, flags);
+                cpu.write8(g + BG_LIFT, 0x7f);
+                cpu.write8(g + BG_NUMBER, 0xff);
+                cpu.write32(g + BG_POSITION, BG_X);
+                cpu.write32(g + BG_POSITION + 4, BG_Y);
+                cpu.write32(g + BG_POSITION + 8, 0);
+                for (k, v) in [(2, 0), (0, 0), (4, BG_LENGTH), (6, 0)] {
+                    cpu.write16(g + BG_CORNERS + k, v);
+                }
+                cpu.write32(g + BG_SHOWN, 1);
+                let most = cpu.read32(g + BG_MOST);
+                cpu.write32(g + BG_LIFE, most);
+                cpu.write8(g + BG_PHASE, 1);
+            }
+            let colour = cpu.read16(FIRST_COLOUR);
+            cpu.write16(g + BG_COLOUR, colour);
+            let (shown, life) = (cpu.read32(g + BG_SHOWN) as i32, cpu.read32(g + BG_LIFE) as i32);
+            let shown = if shown >= life {
+                life as u32
+            } else {
+                let step = nested!(cpu, 0x0606_4f50, math::at_least(cpu, (life.wrapping_sub(shown) / 16) as u32, 1)) as i32;
+                let life = cpu.read32(g + BG_LIFE);
+                nested!(cpu, 0x0604_6168, super::actors::approach(cpu, shown as u32, life, step.wrapping_abs() as u32))
+            };
+            cpu.write32(g + BG_SHOWN, shown);
+            let most = cpu.read32(g + BG_MOST);
+            let length = nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, shown, most));
+            cpu.write32(g + BG_SCALE_X, length);
+            let colour = cpu.read16(g + BG_COLOUR).wrapping_add(if length as i32 > BG_HALF { BG_HIGH } else { 0 });
+            cpu.write16(g + BG_COLOUR, colour);
+            let shimmer = (cpu.read32(globals::LOOPS) >> 2 & 0xf) as u16;
+            let colour = shimmer.wrapping_add(cpu.read16(g + BG_COLOUR));
+            cpu.write16(g + BG_COLOUR, colour);
+            if cpu.read32(g + BG_SHOWN) == 0 {
+                cpu.write8(g + BG_PHASE, 2);
+            }
+        }
+        2 => {
+            cpu.write32(BOSS_GAUGE, 0);
+            cpu.write8(g + BG_MODE, BG_ENDING);
+            cpu.write8(g + BG_PHASE, 3);
+        }
+        _ => {}
+    }
+    if (cpu.read8(g + BG_MODE) as i8) < BG_ENDING as i8 {
+        nested!(cpu, 0x0604_0960, super::sprites::draw(cpu, g + BG_SPRITE));
+    }
+}
+

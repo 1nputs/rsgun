@@ -149,3 +149,32 @@ pub fn body_exec(cpu: &mut Cpu, body: u32) {
     cpu.write32(body + POSITION, (left.wrapping_add(right) / 2) as u32);
     cpu.write32(body + POSITION + 4, (top.wrapping_add(bottom) / 2) as u32);
 }
+
+/// The hit flags' flash bit, and the flags' unhurt bit.
+const FLASH: u16 = 1;
+const UNHURT: u32 = 0x4_0000;
+
+/// `part` flashes when `with` does (if there is one).
+pub fn flash_with(cpu: &mut Cpu, part: u32, with: u32) {
+    if with != 0 {
+        let f = cpu.read16(with + HIT_FLAGS) & FLASH | cpu.read16(part + HIT_FLAGS);
+        cpu.write16(part + HIT_FLAGS, f);
+    }
+}
+
+/// `part` flashes while `with` was hit and is not flashing itself, and not while `with` is unhurt.
+pub fn flash_against(cpu: &mut Cpu, part: u32, with: u32) {
+    if with == 0 {
+        return;
+    }
+    let w = cpu.read16(with + HIT_FLAGS);
+    if w & WAS_HIT != 0 {
+        let f = (w ^ FLASH) & FLASH | cpu.read16(part + HIT_FLAGS);
+        cpu.write16(part + HIT_FLAGS, f);
+    }
+    if cpu.read32(with + FLAGS) & UNHURT != 0 {
+        let f = cpu.read16(part + HIT_FLAGS) & !FLASH;
+        cpu.write16(part + HIT_FLAGS, f);
+    }
+}
+

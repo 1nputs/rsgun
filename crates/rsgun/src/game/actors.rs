@@ -525,3 +525,44 @@ pub fn player_set(cpu: &mut Cpu, st: u32) -> u32 {
     cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), obj);
     obj
 }
+
+/// `v` put first in the `n` bytes at `at`, the rest moved along one (the last dropped).
+pub fn shift_in_bytes(cpu: &mut Cpu, at: u32, v: u32, n: u32) {
+    let (mut v, n) = (v as u8, n as i16 as i32);
+    for i in 0..n.max(0) as u32 {
+        let old = cpu.read8(at + i);
+        cpu.write8(at + i, v);
+        v = old;
+    }
+}
+
+/// `v` put first in the `n` words at `at`, the rest moved along one (the last dropped).
+pub fn shift_in_words(cpu: &mut Cpu, at: u32, v: u32, n: u32) {
+    let (mut v, n) = (v as u16, n as i16 as i32);
+    for i in 0..n.max(0) as u32 {
+        let old = cpu.read16(at + 2 * i);
+        cpu.write16(at + 2 * i, v);
+        v = old;
+    }
+}
+
+/// The actor's frame stepped through 0x81-0x84 every other frame of the game, and it faces the way
+/// `v` goes (mirrored unless it is positive).
+const FLAP_FIRST: u8 = 0x81;
+const FLAP_LAST: u8 = 0x84;
+const FRAME: u32 = 0x2f;
+const MIRRORED: u32 = 0x10;
+
+pub fn flap_and_face(cpu: &mut Cpu, actor: u32, v: u32) {
+    if cpu.read32(super::globals::GAME_FRAMES) & 1 == 0 {
+        let f = cpu.read8(actor + FRAME).wrapping_add(1);
+        cpu.write8(actor + FRAME, f);
+        if f > FLAP_LAST {
+            cpu.write8(actor + FRAME, FLAP_FIRST);
+        }
+    }
+    let flags = cpu.read32(actor + FLAGS);
+    let flags = if v as i32 > 0 { flags & !MIRRORED } else { flags | MIRRORED };
+    cpu.write32(actor + FLAGS, flags);
+}
+

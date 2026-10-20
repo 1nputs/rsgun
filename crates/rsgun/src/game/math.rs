@@ -83,6 +83,13 @@ pub fn clamp(_cpu: &mut Cpu, x: u32, limit: u32) -> u32 {
     }
 }
 
+/// `x` pushed out to at least `least` from zero (on its side; 0 counts as positive).
+pub fn at_least(_cpu: &mut Cpu, x: u32, least: u32) -> u32 {
+    let (x, least) = (x as i32, least as i32);
+    let (size, signed) = if x >= 0 { (x, least) } else { (x.wrapping_neg(), least.wrapping_neg()) };
+    if least > size { signed as u32 } else { x as u32 }
+}
+
 
 /// SGL's slMulFX and slSin.
 const SL_MUL_FX: u32 = 0x0606_e26c;
