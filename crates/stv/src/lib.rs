@@ -1,6 +1,7 @@
 //! The Sega ST-V as a library: the hardware a port of an ST-V game runs on. It knows no game.
 
 pub mod m68k;
+pub mod compare;
 pub mod eeprom;
 pub mod evidence;
 pub mod machine;

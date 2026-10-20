@@ -3,14 +3,16 @@
 //!
 //!     rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute]
 //!     rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--evidence FILE]
-//!           [--dump F,F --dump-dir DIR] [--rom DIR] [--save DIR]
+//!           [--dump F,F --dump-dir DIR] [--native | --compare REPORT] [--rom DIR] [--save DIR]
 //!
 //! `--rom`: the images tools/rom/mkcart.py makes (default build/rom). `--save`: where the EEPROM
 //! and backup RAM are kept (default $XDG_DATA_HOME/rsgun or ~/.local/share/rsgun). `--script`:
 //! an input script (controls.rs) played instead of the keyboard and pads. `--headless`: no window;
 //! runs N frames and writes the last picture (`--shot`), the sound (`--wav`) and the evidence of what
 //! code ran (`--evidence`, stv::evidence's text form), and the memories at frames (`--dump`, as
-//! stv-check boot writes them).
+//! stv-check boot writes them). `--native` runs the port's code (build/port, tools/port) in place of
+//! the SH-2 code it was made from; `--compare` runs the SH-2 code and checks each call the port has
+//! against it (stv::compare), writing what it found to REPORT.
 //!
 //! Keys: arrows move; Z, X, C are buttons A, B, C; A, S, D are A+B, A+C, B+C; space is all three;
 //! 5 and 6 insert coins, 1 and 2 start; F2 test, 9 service; P pauses, Tab runs fast while held,
@@ -60,6 +62,7 @@ struct Options {
     dumps: Vec<u64>,
     dump_dir: PathBuf,
     native: bool,
+    compare: Option<PathBuf>,
 }
 
 fn default_save_dir() -> PathBuf {
@@ -87,6 +90,7 @@ fn parse_args() -> Result<Options, String> {
         dumps: Vec::new(),
         dump_dir: PathBuf::from("out/machine"),
         native: false,
+        compare: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut it = args.iter();
@@ -107,6 +111,7 @@ fn parse_args() -> Result<Options, String> {
             "--dump" => o.dumps = value()?.split(',').filter_map(|f| f.parse().ok()).collect(),
             "--dump-dir" => o.dump_dir = PathBuf::from(value()?),
             "--native" => o.native = true,
+            "--compare" => o.compare = Some(PathBuf::from(value()?)),
             "--mute" => o.mute = true,
             "-h" | "--help" => return Err(String::new()),
             _ => return Err(format!("unknown option {a}")),
@@ -125,7 +130,7 @@ fn load_machine(o: &Options) -> Result<Machine, String> {
     let cart = read(o.rom.join("rsgun-cart.bin"))?;
     let eeprom = fs::read(o.save.join("eeprom.bin")).or_else(|_| fs::read(o.rom.join("eeprom.bin"))).ok();
     let mut m = Machine::new(bios, cart, 1, eeprom.as_deref());
-    if o.native {
+    if o.native || o.compare.is_some() {
         m.sys.natives.overlay = Some(overlay());
         generated::register(&mut m.sys.natives);
     }
@@ -175,6 +180,9 @@ impl CoinPulse {
 fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
     let mut m = load_machine(o)?;
     let frames = if o.frames > 0 { o.frames } else { script.map_or(600, |s| s.last_frame() + 60) };
+    if o.compare.is_some() {
+        m.compare = Some(Default::default());
+    }
     if o.evidence.is_some() {
         m.evidence = Some(Box::new(stv::evidence::Evidence { overlay: Some(overlay()), ..Default::default() }));
     }
@@ -199,12 +207,24 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
         let n = &m.sys.natives;
         println!("native: {} functions, {} calls run natively, {} passed to the interpreter", n.len(), n.native_calls, n.interpreted_calls);
     }
+    if let (Some(p), Some(c)) = (&o.compare, &m.compare) {
+        let report = c.report(&|e| m.sys.natives.name(e));
+        fs::write(p, &report).map_err(|err| format!("{}: {err}", p.display()))?;
+        println!("compare: {} (report: {})", report.lines().next().unwrap_or(""), p.display());
+    }
     if let Some(p) = &o.shot {
         write_ppm(p, &m.picture)?;
         println!("picture {}x{} written to {}", m.picture.0, m.picture.1, p.display());
     }
     if let (Some(p), Some(e)) = (&o.evidence, &m.evidence) {
         fs::write(p, e.to_text()).map_err(|err| format!("{}: {err}", p.display()))?;
+        // each overlay's window, for the port's translation: beside the evidence, by fingerprint
+        let dir = p.with_extension("overlays");
+        fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+        for (fp, code) in &e.code {
+            let f = dir.join(format!("{fp:016x}.bin"));
+            fs::write(&f, code).map_err(|err| format!("{}: {err}", f.display()))?;
+        }
         println!("evidence: {} addresses, {} transfers written to {}", e.executed.len(), e.transfers.len(), p.display());
     }
     if let Some(p) = &o.wav {

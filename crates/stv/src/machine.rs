@@ -72,15 +72,25 @@ pub struct Sys {
     spin: [SpinBus; 2],
     /// The game's functions ported to Rust (native.rs).
     pub natives: crate::native::Natives,
+    /// Compare mode (compare.rs): whether each CPU's accesses are logged, at what interrupt depth,
+    /// and the log.
+    logging: [bool; 2],
+    log_depth: [u8; 2],
+    access_log: [Vec<crate::compare::Access>; 2],
 }
 
 impl Sys {
+    #[inline]
     fn record(&mut self, cpu: usize, tag: u8, size: u8, a: u32, v: u32) {
         if let Some(t) = &mut self.trace {
             let b = &mut t[cpu];
             b.extend_from_slice(&[tag, size, 0, 0]);
             b.extend_from_slice(&a.to_be_bytes());
             b.extend_from_slice(&v.to_be_bytes());
+        }
+        if self.logging[cpu] && (tag == b'R' || tag == b'W' || tag == b'P') {
+            let depth = self.log_depth[cpu];
+            self.access_log[cpu].push(crate::compare::Access { kind: tag, size, depth, addr: a, value: v });
         }
     }
 }
@@ -122,6 +132,9 @@ impl Sys {
             trace: None,
             spin: Default::default(),
             natives: Default::default(),
+            logging: [false; 2],
+            log_depth: [0; 2],
+            access_log: Default::default(),
         }
     }
 }
@@ -701,6 +714,9 @@ pub struct Machine {
     pub coverage: Option<[std::collections::HashSet<u32>; 2]>,
     /// When on, the evidence of what the program runs: addresses, transfers, interrupts.
     pub evidence: Option<Box<crate::evidence::Evidence>>,
+    /// When on, the interpreter runs everything and each call to a native function is checked
+    /// against the SH-2 code's run (compare.rs).
+    pub compare: Option<Box<crate::compare::Compare>>,
     /// Play the loops the CPUs spin in instead of executing them (spin.rs); off, every instruction
     /// is executed (the checks compare the two).
     pub spin_enabled: bool,
@@ -841,6 +857,7 @@ impl Machine {
             picture: (0, 0, Vec::new()),
             coverage: None,
             evidence: None,
+            compare: None,
             spin_enabled: true,
             watch: Default::default(),
             fibers: Default::default(),
@@ -941,6 +958,13 @@ impl Machine {
             self.sys.onchip[1].reset();
             self.sys.slave_on = false;
             self.fibers = Default::default();
+            if let Some(cmp) = &mut self.compare {
+                cmp.reset(0);
+                cmp.reset(1);
+            }
+            self.sys.logging = [false; 2];
+            self.sys.log_depth = [0; 2];
+            self.sys.access_log = Default::default();
             let mut bus = CpuBus { sys: &mut self.sys, cpu: 0 };
             self.cpu[0].reset(&mut bus, 2);
         }
@@ -948,6 +972,12 @@ impl Machine {
             self.sys.slave_reset_pending = false;
             self.sys.onchip[1].reset();
             self.fibers[1] = None;
+            if let Some(cmp) = &mut self.compare {
+                cmp.reset(1);
+            }
+            self.sys.logging[1] = false;
+            self.sys.log_depth[1] = 0;
+            self.sys.access_log[1].clear();
             let mut bus = CpuBus { sys: &mut self.sys, cpu: 1 };
             self.cpu[1] = Sh2::default();
             self.cpu[1].reset(&mut bus, 0);
@@ -991,7 +1021,7 @@ impl Machine {
     /// Runs CPU `c` to `target` cycles into the line: playing its loop while it spins, else
     /// instruction by instruction, watching for a loop to spin in.
     fn advance(&mut self, c: usize, target: u32) {
-        let watch = self.spin_enabled && self.sys.trace.is_none() && self.coverage.is_none() && self.evidence.is_none();
+        let watch = self.spin_enabled && self.sys.trace.is_none() && self.coverage.is_none() && self.evidence.is_none() && self.compare.is_none();
         while self.time[c] < target {
             if let Watch::Spinning { .. } = self.watch[c] {
                 if self.sys.spin[c].broken {
@@ -1147,11 +1177,21 @@ impl Machine {
             return self.resume_fiber(c, budget);
         }
         let cpu = &mut self.cpu[c];
+        let (pc, sp, logged) = (cpu.pc, cpu.r[15], self.sys.access_log[c].len());
         if cpu.delay.is_none()
             && let Some((vector, handler)) = take_interrupt(&mut self.sys, cpu, c)
         {
             if vector != crate::sh2::VEC_NMI {
                 self.note_interrupt(c, vector, handler);
+            }
+            if let Some(cmp) = &mut self.compare {
+                // the handler's, the exception's own accesses too
+                cmp.interrupted(c, pc, sp);
+                let depth = cmp.depth(c);
+                for e in &mut self.sys.access_log[c][logged..] {
+                    e.depth = depth;
+                }
+                self.sys.log_depth[c] = depth;
             }
             return 4;
         }
@@ -1168,7 +1208,13 @@ impl Machine {
         let cpu = &mut self.cpu[c];
         if cpu.delay.is_none() && self.sys.natives.maybe(cpu.pc) {
             let mut bus = CpuBus { sys: &mut self.sys, cpu: c };
-            if let Some(f) = bus.native_at(cpu.pc) {
+            if let Some(cmp) = &mut self.compare {
+                // the SH-2 code runs; the call is logged to be checked when it returns
+                if bus.native_at(cpu.pc).is_some() {
+                    cmp.enter(c, cpu.pc, cpu, &self.sys.access_log[c]);
+                    self.sys.logging[c] = true;
+                }
+            } else if let Some(f) = bus.native_at(cpu.pc) {
                 // a ported function: it runs on its own stack, to its return, in turns
                 let state = cpu.clone();
                 let stack = self.stacks[c].take().unwrap_or_else(|| DefaultStack::new(FIBER_STACK).expect("a stack for native code"));
@@ -1189,7 +1235,28 @@ impl Machine {
         self.steps[c] += 1;
         let cycles = 1 + self.sys.wait;
         self.sys.onchip[c].clock_frt(cycles);
+        if self.compare.is_some() {
+            self.compare_step(c);
+        }
         cycles
+    }
+
+    /// Compare mode, after an interpreted step: calls returned from are checked.
+    fn compare_step(&mut self, c: usize) {
+        let Some(cmp) = &mut self.compare else { return };
+        let sys = &mut *self.sys;
+        let mut log = std::mem::take(&mut sys.access_log[c]);
+        let frame = sys.frame;
+        let mut run = |entry: u32, state: &Sh2, accesses: &[crate::compare::Access], depth: u8| {
+            let mut code = CpuBus { sys: &mut *sys, cpu: c };
+            let Some(f) = code.native_at(entry) else { return Err("no native function there now".to_string()) };
+            let limit = 100_000 + 200 * accesses.len() as u64;
+            crate::compare::Replay { log: accesses, depth, pos: 0, cycles: 0, limit, code: &mut code, pc: entry }.run(f, state)
+        };
+        cmp.stepped(c, &self.cpu[c], frame, &mut log, &mut run);
+        self.sys.access_log[c] = log;
+        self.sys.logging[c] = cmp.logging(c);
+        self.sys.log_depth[c] = cmp.depth(c);
     }
 
     /// CPU `c`'s native call runs its turn of `budget` cycles (or to its return).
@@ -1217,19 +1284,28 @@ impl Machine {
         let cpu = &self.cpu[c];
         let (pc, r, pr) = (cpu.pc, cpu.r, cpu.pr);
         let op = CpuBus { sys: &mut self.sys, cpu: c }.fetch16(pc);
-        let in_overlay = self.evidence.as_ref().and_then(|e| e.overlay.as_ref()).is_some_and(|o| o.holds(pc));
-        let fp = if in_overlay { self.overlay_fingerprint() } else { 0 };
+        let transfer = crate::evidence::transfer(op, pc, &r, pr);
+        let fp = self.overlay_print_of(pc);
         let Some(e) = &mut self.evidence else { return };
         *e.executed.entry((c as u8, fp, pc)).or_default() += 1;
-        if let Some((kind, target)) = crate::evidence::transfer(op, pc, &r, pr) {
-            *e.transfers.entry((c as u8, kind, pc, target)).or_default() += 1;
+        if let Some((kind, target)) = transfer {
+            let fp = if fp != 0 { fp } else { self.overlay_print_of(target) };
+            let Some(e) = &mut self.evidence else { return };
+            *e.transfers.entry((c as u8, fp, kind, pc, target)).or_default() += 1;
         }
     }
 
     fn note_interrupt(&mut self, c: usize, vector: u32, handler: u32) {
+        let fp = self.overlay_print_of(handler);
         if let Some(e) = &mut self.evidence {
-            *e.interrupts.entry((c as u8, vector, handler)).or_default() += 1;
+            *e.interrupts.entry((c as u8, fp, vector, handler)).or_default() += 1;
         }
+    }
+
+    /// Evidence: the overlay fingerprint for code at `a` (0 outside the window).
+    fn overlay_print_of(&mut self, a: u32) -> u64 {
+        let in_overlay = self.evidence.as_ref().and_then(|e| e.overlay.as_ref()).is_some_and(|o| o.holds(a));
+        if in_overlay { self.overlay_fingerprint() } else { 0 }
     }
 
     /// The overlay window's fingerprint this frame (taken once).
@@ -1244,6 +1320,10 @@ impl Machine {
         let fp = o.fingerprint(w);
         e.overlay_now = Some(fp);
         e.overlays.entry(fp).or_insert(frame);
+        let window = &w[(o.window.start & 0xF_FFFF) as usize..(o.window.end & 0xF_FFFF) as usize];
+        let code = e.code.entry(fp).or_default();
+        code.clear();
+        code.extend_from_slice(window);
         fp
     }
 

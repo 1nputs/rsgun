@@ -60,6 +60,11 @@ impl Natives {
         self.map.entry(off).or_default().push(Native { f, name, overlay });
     }
 
+    /// The name of a function registered at `addr` (any of them, for overlay code).
+    pub fn name(&self, addr: u32) -> &'static str {
+        wram_h_offset(addr).and_then(|off| self.map.get(&off)).and_then(|l| l.first()).map_or("", |n| n.name)
+    }
+
     pub fn len(&self) -> usize {
         self.map.values().map(Vec::len).sum()
     }
@@ -128,6 +133,14 @@ pub fn tick(cpu: &mut Sh2, bus: &mut dyn Bus, cycles: u32) {
         run_until(cpu, bus, NATIVE_PC, sp);
     }
     cpu.pc = pc;
+}
+
+/// A computed jump native code has no block for: the SH-2 code from `target` until the function
+/// returns to its caller (`ret`, with the stack at `sp`, as they were on entry).
+pub fn goto(cpu: &mut Sh2, bus: &mut dyn Bus, target: u32, ret: u32, sp: u32) {
+    bus.note_interpreted();
+    cpu.pc = target;
+    run_until(cpu, bus, ret, sp);
 }
 
 /// Runs SH-2 code from `target` until it returns to PR with the stack where it was (natives it

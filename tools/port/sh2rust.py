@@ -2,18 +2,20 @@
 (stv::sh2::Sh2) and the bus, instruction for instruction as stv's interpreter runs them, so it can
 replace the SH-2 code and be checked against it call by call (stv::native).
 
-    python3 tools/port/sh2rust.py --image WRAM_H.bin --evidence EVIDENCE.txt --out build/port/generated.rs
+    python3 tools/port/sh2rust.py --image WRAM_H.bin --evidence EVIDENCE.txt[,EVIDENCE.txt...] --out build/port/generated.rs
         [--range 06003000-06080000]
 
 WRAM_H.bin: work RAM-H as the game had it loaded (rsgun --dump); EVIDENCE.txt: rsgun --evidence. The
 functions are the targets of the calls the evidence saw within the range; jump tables' targets come
-from it too. The output is ROM-derived: it stays in build/ (never committed), and crates/rsgun's build
-script includes it when it is there.
+from it too. Code in the overlay window is translated once per overlay the evidence saw (by the
+window's fingerprint), from the window rsgun saved beside the evidence (EVIDENCE.overlays/), and
+registered for that overlay only. The output is ROM-derived: it stays in build/ (never committed), and
+crates/rsgun's build script includes it when it is there.
 
 What a function is: its entry and every block reached from it by branches (both ways of a
 conditional), up to returns, calls' returns, and jumps; a BRA or computed jump to another function's
 entry is a tail call. Code the translator cannot place (an undecodable word, SLEEP, TRAPA, a
-stack switch, a jump into a delay slot) leaves the function to the interpreter.
+stack switch) leaves the function to the interpreter. Interrupt handlers (the evidence's) return by RTE.
 
 Waits stay as the SH-2 code had them: each block charges its cycles through stv::native::tick, and
 native code runs on a stack of its own, so a polling loop polls while the machine runs on.
@@ -25,6 +27,8 @@ import struct
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+# the overlay window (crates/rsgun's overlay())
+WINDOW = (0x06080000, 0x060A5000)
 
 
 class Untranslatable(Exception):
@@ -299,17 +303,33 @@ def stmt(op, a, pc4):
 # ---- a function --------------------------------------------------------------------------------------
 
 class Function:
-    def __init__(self, entry, img, entries, jump_targets):
+    def __init__(self, entry, img, entries, jump_targets, return_targets, overlay=0, handler=False):
         self.entry = entry
+        self.overlay = overlay          # the overlay's fingerprint, for code in the window
+        self.handler = handler          # an interrupt handler (it returns by RTE)
         self.img = img
         self.entries = entries          # every function entry (tail-call targets)
         self.jump_targets = jump_targets  # site -> targets seen
+        self.return_targets = return_targets  # RTS site -> targets seen
         self.blocks = {}                # start -> list of instruction addresses
         self.find_blocks()
 
     def find_blocks(self):
         starts, todo, seen = {self.entry}, [self.entry], set()
-        succ = {}
+        while True:
+            self.explore(starts, todo, seen)
+            # an RTS that the evidence saw land within the function (PR set to a point in it, then a
+            # jump to code that returns there) goes on in the function
+            code = {x for addrs in self.blocks.values() for x in addrs}
+            more = {tg for x in code if flow(self.img.word(x), x)[0] == "rts"
+                    for tg in self.return_targets.get(x, []) if tg in code and tg not in starts}
+            if not more:
+                break
+            starts |= more
+            todo += sorted(more)
+        self.split(starts)
+
+    def explore(self, starts, todo, seen):
         while todo:
             a = todo.pop()
             if a in seen:
@@ -351,14 +371,17 @@ class Function:
                     todo.append(nx)
                 break
             self.blocks[a] = addrs
-        # split blocks that run into a later start
+
+    def split(self, starts):
+        """Splits blocks that run into a later start."""
         for s in sorted(starts):
             for b, addrs in list(self.blocks.items()):
                 if s != b and s in addrs[1:]:
                     i = addrs.index(s)
-                    # never split between a branch and its slot
+                    # a jump into a branch's delay slot: the branch keeps its slot, and the jump's
+                    # block (explored from there) runs it as an ordinary instruction
                     if i > 0 and has_slot(flow(self.img.word(addrs[i - 1]), addrs[i - 1])[0]):
-                        raise Untranslatable(f"a jump into a delay slot at {s:08x}")
+                        continue
                     self.blocks[b] = addrs[:i]
                     self.blocks.setdefault(s, addrs[i:])
         if self.entry in {t for addrs in self.blocks.values() for t in self.local_targets(addrs)}:
@@ -373,9 +396,10 @@ class Function:
         return [target] if kind in ("cond", "conds", "bra") and target is not None else []
 
     def rust(self):
-        name = f"f_{self.entry & 0x07FFFFFF:08x}"
-        out = [f"pub fn {name}(c: &mut Sh2, m: &mut dyn Bus) {{", f"    let mut pc: u32 = {h(self.entry)};", "    loop {",
-               "        match pc {"]
+        name = f"f_{self.entry & 0x07FFFFFF:08x}" + (f"_{self.overlay:016x}" if self.overlay else "")
+        # where the function returns to, for a computed jump the translation has no block for
+        out = [f"pub fn {name}(c: &mut Sh2, m: &mut dyn Bus) {{", "    let (ret, sp) = (c.pr, c.r[15]);",
+               f"    let mut pc: u32 = {h(self.entry)};", "    loop {", "        match pc {"]
         for b in sorted(self.blocks):
             out.append(f"            {h(b)} => {{")
             out.extend("                " + line for line in self.block(self.blocks[b]))
@@ -441,12 +465,15 @@ class Function:
         if kind in ("braf", "jmp"):
             dest = f"c.r[{n}]" if kind == "jmp" else f"c.r[{n}].wrapping_add({h(a + 4)})"
             code = [f"let dest = {dest};"] + self.slot_code(slot, "dest.wrapping_add(2)")
+            # a target the evidence saw within the function goes on here; any other is interpreted
+            # until the function returns (a tail call returns there too)
             local = [tg for tg in self.jump_targets.get(a, []) if tg not in self.entries]
+            other = self.elsewhere()
             if local:
                 arms = " ".join(f"{h(tg)} => pc = {h(tg)}," for tg in sorted(set(local)))
-                code += [f"match dest {{ {arms} _ => {{ call(c, m, dest); return; }} }}"]
+                code += [f"match dest {{ {arms} _ => {{ {other} }} }}"]
             else:
-                code += self.tail("dest")
+                code += [other]
             return code
         if kind == "call":
             return [f"c.pr = {h(a + 4)};"] + self.slot_code(slot, h(target + 2)) + [f"call(c, m, {h(target)});", f"pc = {h(a + 4)};"]
@@ -455,63 +482,112 @@ class Function:
             return [f"let dest = {dest};", f"c.pr = {h(a + 4)};"] + self.slot_code(slot, "dest.wrapping_add(2)") + \
                 ["call(c, m, dest);", f"pc = {h(a + 4)};"]
         if kind == "rts":
-            return ["let dest = c.pr;"] + self.slot_code(slot, "dest.wrapping_add(2)") + ["c.pc = dest;", "return;"]
+            # the function's return, or a return within it (see find_blocks); anywhere else is
+            # interpreted until the function returns
+            code = ["let dest = c.pr;"] + self.slot_code(slot, "dest.wrapping_add(2)") + \
+                ["if dest == ret { c.pc = dest; return; }"]
+            local = sorted({tg for tg in self.return_targets.get(a, []) if tg in self.blocks})
+            other = self.elsewhere()
+            if local:
+                arms = " ".join(f"{h(tg)} => pc = {h(tg)}," for tg in local)
+                return code + [f"match dest {{ {arms} _ => {{ {other} }} }}"]
+            return code + [other]
         if kind == "rte":
-            raise Untranslatable("RTE")
+            # as the interpreter: PC, then SR, from the stack; the slot runs with the new SR
+            return ["let dest = m.read32(c.r[15]);", "c.r[15] = c.r[15].wrapping_add(4);",
+                    "c.sr = m.read32(c.r[15]) & 0x3F3;", "c.r[15] = c.r[15].wrapping_add(4);"] + \
+                self.slot_code(slot, "dest.wrapping_add(2)") + ["c.pc = dest;", "return;"]
         raise Untranslatable(kind)
+
+    def elsewhere(self):
+        """A transfer to code the translation has no block for: interpreted until the function returns
+        (a handler returns by RTE to the PC on its stack at entry)."""
+        if self.handler:
+            return "goto(c, m, dest, m.read32(sp), sp.wrapping_add(8)); return;"
+        return "goto(c, m, dest, ret, sp); return;"
 
 
 # ---- the evidence and the module ---------------------------------------------------------------------------
 
-def read_evidence(path, regions):
-    calls, jumps = set(), collections.defaultdict(set)
-    for line in open(path):
+def read_evidence(paths):
+    """Per overlay fingerprint (0: code outside the window): the call targets, each site's jump
+    targets, each RTS site's return targets, and the interrupt handlers."""
+    ev = collections.defaultdict(lambda: (set(), collections.defaultdict(set), collections.defaultdict(set), set()))
+    for line in (line for path in paths for line in open(path)):
         f = line.split()
+        if f[0] == "i":
+            handler = int(f[4], 16) & 0x07FFFFFF
+            ev[int(f[2], 16) if in_window(handler) else 0][3].add(handler)
         if f[0] != "t":
             continue
-        kind, site, target = f[2], int(f[3], 16), int(f[4], 16)
-        if kind == "c" and any(lo <= (target & 0x07FFFFFF) < hi for lo, hi in regions):
-            calls.add(target & 0x07FFFFFF)
-        if kind == "j":
-            jumps[site & 0x07FFFFFF].add(target & 0x07FFFFFF)
-    return calls, jumps
+        fp, kind, site, target = int(f[2], 16), f[3], int(f[4], 16) & 0x07FFFFFF, int(f[5], 16) & 0x07FFFFFF
+        if kind == "c":
+            ev[fp if in_window(target) else 0][0].add(target)
+        elif kind == "j":
+            ev[fp if in_window(site) else 0][1][site].add(target)
+        elif kind == "r" and target:
+            ev[fp if in_window(site) else 0][2][site].add(target)
+    return ev
+
+
+def in_window(a):
+    return WINDOW[0] <= a < WINDOW[1]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", required=True)
-    ap.add_argument("--evidence", required=True)
+    ap.add_argument("--evidence", required=True, help="rsgun --evidence files, comma-separated (merged)")
     ap.add_argument("--out", default=str(ROOT / "build/port/generated.rs"))
-    ap.add_argument("--range", default="06003000-0600A9A4,0603327C-0603C000,06040000-060735E8",
-                    help="the code regions (the game's load map; the rest of work RAM held other code in the boot)")
+    ap.add_argument("--range", default="06000C00-06003000,06003000-0600A9A4,0603327C-0603C000,06040000-060735E8",
+                    help="the code regions: the BIOS's code in RAM (its interrupt dispatch and library, there from "
+                         "the first frames), then the game's load map (the rest of work RAM held other code in the boot)")
     ap.add_argument("--only", default="", help="comma-separated entries to translate (hex)")
     a = ap.parse_args()
     regions = [tuple(int(x, 16) for x in r.split("-")) for r in a.range.split(",")]
-    img = Image(open(a.image, "rb").read(), 0x06000000)
-    calls, jumps = read_evidence(a.evidence, regions)
-    if a.only:
-        wanted = [int(x, 16) for x in a.only.split(",")]
-    else:
-        wanted = sorted(calls)
-    entries = set(calls)
-    done, skipped = {}, collections.Counter()
-    for e in wanted:
-        try:
-            done[e] = Function(e, img, entries, jumps)
-        except Untranslatable as err:
-            skipped[str(err).split(" at ")[0]] += 1
-    fns = [done[e].rust() for e in sorted(done)]
+    main_image = open(a.image, "rb").read()
+    paths = [pathlib.Path(x) for x in a.evidence.split(",")]
+    ev = read_evidence(paths)
+    # each overlay's window, saved beside the evidence that saw it
+    windows = {int(f.stem, 16): f for path in paths for f in path.with_suffix(".overlays").glob("*.bin")}
+    main_calls = {t for t in ev[0][0] | ev[0][3] if any(lo <= t < hi for lo, hi in regions)}
+    only = {int(x, 16) for x in a.only.split(",")} if a.only else None
+    done, skipped = [], collections.Counter()
+    for fp in sorted(ev):
+        calls, jumps, returns, handlers = ev[fp]
+        calls = calls | handlers
+        if fp == 0:
+            img, wanted, entries = Image(main_image, 0x06000000), main_calls, main_calls
+        else:
+            window = windows.get(fp)
+            if window is None:
+                skipped["an overlay with no window saved"] += len(calls)
+                continue
+            data = bytearray(main_image)
+            code = window.read_bytes()
+            data[WINDOW[0] - 0x06000000:WINDOW[0] - 0x06000000 + len(code)] = code
+            img, wanted, entries = Image(bytes(data), 0x06000000), calls, calls | main_calls
+        for e in sorted(wanted):
+            if only is not None and e not in only:
+                continue
+            try:
+                done.append((e, fp, Function(e, img, entries, jumps, returns, fp, e in handlers)))
+            except Untranslatable as err:
+                skipped[str(err).split(" at ")[0]] += 1
+    fns = [(e, fp) + f.rust() for e, fp, f in done]
     out = pathlib.Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     body = ["// Generated by tools/port/sh2rust.py from the game's code (ROM-derived: build/ only).",
             "#[allow(unused_variables, unused_mut, unreachable_code, clippy::all)]", "pub mod generated {",
-            "use stv::sh2::{Bus, Sh2};", "use stv::native::{call, tick, Natives};", ""]
-    body += [src for _, src in fns]
+            "use stv::sh2::{Bus, Sh2};", "use stv::native::{call, goto, tick, Natives};", ""]
+    body += [src for _, _, _, src in fns]
     body += ["", "pub fn register(n: &mut Natives) {"]
-    body += [f"    n.register(0x{name[2:]}, {name}, \"{name}\", None);" for name, _ in fns]
+    body += [f"    n.register({h(e)}, {name}, \"{name}\", {f'Some(0x{fp:016x})' if fp else 'None'});" for e, fp, name, _ in fns]
     body += ["}", "}"]
     out.write_text("\n".join(body) + "\n")
-    print(f"{len(fns)} functions translated, {sum(skipped.values())} left to the interpreter: {dict(skipped)}")
+    n_overlay = sum(1 for _, fp, _, _ in fns if fp)
+    print(f"{len(fns)} functions translated ({n_overlay} in {len({fp for _, fp, _, _ in fns if fp})} overlays), "
+          f"{sum(skipped.values())} left to the interpreter: {dict(skipped)}")
 
 
 if __name__ == "__main__":

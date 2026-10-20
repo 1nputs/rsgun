@@ -40,21 +40,25 @@ pub struct Evidence {
     pub overlay: Option<Overlay>,
     /// (CPU, overlay fingerprint (0 outside the window), address): times executed.
     pub executed: HashMap<(u8, u64, u32), u64>,
-    /// (CPU, kind, site, target): b'c' a call (BSR, BSRF, JSR), b'j' a computed jump (JMP, BRAF),
-    /// b'r' a return (RTS, RTE).
-    pub transfers: HashMap<(u8, u8, u32, u32), u64>,
-    /// (CPU, vector, handler): interrupts taken.
-    pub interrupts: HashMap<(u8, u32, u32), u64>,
-    /// The overlay fingerprints seen, with the first frame each was seen in.
+    /// (CPU, overlay fingerprint (0 unless the site or the target is in the window), kind, site,
+    /// target): b'c' a call (BSR, BSRF, JSR), b'j' a computed jump (JMP, BRAF), b'r' a return (RTS,
+    /// RTE).
+    pub transfers: HashMap<(u8, u64, u8, u32, u32), u64>,
+    /// (CPU, overlay fingerprint (0 unless the handler is in the window), vector, handler):
+    /// interrupts taken.
+    pub interrupts: HashMap<(u8, u64, u32, u32), u64>,
+    /// The overlay fingerprints seen, with the first frame each was seen in, and the window as it
+    /// was the last frame each was (its code, for the port's translation).
     pub overlays: HashMap<u64, u64>,
+    pub code: HashMap<u64, Vec<u8>>,
     /// This frame's fingerprint, once taken.
     pub overlay_now: Option<u64>,
 }
 
 impl Evidence {
     /// The text form: one record a line (tools/port reads it).
-    ///   x CPU OVERLAY ADDRESS COUNT, t CPU KIND SITE TARGET COUNT, i CPU VECTOR HANDLER COUNT,
-    ///   o OVERLAY FIRST_FRAME (hex, but counts and frames)
+    ///   x CPU OVERLAY ADDRESS COUNT, t CPU OVERLAY KIND SITE TARGET COUNT,
+    ///   i CPU OVERLAY VECTOR HANDLER COUNT, o OVERLAY FIRST_FRAME (hex, but counts and frames)
     pub fn to_text(&self) -> String {
         let mut lines: Vec<String> = Vec::new();
         let mut o: Vec<_> = self.overlays.iter().collect();
@@ -65,10 +69,10 @@ impl Evidence {
         lines.extend(x.iter().map(|((c, fp, a), n)| format!("x {c} {fp:016x} {a:08x} {n}")));
         let mut t: Vec<_> = self.transfers.iter().collect();
         t.sort();
-        lines.extend(t.iter().map(|((c, k, s, d), n)| format!("t {c} {} {s:08x} {d:08x} {n}", *k as char)));
+        lines.extend(t.iter().map(|((c, fp, k, s, d), n)| format!("t {c} {fp:016x} {} {s:08x} {d:08x} {n}", *k as char)));
         let mut i: Vec<_> = self.interrupts.iter().collect();
         i.sort();
-        lines.extend(i.iter().map(|((c, v, h), n)| format!("i {c} {v:02x} {h:08x} {n}")));
+        lines.extend(i.iter().map(|((c, fp, v, h), n)| format!("i {c} {fp:016x} {v:02x} {h:08x} {n}")));
         lines.join("\n") + "\n"
     }
 }
