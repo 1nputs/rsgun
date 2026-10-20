@@ -2534,3 +2534,459 @@ pub fn burst_draw(cpu: &mut Cpu, sp: u32) {
     let lift = if cpu.read32(VBLANKS) & 1 != 0 { 0 } else { 0xf7 };
     cpu.write8(sp + 0x23, lift);
 }
+
+/// The sword (A+B+C: a model drawn by its own draw, type 15, its power a third of ten times all
+/// three levels plus 100), held at the ship's nose (9.6 pixels out along where it points),
+/// spinning about its length and counted in its ship. It starts pointing up and swings round once
+/// (16 frames: the way the stick was pushed as it started, right unless left); then, by the ship's
+/// settings, it turns toward the stick's direction (a quarter of the way, at most 0x1000 a frame),
+/// spins, or turns away from it. Its angle eases toward where it points (a quarter of the way), or
+/// leads it while turning fast; it hits everything again once it has swept far enough (at once
+/// while turning fast). While it moves it keeps its afterimages (up to 16 of the last 30 frames:
+/// scales, angle, place). Once the ship lets go (not in the sword's state) it shrinks away and its
+/// afterimages fade, and it ends.
+const SWORD_SIZE: u32 = 0x184;
+const SWORD_EXEC: u32 = 0x0604_c2e8;
+const SWORD_DRAW: u32 = 0x0604_be74;
+const SWORD_MODEL: u32 = 0x0607_2ba0;
+const SWORD_BOXES: u32 = 0x0607_2864;
+const SWORD_TYPE: u8 = 15;
+const HYPER_TYPE: u8 = 16;
+/// The flags: a model.
+const IS_MODEL: u32 = 0x80_0000;
+/// The sword's model (its address: SWORD_MODEL), ship, frames into the swing or pause (a word),
+/// where it points, the stick's direction, its swing a frame (words), how far it has swept since
+/// it last hit everything; its afterimages (30, 8 bytes each: scales in 1024ths of SWORD_UNIT,
+/// the angle, the place in pixels), how many it keeps at most, from which they fade, the last's
+/// index and how many are kept, how far they have faded (bytes), its blade's half width and length
+/// (pixel words), the unit of the afterimages' scales.
+const SWORD_MODEL_AT: u32 = 0x44;
+const SWORD_SHIP: u32 = 0x80;
+const SWORD_FRAMES: u32 = 0x6e;
+const SWORD_POINTS: u32 = 0x70;
+const SWORD_AIM: u32 = 0x72;
+const SWORD_SWING: u32 = 0x76;
+const SWORD_SWEPT: u32 = 0x7c;
+const SWORD_IMAGES: u32 = 0x84;
+const SWORD_MOST: u32 = 0x174;
+const SWORD_FADE_FROM: u32 = 0x175;
+const SWORD_LAST: u32 = 0x176;
+const SWORD_KEPT: u32 = 0x177;
+const SWORD_FADED: u32 = 0x178;
+const SWORD_HALF_WIDTH: u32 = 0x17a;
+const SWORD_LENGTH: u32 = 0x17c;
+const SWORD_UNIT: u32 = 0x180;
+const SWORD_IMAGE_COUNT: i32 = 30;
+/// Its spin (a model's turn about Y: a word).
+const SPIN: u32 = 0x2e;
+const STATE_SWORD: u8 = 10;
+/// The ship's sword shots alive, its pad, its settings (the sword's turning: toward the stick,
+/// spinning, away from it) and the way its sword last swung (left: 1).
+const ALIVE_SWORD: u32 = 0x86;
+const SHIP_PAD: u32 = 0xa0;
+const SHIP_LIMITS: u32 = 0xa8;
+const SWORD_TOWARD: u32 = 0xa0_0000;
+const SWORD_SPINS: u32 = 0x40_0000;
+const SWORD_AWAY: u32 = 0x10_0000;
+const SWING_LEFT: u32 = 0x8a;
+/// The stick's directions as angles (0 up, clockwise).
+const STICK_ANGLES: [(u32, u16); 8] =
+    [(0x5000, 0xe000), (0x2000, 0x8000), (0x1000, 0), (0x4000, 0xc000), (0x8000, 0x4000), (0x6000, 0xa000), (0x9000, 0x2000), (0xa000, 0x6000)];
+const STICK_RIGHT: u32 = 0x8000;
+const STICK_LEFT: u32 = 0x4000;
+const SWORD_REACH: u32 = 0xfff6_199a;
+const SWORD_SPIN: u16 = 0x400;
+const SWORD_TURN_MOST: u32 = 0x1000;
+const FAST_TURN: i32 = 0x100;
+const SWEEP_HITS: i32 = 63;
+const SWORD_LEAD: u32 = 0x1_8000;
+const SETTLED: i32 = 0x400;
+const SWORD_FADING: u16 = 4;
+
+/// The frame's spills: the stick's bits, its direction (a word: -1 none), the turn this frame.
+const F_STICK: u32 = 0x14;
+const F_DIRECTION: u32 = 0x18;
+const F_TURN: u32 = 8;
+
+pub fn sword_exec(cpu: &mut Cpu, s: u32) {
+    let f = cpu.stack();
+    let ship = cpu.read32(s + SWORD_SHIP);
+    if cpu.read8(s + PHASE_LOW) as i8 <= 3 {
+        if cpu.read8(ship + OBJ_MODE) as i8 >= ENDING as i8 {
+            cpu.write32(s + SWORD_SHIP, 0);
+        }
+        let p = cpu.read32(s + SWORD_SHIP);
+        if p != 0 {
+            for field in [ALIVE_SWORD, ALIVE_ALL] {
+                let n = cpu.read8(p + field).wrapping_add(1);
+                cpu.write8(p + field, n);
+            }
+        }
+        if cpu.read8(ship + SHIP_STATE) != STATE_SWORD {
+            cpu.write16(s + PHASE, SWORD_FADING);
+        }
+    }
+    let stick = cpu.read16(ship + SHIP_PAD) as i16 as i32 as u32 & 0xf000;
+    cpu.write32(f + F_STICK, stick);
+    let direction = STICK_ANGLES.iter().find(|&&(bits, _)| bits == stick).map_or(0xffff, |&(_, a)| a);
+    cpu.write16(f + F_DIRECTION, direction);
+    if direction != 0xffff {
+        cpu.write16(s + SWORD_AIM, direction);
+    }
+    let mut turn = 0i32;
+    cpu.write32(f + F_TURN, 0);
+    match cpu.read8(s + PHASE_LOW) {
+        0 => {
+            for (field, v) in [(SWORD_LAST, 0xffu8), (SWORD_KEPT, 0), (SWORD_MOST, 16), (SWORD_FADE_FROM, 0), (SWORD_FADED, 0)] {
+                cpu.write8(s + field, v);
+            }
+            cpu.write16(s + SWORD_HALF_WIDTH, 0);
+            cpu.write16(s + SWORD_LENGTH, 0xffda);
+            cpu.write32(s + SWORD_UNIT, 0x0400_0000);
+            let flags = cpu.read32(s + FLAGS) | OWN_MODEL;
+            cpu.write32(s + FLAGS, flags);
+            cpu.write32(s + BEAM_DRAW, SWORD_DRAW);
+            // (the SH-2 code first points it by the stick, or by the settings, then overwrites that)
+            cpu.write16(s + SWORD_FRAMES, 0);
+            cpu.write32(s + SWORD_SWEPT, 0);
+            cpu.write16(s + SWORD_AIM, 0x8000);
+            cpu.write16(s + ANGLE, 0);
+            cpu.write16(s + SWORD_POINTS, 0);
+            if stick & STICK_RIGHT != 0 {
+                cpu.write8(ship + SWING_LEFT, 0);
+            }
+            if stick & STICK_LEFT != 0 {
+                cpu.write8(ship + SWING_LEFT, 1);
+            }
+            let swing = if cpu.read8(ship + SWING_LEFT) == 0 { 0x1000 } else { 0xf000 };
+            cpu.write16(s + SWORD_SWING, swing);
+            cpu.write16(s + PHASE, 2);
+        }
+        1 => {
+            let limits = |cpu: &mut Cpu| cpu.read32(ship + SHIP_LIMITS);
+            let toward = |cpu: &mut Cpu, away: u32| {
+                let (from, to) = (cpu.read16(s + SWORD_POINTS) as i16 as i32 as u32, cpu.read16(s + SWORD_AIM) as i16 as i32 as u32);
+                let d = nested!(cpu, 0x0604_6194, super::camera::angle_diff(cpu, from, to.wrapping_add(away))) as i32;
+                nested!(cpu, 0x0606_4f3c, math::clamp(cpu, (d / 4) as u32, SWORD_TURN_MOST)) as i32
+            };
+            if limits(cpu) & SWORD_TOWARD != 0 {
+                turn = toward(cpu, 0);
+                cpu.write32(f + F_TURN, turn as u32);
+                let t = toward(cpu, 0);
+                let a = cpu.read16(s + SWORD_POINTS).wrapping_add(t as u16);
+                cpu.write16(s + SWORD_POINTS, a);
+            }
+            if limits(cpu) & SWORD_SPINS != 0 {
+                turn = SWORD_TURN_MOST as i32;
+                cpu.write32(f + F_TURN, turn as u32);
+                let a = cpu.read16(s + SWORD_POINTS).wrapping_add(SWORD_TURN_MOST as u16);
+                cpu.write16(s + SWORD_POINTS, a);
+            }
+            if limits(cpu) & SWORD_AWAY != 0 {
+                turn = toward(cpu, 0x8000);
+                cpu.write32(f + F_TURN, turn as u32);
+                let t = toward(cpu, 0x8000);
+                let a = cpu.read16(s + SWORD_POINTS).wrapping_add(t as u16);
+                cpu.write16(s + SWORD_POINTS, a);
+            }
+        }
+        2 => {
+            turn = cpu.read16(s + SWORD_SWING) as i16 as i32;
+            cpu.write32(f + F_TURN, turn as u32);
+            let a = cpu.read16(s + SWORD_POINTS).wrapping_add(cpu.read16(s + SWORD_SWING));
+            cpu.write16(s + SWORD_POINTS, a);
+            let n = cpu.read16(s + SWORD_FRAMES).wrapping_add(1);
+            cpu.write16(s + SWORD_FRAMES, n);
+            if n as i16 > 15 {
+                cpu.write16(s + SWORD_FRAMES, 0);
+                cpu.write16(s + PHASE, 1);
+            }
+        }
+        3 => {
+            let n = cpu.read16(s + SWORD_FRAMES).wrapping_add(1);
+            cpu.write16(s + SWORD_FRAMES, n);
+            if n as i16 > 7 {
+                cpu.write16(s + PHASE, 1);
+            }
+        }
+        4 => {
+            hit_set(cpu, s, 0);
+            cpu.write32(s + SWORD_SWEPT, 0xffff_fff8);
+            let w = cpu.read32(s + SCALES) as i32;
+            let w = w.wrapping_add((-0x1000i32).wrapping_sub(w) / 4);
+            cpu.write32(s + SCALES, w as u32);
+            if w < 0 {
+                cpu.write32(s + SCALES, 0);
+            }
+            let w = cpu.read32(s + SCALES);
+            cpu.write32(s + SCALES + 4, w);
+        }
+        _ => {}
+    }
+    let all_set = |cpu: &mut Cpu| cpu.read32(s + HIT_SET) == u32::MAX && cpu.read32(s + HIT_SET + 4) == u32::MAX;
+    if turn.wrapping_abs() > FAST_TURN {
+        if !all_set(cpu) {
+            let n = cpu.read32(s + SWORD_SWEPT).wrapping_add(1);
+            cpu.write32(s + SWORD_SWEPT, n);
+        }
+        if cpu.read32(s + SWORD_SWEPT) as i32 > 0 {
+            hit_set(cpu, s, u32::MAX);
+            cpu.write32(s + SWORD_SWEPT, 0);
+        }
+        let lead = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, turn as u32, SWORD_LEAD));
+        let a = cpu.read16(s + SWORD_POINTS).wrapping_sub(lead as u16);
+        cpu.write16(s + ANGLE, a);
+    } else {
+        if !all_set(cpu) {
+            let n = cpu.read32(s + SWORD_SWEPT).wrapping_add(0x20).wrapping_add(turn.wrapping_abs() as u32);
+            cpu.write32(s + SWORD_SWEPT, n);
+        }
+        if cpu.read32(s + SWORD_SWEPT) as i32 > SWEEP_HITS {
+            hit_set(cpu, s, u32::MAX);
+            cpu.write32(s + SWORD_SWEPT, 0);
+        }
+        let (from, to) = (cpu.read16(s + ANGLE) as i16 as i32 as u32, cpu.read16(s + SWORD_POINTS) as i16 as i32 as u32);
+        let d = nested!(cpu, 0x0604_6194, super::camera::angle_diff(cpu, from, to)) as i32;
+        let a = cpu.read16(s + ANGLE).wrapping_add((d / 4) as u16);
+        cpu.write16(s + ANGLE, a);
+    }
+    cpu.write32(f, 0);
+    cpu.write32(f + 4, SWORD_REACH);
+    for k in 0..2 {
+        let v = cpu.read32(ship + SCALES + 4 * k);
+        cpu.write32(f + 0x0c + 4 * k, v);
+    }
+    let flip = cpu.read32(s + FLAGS) & FLIP;
+    cpu.write32(f + 0x14, flip);
+    let a = cpu.read16(s + SWORD_POINTS);
+    cpu.write16(f + 0x18, a);
+    cpu.call(SL_TURN, &[f]);
+    for k in 0..2 {
+        let p = cpu.read32(ship + POSITION + 4 * k).wrapping_add(cpu.read32(f + 4 * k));
+        cpu.write32(s + POSITION + 4 * k, p);
+    }
+    let z = cpu.read32(ship + POSITION + 8);
+    cpu.write32(s + POSITION + 8, z);
+    let spin = cpu.read16(s + SPIN).wrapping_add(SWORD_SPIN);
+    cpu.write16(s + SPIN, spin);
+    sword_images(cpu, s, turn);
+}
+
+/// The afterimages: fading once the sword fades (it ends once they are gone and it has shrunk);
+/// else one kept while it moves (turning, or its angle not yet within 0x400 of where it points),
+/// and lost while it is still.
+fn sword_images(cpu: &mut Cpu, s: u32, turn: i32) {
+    let fade = |cpu: &mut Cpu| {
+        let faded = cpu.read8(s + SWORD_FADED);
+        if (faded as i8) < cpu.read8(s + SWORD_MOST) as i8 {
+            cpu.write8(s + SWORD_FADED, faded.wrapping_add(1));
+        }
+    };
+    if cpu.read8(s + PHASE_LOW) as u16 == SWORD_FADING {
+        fade(cpu);
+        let kept = cpu.read8(s + SWORD_KEPT).wrapping_sub(1);
+        cpu.write8(s + SWORD_KEPT, kept);
+        if kept as i8 <= 0 && cpu.read32(s + SCALES) as i32 <= 0 {
+            end(cpu, s);
+        }
+        return;
+    }
+    if turn == 0 {
+        let (from, to) = (cpu.read16(s + ANGLE) as i16 as i32 as u32, cpu.read16(s + SWORD_POINTS) as i16 as i32 as u32);
+        let d = nested!(cpu, 0x0604_6194, super::camera::angle_diff(cpu, from, to)) as i32;
+        if d.wrapping_abs() <= SETTLED {
+            let kept = cpu.read8(s + SWORD_KEPT);
+            if kept as i8 > 0 {
+                cpu.write8(s + SWORD_KEPT, kept - 1);
+            }
+            fade(cpu);
+            return;
+        }
+    }
+    let last = cpu.read8(s + SWORD_LAST).wrapping_add(1);
+    cpu.write8(s + SWORD_LAST, last);
+    let last = (cpu.read8(s + SWORD_LAST) as i8 as i32 % SWORD_IMAGE_COUNT) as u8;
+    cpu.write8(s + SWORD_LAST, last);
+    let image = |cpu: &mut Cpu| s.wrapping_add((cpu.read8(s + SWORD_LAST) as i8 as i32 * 8) as u32) + SWORD_IMAGES;
+    let x = pixels(cpu.read32(s + POSITION));
+    let at = image(cpu);
+    cpu.write16(at + 4, x);
+    let y = pixels(cpu.read32(s + POSITION + 4));
+    let at = image(cpu);
+    cpu.write16(at + 6, y);
+    let a = cpu.read16(s + ANGLE);
+    let at = image(cpu);
+    cpu.write16(at + 2, a);
+    for k in 0..2 {
+        let (scale, unit) = (cpu.read32(s + SCALES + 4 * k), cpu.read32(s + SWORD_UNIT));
+        let v = nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, scale, unit));
+        let at = image(cpu);
+        cpu.write8(at + k, v as u8);
+    }
+    let (kept, most) = (cpu.read8(s + SWORD_KEPT) as i8 as i32 + 1, cpu.read8(s + SWORD_MOST) as i8 as i32 as u32);
+    let kept = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, kept as u32, most));
+    cpu.write8(s + SWORD_KEPT, kept as u8);
+    cpu.write8(s + SWORD_FADED, 0);
+}
+
+/// The sword's maker: the sword at ship `p` (its sprite and hits set up as actor_setup does). It,
+/// or 0.
+pub fn shot_sword_set(cpu: &mut Cpu, p: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, SWORD_SIZE)) as i8 as i32 as u32;
+    let s = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 1, blocks, ACTOR_EXEC));
+    if s == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, s + SPRITE));
+    nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, s + BOXES));
+    cpu.write16(s + PHASE, 0);
+    cpu.write32(s + BEHAVIOUR, SWORD_EXEC);
+    let flags = cpu.read32(s + FLAGS) | IS_MODEL;
+    cpu.write32(s + FLAGS, flags);
+    cpu.write32(s + SWORD_MODEL_AT, SWORD_MODEL);
+    let model = cpu.read32(SWORD_MODEL);
+    cpu.write32(s + BEAM_DRAW, model);
+    for k in 0..3 {
+        let v = cpu.read32(p + POSITION + 4 * k);
+        cpu.write32(s + POSITION + 4 * k, v);
+    }
+    cpu.write8(s + LIFT, 0);
+    let n = cpu.read8(p + NUMBER);
+    cpu.write8(s + NUMBER, n);
+    cpu.write8(s + SIDE, 0);
+    cpu.write8(s + TYPE, SWORD_TYPE);
+    let levels = LEVELS.wrapping_add((n as i8 as i32 * 3) as u32);
+    let sum = (0..3).map(|k| cpu.read8(levels + k) as i8 as i32).sum::<i32>();
+    cpu.write16(s + POWER, (sum * 10 / 3 + 100) as u16);
+    cpu.write32(s + BOXES, SWORD_BOXES);
+    cpu.write32(s + SWORD_SHIP, p);
+    s
+}
+
+/// SGL's matrix calls (sprites.rs's).
+const SL_PUSH_MATRIX: u32 = 0x0606_71cc;
+const SL_TRANSLATE: u32 = 0x0606_721c;
+const SL_ROT_Z: u32 = 0x0606_726c;
+const SL_ROT_Y: u32 = 0x0606_736c;
+const SL_SCALE: u32 = 0x0606_73ec;
+const SL_PUT_POLYGON: u32 = 0x0606_745c;
+const SL_POP_MATRIX: u32 = 0x0606_7200;
+const LOOPS: u32 = super::globals::LOOPS;
+/// The afterimages' band: four-cornered polygons, half-lit on odd passes (attribute 0x100), the
+/// first kind's colour plus 0xc0 (player 2: 0xb0), brighter by up to 16 and shorter (the hyper
+/// sword) as they fade.
+const BAND_FLAGS: u32 = 1;
+const BAND_HALF: u32 = 0x100;
+
+/// The sword's own draw (sprite `sp`): its model (turned, spun, scaled: mirrored with its flip),
+/// then its afterimages as a band of polygons, each from one afterimage's blade to the one before.
+pub fn sword_draw(cpu: &mut Cpu, sp: u32) {
+    let s = sp.wrapping_sub(SPRITE);
+    let f = cpu.stack();
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    let (x, y, z) = (cpu.read32(s + POSITION), cpu.read32(s + POSITION + 4), cpu.read32(s + POSITION + 8));
+    cpu.call(SL_TRANSLATE, &[x, y, z]);
+    let a = cpu.read16(s + ANGLE) as i16 as i32 as u32;
+    cpu.call(SL_ROT_Z, &[a]);
+    let a = cpu.read16(s + SPIN) as i16 as i32 as u32;
+    cpu.call(SL_ROT_Y, &[a]);
+    let sx = cpu.read32(s + SCALES);
+    let sx = if cpu.read32(s + FLAGS) & MIRRORED != 0 { sx.wrapping_neg() } else { sx };
+    let (sy, sz) = (cpu.read32(s + SCALES + 4), cpu.read32(s + SCALES + 8));
+    cpu.call(SL_SCALE, &[sx, sy, sz]);
+    let model = cpu.read32(s + SWORD_MODEL_AT);
+    let model = cpu.read32(model);
+    cpu.call(SL_PUT_POLYGON, &[model]);
+    cpu.call(SL_POP_MATRIX, &[]);
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, f));
+    let flags = cpu.read32(f) | BAND_FLAGS;
+    cpu.write32(f, flags);
+    if cpu.read32(LOOPS) & 1 != 0 {
+        cpu.write32(f, flags | BAND_HALF);
+    }
+    let c = f + 0x6c;
+    cpu.write32(f + 0x24, c);
+    for k in [0xc, 8, 4] {
+        cpu.write32(f + k, 0);
+    }
+    let base = if cpu.read8(s + NUMBER) == 0 { 0xc0 } else { 0xb0 };
+    let colour = cpu.read16(KIND_COLOURS).wrapping_add(base);
+    cpu.write16(f + 0x1a, colour);
+    cpu.write8(f + 0x23, 0);
+    let mut i = cpu.read8(s + SWORD_LAST) as i8 as i32;
+    cpu.write32(f + 0x7c, i as u32);
+    cpu.write32(f + 0x80, 0x1_0000);
+    if cpu.read8(s + SWORD_KEPT) as i8 <= 1 {
+        return;
+    }
+    cpu.write32(f + 0x84, SWORD_HALF_WIDTH);
+    cpu.write32(f + 0x88, SWORD_UNIT);
+    let mut j = 0;
+    loop {
+        if j == 0 {
+            blade(cpu, s, f, i, c, c + 4, false);
+        } else {
+            for (to, from) in [(0, 0xc), (2, 0xe), (4, 8), (6, 0xa)] {
+                let v = cpu.read16(c + from);
+                cpu.write16(c + to, v);
+            }
+        }
+        if i == 0 {
+            i = SWORD_IMAGE_COUNT;
+        }
+        i = (i - 1) as i8 as i32;
+        cpu.write32(f + 0x7c, i as u32);
+        blade(cpu, s, f, i, c + 0xc, c + 8, true);
+        let colour = cpu.read16(f + 0x1a);
+        cpu.write16(f + 0x18, colour);
+        let faded = cpu.read8(s + SWORD_FADED) as i8 as i32 + j;
+        if faded > cpu.read8(s + SWORD_FADE_FROM) as i8 as i32 {
+            let most = cpu.read8(s + SWORD_MOST) as i8 as i32 as u32;
+            let k = nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, faded as u32, most));
+            let more = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, 16, k));
+            let colour = (more as u16).wrapping_add(cpu.read16(f + 0x18));
+            cpu.write16(f + 0x18, colour);
+            cpu.write32(f + 0x80, 0x1_0000u32.wrapping_sub(k));
+        }
+        nested!(cpu, 0x0604_0960, sprites::draw(cpu, f));
+        j += 1;
+        if j + 1 >= cpu.read8(s + SWORD_KEPT) as i8 as i32 {
+            return;
+        }
+    }
+}
+
+/// Afterimage `i`'s blade: its base (at `base`, x and y words) and tip (`tip`), turned and scaled
+/// as the afterimage was (the hyper sword's shortened as it fades, `fading`).
+fn blade(cpu: &mut Cpu, s: u32, f: u32, i: i32, base: u32, tip: u32, fading: bool) {
+    let t = f + 0x2c;
+    let image = s.wrapping_add((i * 8) as u32) + SWORD_IMAGES;
+    let half = cpu.read16(s + SWORD_HALF_WIDTH) as i16 as i32;
+    cpu.write32(t, half.wrapping_mul(0x8000) as u32);
+    cpu.write32(t + 4, 0);
+    for k in 0..2 {
+        let (v, unit) = (cpu.read8(image + k) as u32, cpu.read32(s + SWORD_UNIT));
+        let v = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, v, unit));
+        cpu.write32(t + 0x0c + 4 * k, v);
+    }
+    if fading && cpu.read8(s + TYPE) == HYPER_TYPE {
+        let (v, k) = (cpu.read32(t + 0x10), cpu.read32(f + 0x80));
+        let v = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, v, k));
+        cpu.write32(t + 0x10, v);
+    }
+    cpu.write32(t + 0x14, 0);
+    let a = cpu.read16(image + 2);
+    cpu.write16(t + 0x18, a);
+    cpu.write32(f + 0x90, SL_TURN);
+    for (at, x, y) in [(base, half, 0), (tip, half.wrapping_neg(), (cpu.read16(s + SWORD_LENGTH) as i16 as i32) << 16)] {
+        if at == tip {
+            cpu.write32(t, x.wrapping_mul(0x8000) as u32);
+            cpu.write32(t + 4, y as u32);
+        }
+        cpu.call(SL_TURN, &[t]);
+        let px = pixels(cpu.read32(t)).wrapping_add(cpu.read16(image + 4));
+        cpu.write16(at, px);
+        let py = pixels(cpu.read32(t + 4)).wrapping_add(cpu.read16(image + 6));
+        cpu.write16(at + 2, py);
+    }
+}
