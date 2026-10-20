@@ -26,6 +26,7 @@ mod main_loop;
 mod math;
 mod models;
 mod objects;
+mod orbits;
 mod pads;
 mod play;
 mod palette;
@@ -413,6 +414,17 @@ pub fn register(n: &mut Natives) {
         0x0604_d8d8 => actors::move_by_angle[actor, speed, angle] -> (),
         0x0604_d95c => actors::trail_init[actor, a, b, boxes] -> (),
         0x0604_da00 => actors::trail_record[actor, angle] -> (),
+        0x0605_9418 => orbits::orbit_place[o] -> u32,
+        0x0605_94cc => orbits::orbit_exec[o] -> (),
+        0x0605_9554 => orbits::orbit_set[d, watched, mask, centre; angle_from] -> (),
+        0x0605_91dc => orbits::start_0[o] -> (),
+        0x0605_9294 => orbits::start_1[o] -> (),
+        0x0605_932c => orbits::start_2[o] -> (),
+        0x0605_93ac => orbits::start_4[o] -> (),
+        0x0605_9228 => orbits::frame_0[o] -> u32,
+        0x0605_92c4 => orbits::frame_1[o] -> u32,
+        0x0605_933c => orbits::frame_2[o] -> u32,
+        0x0605_93c0 => orbits::frame_4[o] -> u32,
         0x0605_3b10 => bullets::bullet_ends[b, back] -> u32,
         0x0605_3bfc => bullets::bullet_frame[b] -> (),
         0x0605_3ccc => bullets::bullet_move[b] -> (),
