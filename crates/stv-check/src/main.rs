@@ -740,9 +740,61 @@ fn vdp1(dir: &Path) -> Result<bool, String> {
     Ok(bad == 0)
 }
 
+/// Runs two machines from power on, one playing the loops its CPUs spin in and one executing every
+/// instruction, and requires them equal after every frame: memories, CPUs, steps, timers.
+fn spin(frames: u64, rom: &Path) -> Result<bool, String> {
+    let read = |p: PathBuf| fs::read(&p).map_err(|e| format!("{}: {e}", p.display()));
+    let (bios, cart) = (read(rom.join("bios-epr20091.bin"))?, read(rom.join("rsgun-cart.bin"))?);
+    let eeprom = fs::read(rom.join("eeprom.bin")).ok();
+    let mut fast = stv::machine::Machine::new(bios.clone(), cart.clone(), 1, eeprom.as_deref());
+    let mut slow = stv::machine::Machine::new(bios, cart, 1, eeprom.as_deref());
+    slow.spin_enabled = false;
+    let (mut t_fast, mut t_slow) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    let ms = |t: std::time::Duration, f: u64| t.as_secs_f64() * 1000.0 / f as f64;
+    for f in 1..=frames {
+        let t = std::time::Instant::now();
+        fast.run_frame();
+        t_fast += t.elapsed();
+        let t = std::time::Instant::now();
+        slow.run_frame();
+        t_slow += t.elapsed();
+        let mut differ = Vec::new();
+        if fast.hashes().0 != slow.hashes().0 {
+            differ.push("memories");
+        }
+        if fast.cpu != slow.cpu {
+            differ.push("CPUs");
+        }
+        if fast.steps != slow.steps {
+            differ.push("steps");
+        }
+        let frt = |m: &stv::machine::Machine, c: usize| (m.sys.onchip[c].frt.frc, m.sys.onchip[c].frt.ftcsr, m.sys.onchip[c].frt.icr);
+        if (0..2).any(|c| frt(&fast, c) != frt(&slow, c)) {
+            differ.push("FRTs");
+        }
+        if fast.sys.m68k.pc != slow.sys.m68k.pc || fast.sys.sound_steps != slow.sys.sound_steps {
+            differ.push("sound CPU");
+        }
+        if !differ.is_empty() {
+            for c in 0..2 {
+                if fast.cpu[c] != slow.cpu[c] {
+                    println!("CPU {c}:\n  playing   {:x?}\n  executing {:x?}", fast.cpu[c], slow.cpu[c]);
+                }
+            }
+            println!("frame {f}: {} differ (steps {:?} and {:?})", differ.join(", "), fast.steps, slow.steps);
+            return Ok(false);
+        }
+        if f % 600 == 0 {
+            println!("frame {f}: equal ({:.1} ms a frame playing spins, {:.1} executing all)", ms(t_fast, f), ms(t_slow, f));
+        }
+    }
+    println!("{frames} frames equal: {:.1} ms a frame playing spins, {:.1} executing all", ms(t_fast, frames), ms(t_slow, frames));
+    Ok(true)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: stv-check trace DIR [--cpu m|s|k] [--rom DIR]\n       stv-check boot ORACLE.hashes [--frames N] [--rom DIR] [--dump F,F --dump-dir DIR]\n       stv-check vdp2 DUMP_DIR\n       stv-check vdp1 DUMP_DIR";
+    let usage = "usage: stv-check trace DIR [--cpu m|s|k] [--rom DIR]\n       stv-check boot ORACLE.hashes [--frames N] [--rom DIR] [--dump F,F --dump-dir DIR]\n       stv-check vdp2 DUMP_DIR\n       stv-check vdp1 DUMP_DIR\n       stv-check spin [--frames N] [--rom DIR]";
     let Some(cmd) = args.first() else {
         eprintln!("{usage}");
         return ExitCode::from(2);
@@ -769,6 +821,7 @@ fn main() -> ExitCode {
         ("boot", Some(d)) => boot(&d, frames, &rom, &dumps, &dump_dir),
         ("vdp2", Some(d)) => vdp2(&d),
         ("vdp1", Some(d)) => vdp1(&d),
+        ("spin", None) => spin(frames, &rom),
         _ => Err(usage.into()),
     };
     match result {

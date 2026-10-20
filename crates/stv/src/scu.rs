@@ -89,13 +89,12 @@ impl Scu {
     /// The level the SCU presents on the master's IRL lines: the highest unmasked pending source.
     pub fn pending(&self) -> Option<(u32, u32)> {
         let live = self.ist & !self.ims & 0x3FFF;
-        let mut best: Option<(u32, u32)> = None;
-        for (bit, &level) in LEVELS.iter().enumerate() {
-            if live & (1 << bit) != 0 && best.is_none_or(|(l, _)| level > l) {
-                best = Some((level, bit as u32));
-            }
+        if live == 0 {
+            return None;
         }
-        best
+        // the levels fall with the bit number, so the lowest pending bit wins (ties too)
+        let bit = live.trailing_zeros();
+        Some((LEVELS[bit as usize], bit))
     }
 
     /// The master fetches the vector for the interrupt it accepted: the source's pending bit clears.

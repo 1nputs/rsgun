@@ -102,24 +102,23 @@ impl OnChip {
 
     // ---- FRT ----------------------------------------------------------------------------------
 
-    fn frt_divisor(&self) -> u32 {
+    /// The FRT's clock divisor as a power of two (8, 32, 128), or None for the external clock (not
+    /// connected).
+    fn frt_divisor_log2(&self) -> Option<u32> {
         match self.frt.tcr & 3 {
-            0 => 8,
-            1 => 32,
-            2 => 128,
-            _ => u32::MAX, // external clock: not connected
+            0 => Some(3),
+            1 => Some(5),
+            2 => Some(7),
+            _ => None,
         }
     }
 
     /// Advances the FRT by `cycles` CPU cycles.
     pub fn clock_frt(&mut self, cycles: u32) {
-        let div = self.frt_divisor();
-        if div == u32::MAX {
-            return;
-        }
+        let Some(shift) = self.frt_divisor_log2() else { return };
         self.frt.sub += cycles;
-        let ticks = self.frt.sub / div;
-        self.frt.sub %= div;
+        let ticks = self.frt.sub >> shift;
+        self.frt.sub &= (1 << shift) - 1;
         for _ in 0..ticks {
             // compare match is checked on the count reached
             let next = self.frt.frc.wrapping_add(1);
@@ -137,6 +136,24 @@ impl OnChip {
                 self.frt.ftcsr |= OCFB;
             }
         }
+    }
+
+    /// CPU cycles before the FRT next sets a flag (overflow, compare match A or B); u64::MAX when
+    /// its clock is not connected.
+    pub fn frt_cycles_to_event(&self) -> u64 {
+        let Some(shift) = self.frt_divisor_log2() else { return u64::MAX };
+        let f = &self.frt;
+        let ticks_to = |target: u16| match target.wrapping_sub(f.frc) {
+            0 => 0x1_0000,
+            d => d as u64,
+        };
+        let ticks = ticks_to(f.ocra).min(ticks_to(f.ocrb)).min(0x1_0000 - f.frc as u64);
+        (ticks << shift) - f.sub as u64
+    }
+
+    /// Some FRT interrupt is enabled.
+    pub fn frt_interrupts_on(&self) -> bool {
+        self.frt.tier & (ICF | OCFA | OCFB | OVF) != 0
     }
 
     /// The other CPU wrote MINIT/SINIT: an input capture.
@@ -172,6 +189,13 @@ impl OnChip {
 
     /// The highest-priority interrupt the modules ask for, if any.
     pub fn pending_irq(&self) -> Option<Irq> {
+        // TIER's enable bits sit where FTCSR's flags do
+        if self.frt.tier & self.frt.ftcsr & (ICF | OCFA | OCFB | OVF) == 0
+            && self.divu.dvcr & 3 != 3
+            && self.dma.iter().all(|ch| ch.chcr & 0x6 != 0x6)
+        {
+            return None;
+        }
         let mut best: Option<Irq> = None;
         let mut offer = |level: u32, vector: u32| {
             if level > 0 && best.is_none_or(|b| level > b.level) {

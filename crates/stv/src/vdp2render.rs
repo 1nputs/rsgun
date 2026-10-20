@@ -23,10 +23,6 @@ struct Px {
     offset: Option<usize>,
 }
 
-/// Which layer a pixel came from, in the order ties are broken (sprite first).
-const SPRITE: usize = 0;
-const RBG0: usize = 1;
-const NBG0: usize = 2;
 
 pub struct Vdp2Frame<'a> {
     pub regs: &'a [u8],
@@ -84,17 +80,26 @@ impl Vdp2Frame<'_> {
         }
     }
 
+    /// Every CRAM colour, as [`Self::cram_color`] gives it for indices 0-2047.
+    fn palette(&self) -> Vec<([u8; 3], bool)> {
+        (0..2048).map(|i| self.cram_color(i)).collect()
+    }
+
     /// Renders the frame: `width() * height()` RGB pixels.
     pub fn render(&self) -> Vec<u8> {
         let (w, h) = (self.width(), self.height());
         let mut out = vec![0u8; w * h * 3];
-        let mut layers: [Vec<Option<Px>>; 6] = Default::default();
+        // the layers in the order ties are broken: the sprites, RBG0, NBG0-3
+        let mut layers: [Vec<Option<Px>>; 6] = std::array::from_fn(|_| vec![None; w]);
+        let pal = self.palette();
+        let debug = debug_pixel();
         for line in 0..h {
             let sprite_line = if self.double_density() { line / 2 } else { line };
-            layers[SPRITE] = self.sprite_line(sprite_line, w);
-            layers[RBG0] = self.rbg0_line(line, w);
-            for n in 0..4 {
-                layers[NBG0 + n] = self.nbg_line(n, line, w);
+            let [sprite, rbg0, nbg @ ..] = &mut layers;
+            self.sprite_line(sprite_line, sprite, &pal);
+            self.rbg0_line(line, rbg0, &pal);
+            for (n, l) in nbg.iter_mut().enumerate() {
+                self.nbg_line(n, line, l, &pal);
             }
             let back = self.back_color(line);
             for x in 0..w {
@@ -113,7 +118,7 @@ impl Vdp2Frame<'_> {
                         second = Some((i, p));
                     }
                 }
-                if let Some((dx, dy)) = debug_pixel()
+                if let Some((dx, dy)) = debug
                     && dx == x
                     && dy == line
                 {
@@ -149,10 +154,12 @@ impl Vdp2Frame<'_> {
     fn offset(&self, c: [u8; 3], which: Option<usize>) -> [u8; 3] {
         let Some(sel) = which else { return c };
         let base = if sel == 0 { 0x114 } else { 0x11A };
-        [0, 1, 2].map(|k| {
-            let o = ((self.reg(base + 2 * k) as i32) << 23) >> 23;
-            (c[k] as i32 + o).clamp(0, 255) as u8
-        })
+        let mut out = c;
+        for (k, o) in out.iter_mut().enumerate() {
+            let d = ((self.reg(base + 2 * k) as i32) << 23) >> 23;
+            *o = (*o as i32 + d).clamp(0, 255) as u8;
+        }
+        out
     }
 
     fn offset_for(&self, bit: u16) -> Option<usize> {
@@ -176,17 +183,17 @@ impl Vdp2Frame<'_> {
 
     // ---- NBG0-3 --------------------------------------------------------------------------------
 
-    fn nbg_line(&self, n: usize, line: usize, w: usize) -> Vec<Option<Px>> {
-        let mut out = vec![None; w];
+    fn nbg_line(&self, n: usize, line: usize, out: &mut [Option<Px>], pal: &[([u8; 3], bool)]) {
+        out.fill(None);
         let bgon = self.reg(0x20);
         if bgon & (1 << n) == 0 || self.reg(0) & 0x8000 == 0 {
-            return out;
+            return;
         }
         // NBG0 and NBG1 can be bitmaps (not covered yet)
         let (chctl, sh) = if n < 2 { (self.reg(0x28), 8 * n) } else { (self.reg(0x2A), 4 * (n - 2)) };
         let chsz = (chctl >> sh) & 1;
         if n < 2 && (chctl >> sh) & 2 != 0 {
-            return out;
+            return;
         }
         let colors = if n == 0 {
             (chctl >> 4) & 7
@@ -196,7 +203,7 @@ impl Vdp2Frame<'_> {
             (chctl >> (sh + 1)) & 1
         };
         if colors > 1 {
-            return out; // 2048 colours and RGB cells: not covered yet
+            return; // 2048 colours and RGB cells: not covered yet
         }
         let pncn = self.reg(0x30 + 2 * n);
         let plsz = (self.reg(0x3A) >> (2 * n)) & 3;
@@ -227,39 +234,50 @@ impl Vdp2Frame<'_> {
             (((self.reg(b) & 0x7FF) as i64) << 16, ((self.reg(b + 2) & 0x7FF) as i64) << 16, 0x10000, 0x10000)
         };
         let two_word = pncn & 0x8000 == 0;
-        let cell = if chsz == 0 { 8 } else { 16 };
-        let page_cells = if chsz == 0 { 64 } else { 32 };
+        // sizes as powers of two: characters 8 or 16 dots, pages 64 or 32 characters across,
+        // planes 1 or 2 pages each way
+        let cell_sh = 3 + chsz as usize;
+        let cell = 1 << cell_sh;
+        let page_cells_sh = 6 - chsz as usize;
         let pn_bytes = if two_word { 4 } else { 2 };
-        let page_bytes = page_cells * page_cells * pn_bytes;
-        let plane_w = if plsz & 1 != 0 { 1024 } else { 512 };
-        let plane_h = if plsz & 2 != 0 { 1024 } else { 512 };
+        let page_bytes = (1 << (2 * page_cells_sh)) * pn_bytes;
+        let plane_w_sh = if plsz & 1 != 0 { 10 } else { 9 };
+        let plane_h_sh = if plsz & 2 != 0 { 10 } else { 9 };
         let y = ((sy + line as i64 * dy) >> 16) as usize;
+        let mut last: Option<(usize, PatternName)> = None;
         for (x, px) in out.iter_mut().enumerate() {
             let xx = ((sx + x as i64 * dx) >> 16) as usize;
-            let (mx, my) = (xx % (plane_w * 2), y % (plane_h * 2));
-            let plane = (my / plane_h) * 2 + mx / plane_w;
-            let (px_in, py_in) = (mx % plane_w, my % plane_h);
-            let page = (py_in / 512) * 2 + px_in / 512;
-            let (pxp, pyp) = (px_in % 512, py_in % 512);
+            let (mx, my) = (xx & ((2 << plane_w_sh) - 1), y & ((2 << plane_h_sh) - 1));
+            let plane = ((my >> plane_h_sh) << 1) | (mx >> plane_w_sh);
+            let (px_in, py_in) = (mx & ((1 << plane_w_sh) - 1), my & ((1 << plane_h_sh) - 1));
+            let page = ((py_in >> 9) << 1) | (px_in >> 9);
+            let (pxp, pyp) = (px_in & 511, py_in & 511);
             let map = ((mpof << 6) | planes[plane]) & !(match plsz { 1 => 1, 3 => 3, _ => 0 });
             let plane_addr = (map as usize * page_bytes) & 0x7_FFFF;
-            let entry = (pyp / cell) * page_cells + pxp / cell;
+            let entry = ((pyp >> cell_sh) << page_cells_sh) + (pxp >> cell_sh);
             let pa = (plane_addr + page * page_bytes + entry * pn_bytes) & 0x7_FFFF;
-            let pn = if two_word {
-                PatternName::two_word(rd16(self.vram, pa), rd16(self.vram, (pa + 2) & 0x7_FFFF))
-            } else {
-                PatternName::one_word(rd16(self.vram, pa), pncn, colors, chsz)
+            let pn = match last {
+                Some((a, pn)) if a == pa => pn,
+                _ => {
+                    let pn = if two_word {
+                        PatternName::two_word(rd16(self.vram, pa), rd16(self.vram, (pa + 2) & 0x7_FFFF))
+                    } else {
+                        PatternName::one_word(rd16(self.vram, pa), pncn, colors, chsz)
+                    };
+                    last = Some((pa, pn));
+                    pn
+                }
             };
             // the dot within the character
-            let (mut cx, mut cy) = (pxp % cell, pyp % cell);
+            let (mut cx, mut cy) = (pxp & (cell - 1), pyp & (cell - 1));
             if pn.hflip {
                 cx = cell - 1 - cx;
             }
             if pn.vflip {
                 cy = cell - 1 - cy;
             }
-            let cell_index = (cy / 8) * 2 + cx / 8; // 2x2 characters: cells left to right, top to bottom
-            let (ix, iy) = (cx % 8, cy % 8);
+            let cell_index = ((cy >> 3) << 1) | (cx >> 3); // 2x2 characters: cells left to right, top to bottom
+            let (ix, iy) = (cx & 7, cy & 7);
             let cell_bytes = if colors == 0 { 32 } else { 64 };
             let base = pn.char_number as usize * 32 + cell_index * cell_bytes;
             let dot = if colors == 0 {
@@ -272,7 +290,7 @@ impl Vdp2Frame<'_> {
                 continue;
             }
             let index = if colors == 0 { pn.palette as usize * 16 + dot } else { (pn.palette as usize & 0x70) * 16 + dot };
-            let (rgb, msb) = self.cram_color(index + craof);
+            let (rgb, msb) = pal[(index + craof) & 0x7FF];
             let mut p = prio;
             if sfprmd == 1 {
                 p = (p & 6) | pn.spr as u8;
@@ -285,24 +303,23 @@ impl Vdp2Frame<'_> {
                 };
             *px = Some(Px { rgb, prio: p, cc, ratio, offset });
         }
-        out
     }
 
     // ---- RBG0 ----------------------------------------------------------------------------------------
 
-    fn rbg0_line(&self, line: usize, w: usize) -> Vec<Option<Px>> {
-        let mut out = vec![None; w];
+    fn rbg0_line(&self, line: usize, out: &mut [Option<Px>], pal: &[([u8; 3], bool)]) {
+        out.fill(None);
         let bgon = self.reg(0x20);
         if bgon & 0x10 == 0 || self.reg(0) & 0x8000 == 0 {
-            return out;
+            return;
         }
         let chctl = self.reg(0x2A);
         if chctl & 0x200 != 0 {
-            return out; // bitmaps: not covered yet
+            return; // bitmaps: not covered yet
         }
         let colors = (chctl >> 12) & 7;
         if colors > 1 {
-            return out;
+            return;
         }
         let chsz = (chctl >> 8) & 1;
         // rotation parameter A's table
@@ -429,7 +446,7 @@ impl Vdp2Frame<'_> {
                 continue;
             }
             let index = if colors == 0 { pn.palette as usize * 16 + dot } else { (pn.palette as usize & 0x70) * 16 + dot };
-            let (rgb, msb) = self.cram_color(index + craof);
+            let (rgb, msb) = pal[(index + craof) & 0x7FF];
             let mut p = prio;
             if sfprmd == 1 {
                 p = (p & 6) | pn.spr as u8;
@@ -442,18 +459,17 @@ impl Vdp2Frame<'_> {
                 };
             *out_px = Some(Px { rgb, prio: p, cc, ratio, offset });
         }
-        out
     }
 
     // ---- the sprite layer ------------------------------------------------------------------------
 
-    fn sprite_line(&self, line: usize, w: usize) -> Vec<Option<Px>> {
-        let mut out = vec![None; w];
+    fn sprite_line(&self, line: usize, out: &mut [Option<Px>], pal: &[([u8; 3], bool)]) {
+        out.fill(None);
         let spctl = self.reg(0xE0);
         let sptype = spctl & 0xF;
         let mixed = spctl & 0x20 != 0;
         if sptype >= 8 || self.tvmr & 1 != 0 {
-            return out; // 8-bit framebuffers: not covered yet
+            return; // 8-bit framebuffers: not covered yet
         }
         let cc_on = self.reg(0xEC) & 0x40 != 0;
         let cccs = (spctl >> 12) & 3;
@@ -490,12 +506,11 @@ impl Vdp2Frame<'_> {
             let pr = ((v >> pr_sh) & pr_mask) as usize;
             let ccr = ((v >> cc_sh) & cc_mask) as usize;
             let dc = (v & dc_mask) as usize;
-            let (rgb, msb) = self.cram_color(dc + craof);
+            let (rgb, msb) = pal[(dc + craof) & 0x7FF];
             let p = prio_of(pr);
             let cc = cc_on && sprite_cc(cccs, p, ccn, msb);
             *px = Some(Px { rgb, prio: p, cc, ratio: ratio_of(ccr), offset });
         }
-        out
     }
 }
 
@@ -521,6 +536,7 @@ fn rgb555(c: u16) -> [u8; 3] {
 }
 
 /// A decoded pattern name.
+#[derive(Clone, Copy)]
 struct PatternName {
     char_number: u32,
     palette: u32,

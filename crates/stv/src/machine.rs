@@ -9,6 +9,7 @@ use crate::scu::{self, Scu};
 use crate::sh2::{Bus, Sh2};
 use crate::smpc::{Effect, Smpc};
 use crate::scsp::{Scsp, SoundBus};
+use crate::spin::SpinBus;
 use crate::video::{Vdp1, Vdp2};
 
 /// NTSC: 263 lines a frame.
@@ -60,6 +61,8 @@ pub struct Sys {
     wait: u32,
     /// When on, each SH-2's records in the oracle's trace format (version 3; development).
     pub trace: Option<[Vec<u8>; 2]>,
+    /// What each SH-2's accesses tell its loop watch (spin.rs).
+    spin: [SpinBus; 2],
 }
 
 impl Sys {
@@ -535,35 +538,64 @@ struct CpuBus<'a> {
     cpu: usize,
 }
 
+impl CpuBus<'_> {
+    #[inline]
+    fn watch_read(&mut self, a: u32, size: u32) {
+        if self.sys.spin[self.cpu].watching {
+            self.sys.spin[self.cpu].read(a, size);
+        }
+    }
+
+    #[inline]
+    fn watch_write(&mut self, a: u32, size: u32) {
+        if self.sys.spin[self.cpu].watching {
+            self.sys.spin[self.cpu].impure = true;
+        }
+        let other = &mut self.sys.spin[1 - self.cpu];
+        if other.spinning || other.recording {
+            other.other_wrote(a, size);
+        }
+    }
+}
+
 impl Bus for CpuBus<'_> {
     fn read8(&mut self, a: u32) -> u8 {
+        self.watch_read(a, 1);
         let v = self.sys.cpu_read8(self.cpu, a);
         self.sys.record(self.cpu, b'R', 1, a, v as u32);
         v
     }
     fn read16(&mut self, a: u32) -> u16 {
+        self.watch_read(a, 2);
         let v = self.sys.cpu_read16(self.cpu, a);
         self.sys.record(self.cpu, b'R', 2, a, v as u32);
         v
     }
     fn read32(&mut self, a: u32) -> u32 {
+        self.watch_read(a, 4);
         let v = self.sys.cpu_read32(self.cpu, a);
         self.sys.record(self.cpu, b'R', 4, a, v);
         v
     }
     fn write8(&mut self, a: u32, v: u8) {
+        self.watch_write(a, 1);
         self.sys.record(self.cpu, b'W', 1, a, v as u32);
         self.sys.cpu_write8(self.cpu, a, v)
     }
     fn write16(&mut self, a: u32, v: u16) {
+        self.watch_write(a, 2);
         self.sys.record(self.cpu, b'W', 2, a, v as u32);
         self.sys.cpu_write16(self.cpu, a, v)
     }
     fn write32(&mut self, a: u32, v: u32) {
+        self.watch_write(a, 4);
         self.sys.record(self.cpu, b'W', 4, a, v);
         self.sys.cpu_write32(self.cpu, a, v)
     }
     fn fetch16(&mut self, a: u32) -> u16 {
+        if self.sys.spin[self.cpu].recording {
+            self.sys.spin[self.cpu].fetch(a);
+        }
         match a >> 29 {
             0 | 1 => {
                 let p = a & 0x07FF_FFFE;
@@ -594,7 +626,30 @@ pub struct Machine {
     pub picture: (usize, usize, Vec<u8>),
     /// When on, the addresses each SH-2 has executed (development).
     pub coverage: Option<[std::collections::HashSet<u32>; 2]>,
+    /// Play the loops the CPUs spin in instead of executing them (spin.rs); off, every instruction
+    /// is executed (the checks compare the two).
+    pub spin_enabled: bool,
+    watch: [Watch; 2],
 }
+
+/// One CPU's loop watch (spin.rs).
+#[derive(Default)]
+enum Watch {
+    #[default]
+    Off,
+    /// A short backward branch's target and the CPU's state there.
+    Candidate { head: u32, state: Sh2 },
+    /// It came back there the same: one more turn, step by step (cycles, state after), and the FRT's
+    /// flags as the turn began.
+    Recording { head: u32, state: Sh2, tape: Vec<(u32, Sh2)>, ftcsr: u8 },
+    /// The turn playing: the step it is at, the cycles played, and how many may be played before the
+    /// FRT reaches an event the loop could notice.
+    Spinning { tape: Vec<(u32, Sh2)>, period: u32, max_cycles: u32, phase: usize, spent: u64, cap: u64 },
+}
+
+/// The longest turn recorded (steps), and how far back a branch may go to start one (bytes).
+const SPIN_MAX_STEPS: usize = 64;
+const SPIN_MAX_BACK: u32 = 256;
 
 impl Machine {
     /// `eeprom`: the settings EEPROM's contents at power on (the oracle's: tools/oracle/eeprom.py).
@@ -631,8 +686,18 @@ impl Machine {
             slave_reset_pending: false,
             wait: 0,
             trace: None,
+            spin: Default::default(),
         };
-        let mut m = Machine { cpu: [Sh2::default(), Sh2::default()], sys, time: [0; 2], steps: [0; 2], picture: (0, 0, Vec::new()), coverage: None };
+        let mut m = Machine {
+            cpu: [Sh2::default(), Sh2::default()],
+            sys,
+            time: [0; 2],
+            steps: [0; 2],
+            picture: (0, 0, Vec::new()),
+            coverage: None,
+            spin_enabled: true,
+            watch: Default::default(),
+        };
         let mut bus = CpuBus { sys: &mut m.sys, cpu: 0 };
         m.cpu[0].reset(&mut bus, 0);
         m
@@ -739,21 +804,185 @@ impl Machine {
     fn run_cpus(&mut self, until: u32) {
         const SLICE: u32 = 32;
         while self.time[0] < until {
-            let slice_end = (self.time[0] + SLICE).min(until);
-            while self.time[0] < slice_end {
-                self.time[0] += self.step(0);
-            }
-            if self.sys.slave_on {
-                while self.time[1] < self.time[0] {
-                    self.time[1] += self.step(1);
+            let mut slice_end = (self.time[0] + SLICE).min(until);
+            // both spinning (or the master, the slave off): neither can affect the other, so each
+            // goes on alone as far as their timers allow
+            if let Some(h0) = self.spin_horizon(0) {
+                let far = if !self.sys.slave_on {
+                    Some(h0)
+                } else {
+                    self.spin_horizon(1).map(|h1| h0.min(h1.saturating_sub(self.spin_max_cycles(0))))
+                };
+                if let Some(far) = far {
+                    slice_end = slice_end.max(far.min(until));
                 }
+            }
+            self.advance(0, slice_end);
+            if self.sys.slave_on {
+                let t = self.time[0];
+                self.advance(1, t);
             } else {
                 self.time[1] = self.time[0];
             }
             if self.sys.reset_pending || self.sys.slave_reset_pending {
+                self.stop_spinning(0);
+                self.stop_spinning(1);
                 self.carry_out_resets();
             }
         }
+        self.stop_spinning(0);
+        self.stop_spinning(1);
+    }
+
+    /// Runs CPU `c` to `target` cycles into the line: playing its loop while it spins, else
+    /// instruction by instruction, watching for a loop to spin in.
+    fn advance(&mut self, c: usize, target: u32) {
+        let watch = self.spin_enabled && self.sys.trace.is_none() && self.coverage.is_none();
+        while self.time[c] < target {
+            if let Watch::Spinning { .. } = self.watch[c] {
+                if self.sys.spin[c].broken {
+                    self.stop_spinning(c);
+                } else {
+                    self.spin_advance(c, target);
+                }
+                continue;
+            }
+            let from = self.cpu[c].pc;
+            let cycles = self.step(c);
+            self.time[c] += cycles;
+            if watch {
+                self.watch_step(c, from, cycles);
+            }
+        }
+    }
+
+    /// After a step: does the CPU start (or go on) round a loop that could spin?
+    #[inline]
+    fn watch_step(&mut self, c: usize, from: u32, cycles: u32) {
+        let pc = self.cpu[c].pc;
+        let back = pc < from && from - pc <= SPIN_MAX_BACK;
+        match self.watch[c] {
+            Watch::Off if !back => return,
+            Watch::Candidate { .. } if !back && !self.sys.spin[c].impure && !self.sys.spin[c].broken => return,
+            _ => {}
+        }
+        self.watch_turn(c, back, cycles);
+    }
+
+    fn watch_turn(&mut self, c: usize, back: bool, cycles: u32) {
+        let bus = &mut self.sys.spin[c];
+        // the other CPU wrote what a turn being recorded had read: the turn is not this loop's
+        let impure = std::mem::take(&mut bus.impure) | std::mem::take(&mut bus.broken);
+        let cpu = &self.cpu[c];
+        let back = back && cpu.delay.is_none() && !cpu.sleeping;
+        self.watch[c] = match std::mem::take(&mut self.watch[c]) {
+            Watch::Recording { head, state, mut tape, ftcsr } if !impure => {
+                tape.push((cycles, cpu.clone()));
+                if back && cpu.pc == head {
+                    let on = &self.sys.onchip[c];
+                    let frt_seen = bus.reads_ftcsr || on.frt_interrupts_on();
+                    // an FRT event in the turn, after its read of the flags or with its interrupt
+                    // coming: the next turn would not be this one
+                    if *cpu == state && !(frt_seen && on.frt.ftcsr != ftcsr) {
+                        let period = tape.iter().map(|t| t.0).sum();
+                        let max_cycles = tape.iter().map(|t| t.0).max().unwrap_or(1);
+                        let cap = if frt_seen { on.frt_cycles_to_event() } else { u64::MAX };
+                        bus.spinning = true;
+                        bus.reads.sort_unstable();
+                        bus.reads.dedup();
+                        Watch::Spinning { tape, period, max_cycles, phase: 0, spent: 0, cap }
+                    } else {
+                        Watch::Off
+                    }
+                } else if tape.len() >= SPIN_MAX_STEPS {
+                    Watch::Off
+                } else {
+                    Watch::Recording { head, state, tape, ftcsr }
+                }
+            }
+            Watch::Candidate { head, state } if !impure && back && cpu.pc == head && *cpu == state => {
+                bus.reads.clear();
+                bus.reads_ftcsr = false;
+                Watch::Recording { head, state, tape: Vec::new(), ftcsr: self.sys.onchip[c].frt.ftcsr }
+            }
+            w @ Watch::Candidate { .. } if !impure && !back => w,
+            _ if back => Watch::Candidate { head: cpu.pc, state: cpu.clone() },
+            _ => Watch::Off,
+        };
+        bus.watching = !matches!(self.watch[c], Watch::Off);
+        bus.recording = matches!(self.watch[c], Watch::Recording { .. });
+        if !bus.watching {
+            bus.clear();
+        }
+    }
+
+    /// Plays CPU `c`'s loop until its time reaches `target`, or until its FRT would reach an event
+    /// the loop could notice; then the CPU is put back at the step it reached, to run on from there.
+    fn spin_advance(&mut self, c: usize, target: u32) {
+        let Watch::Spinning { tape, period, phase, spent, cap, .. } = &mut self.watch[c] else { return };
+        let (period, len) = (*period, tape.len());
+        let spent_before = *spent;
+        let mut time = self.time[c];
+        let mut steps = 0u64;
+        let mut stop = false;
+        while time < target {
+            if *phase == 0 {
+                // whole turns ending short of the target, keeping the FRT short of its event
+                let turns = ((target - 1 - time) / period) as u64;
+                let turns = turns.min((*cap - 1 - *spent) / period as u64);
+                if turns > 0 {
+                    time += turns as u32 * period;
+                    *spent += turns * period as u64;
+                    steps += turns * len as u64;
+                    continue;
+                }
+            }
+            let cycles = tape[*phase].0;
+            if *spent + cycles as u64 >= *cap {
+                stop = true;
+                break;
+            }
+            time += cycles;
+            *spent += cycles as u64;
+            steps += 1;
+            *phase = (*phase + 1) % len;
+        }
+        // the FRT keeps up with the CPU (the other CPU's MINIT/SINIT can capture its count)
+        let played = (*spent - spent_before) as u32;
+        self.sys.onchip[c].clock_frt(played);
+        self.time[c] = time;
+        self.steps[c] += steps;
+        if stop {
+            self.stop_spinning(c);
+        }
+    }
+
+    /// While CPU `c` spins: the time (into the line) it can reach without stopping for its FRT.
+    fn spin_horizon(&self, c: usize) -> Option<u32> {
+        match &self.watch[c] {
+            Watch::Spinning { spent, cap, max_cycles, .. } if !self.sys.spin[c].broken => {
+                let left = (cap - spent).saturating_sub(*max_cycles as u64);
+                Some(self.time[c].saturating_add(left.min(u32::MAX as u64) as u32))
+            }
+            _ => None,
+        }
+    }
+
+    fn spin_max_cycles(&self, c: usize) -> u32 {
+        match &self.watch[c] {
+            Watch::Spinning { max_cycles, .. } => *max_cycles,
+            _ => 0,
+        }
+    }
+
+    /// Puts a spinning CPU back in the state its loop reached.
+    fn stop_spinning(&mut self, c: usize) {
+        if let Watch::Spinning { mut tape, phase, .. } = std::mem::take(&mut self.watch[c]) {
+            let at = if phase == 0 { tape.len() - 1 } else { phase - 1 };
+            self.cpu[c] = tape.swap_remove(at).1;
+        }
+        self.watch[c] = Watch::Off;
+        self.sys.spin[c].clear();
     }
 
     /// One instruction (or an interrupt taken) on a CPU; returns the cycles it took.
