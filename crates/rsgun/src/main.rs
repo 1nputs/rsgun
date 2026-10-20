@@ -5,7 +5,7 @@
 //!           [--native] [--cold] [--cpu-speed N]
 //!     rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--evidence FILE]
 //!           [--dump F,F --dump-dir DIR] [--native | --compare REPORT] [--cold] [--cpu-speed N] [--rom DIR]
-//!           [--save DIR] [--load-state FILE] [--save-state FILE]
+//!           [--save DIR] [--load-state FILE] [--save-state FILE] [--states F,F]
 //!
 //! `--rom`: the images tools/rom/mkcart.py makes (default build/rom). `--save`: where the EEPROM,
 //! the backup RAM and the boot state (boot.rs) are kept (default $XDG_DATA_HOME/rsgun or
@@ -19,7 +19,8 @@
 //! runs the SH-2 code and checks each call the port has against it (stv::compare), writing what it
 //! found to REPORT. `--cpu-speed N` runs the SH-2s N times as fast as built: no slowdown.
 //! `--load-state FILE` starts a headless run from a save state (one `--save-state FILE` wrote at
-//! the end of another; not while native code is in a call, so not in native play).
+//! the end of another, or `--states F,F` at frames, into the `--dump-dir`; not while native code is
+//! in a call, so not in native play).
 //!
 //! Keys: arrows move; Z, X, C are buttons A, B, C; A, S, D are A+B, A+C, B+C; space is all three;
 //! 5 and 6 insert coins, 1 and 2 start; F2 test, 9 service; P pauses, Tab runs fast while held,
@@ -77,6 +78,7 @@ struct Options {
     cpu_speed: u32,
     load_state: Option<PathBuf>,
     save_state: Option<PathBuf>,
+    states: Vec<u64>,
 }
 
 fn default_save_dir() -> PathBuf {
@@ -109,6 +111,7 @@ fn parse_args() -> Result<Options, String> {
         cpu_speed: 1,
         load_state: None,
         save_state: None,
+        states: Vec::new(),
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut it = args.iter();
@@ -133,6 +136,7 @@ fn parse_args() -> Result<Options, String> {
             "--cold" => o.cold = true,
             "--load-state" => o.load_state = Some(PathBuf::from(value()?)),
             "--save-state" => o.save_state = Some(PathBuf::from(value()?)),
+            "--states" => o.states = value()?.split(',').filter_map(|f| f.parse().ok()).collect(),
             "--cpu-speed" => o.cpu_speed = value()?.parse().map_err(|_| "--cpu-speed: a number")?,
             "--mute" => o.mute = true,
             "-h" | "--help" => return Err(String::new()),
@@ -233,6 +237,11 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
         if o.dumps.contains(&f) {
             let d = o.dump_dir.join(format!("f{f:06}"));
             m.dump(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+        }
+        if o.states.contains(&f) {
+            fs::create_dir_all(&o.dump_dir).map_err(|e| format!("{}: {e}", o.dump_dir.display()))?;
+            let p = o.dump_dir.join(format!("f{f:06}.state"));
+            fs::write(&p, m.save_state()?).map_err(|e| format!("{}: {e}", p.display()))?;
         }
         let samples = std::mem::take(&mut m.sys.scsp.out);
         if o.wav.is_some() {

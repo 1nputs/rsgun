@@ -2,10 +2,7 @@
 //! the SH-2's cache and DMA, the interrupt mask.
 
 use super::Cpu;
-
-/// VBlanks counted since the game started (count_vblank, from the VBlank callbacks); the main
-/// loop measures its frames by it.
-const VBLANKS: u32 = 0x0600_ebb4;
+use super::globals::VBLANKS;
 
 /// The coin and credit state, a 4-byte entry for each coin slot (player): +0 the credits, +1 the
 /// coins toward the next one, +3 (read by the title and the attract mode before they offer a

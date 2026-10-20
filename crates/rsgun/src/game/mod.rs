@@ -10,6 +10,8 @@
 
 mod dma;
 mod files;
+mod globals;
+mod main_loop;
 mod math;
 mod objects;
 mod pads;
@@ -105,6 +107,7 @@ macro_rules! rewrites {
 /// Registers the rewritten functions (over the translations registered before).
 pub fn register(n: &mut Natives) {
     rewrites! { n;
+        0x0604_0000 => main_loop::main_loop[] -> u32 frame 32,
         0x0600_44a0 => dma::dma_set[src, dst, size] -> u32,
         0x0600_44e8 => dma::mode_dma_set[src, dst, size, mode] -> u32,
         0x0600_4530 => dma::divdma_set[src, dst, size] -> u32,
