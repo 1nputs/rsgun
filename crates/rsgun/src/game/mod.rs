@@ -8,7 +8,10 @@
 //! A rewrite takes a [`Cpu`]: the bus the game's memory and hardware are on, and the registers it
 //! needs to call code not rewritten yet ([`Cpu::call`]) and to wait ([`Cpu::wait`]).
 
+mod actors;
+mod aim;
 mod backup;
+mod camera;
 mod clib;
 mod director;
 mod dma;
@@ -20,9 +23,11 @@ mod main_loop;
 mod math;
 mod objects;
 mod pads;
+mod play;
 mod palette;
 mod screen;
 mod sound;
+mod sprites;
 mod states;
 mod system;
 mod text;
@@ -84,10 +89,24 @@ impl Cpu<'_> {
         r
     }
 
-    /// The stack the function's callees get: the bottom of its SH-2 function's frame (`frame N`),
-    /// where a struct it hands a callee by address goes.
+    /// The stack the function's callees get: the bottom of its SH-2 function's frame (its
+    /// prologue's, see [`Prologue`]), where a struct it hands a callee by address goes.
     pub fn stack(&self) -> u32 {
         self.sh2.r[15]
+    }
+
+    /// Runs `f` (a rewrite called by another) as the SH-2 function at `entry` runs when called:
+    /// its prologue's pushes made and its frame below them, as [`Prologue`] reads them from its
+    /// code (through `prologue`, a cache for the call site; see [`nested!`]).
+    pub fn nested<R>(&mut self, prologue: &std::sync::OnceLock<Prologue>, entry: u32, f: impl FnOnce(&mut Cpu) -> R) -> R {
+        let p = prologue.get_or_init(|| Prologue::read(&mut *self.bus, entry));
+        let (sp, pr) = (self.sh2.r[15], self.sh2.pr);
+        self.sh2.pr = RETURN;
+        self.sh2.r[15] = p.enter(self.sh2, &mut *self.bus);
+        self.sh2.pr = pr;
+        let r = f(self);
+        self.sh2.r[15] = sp;
+        r
     }
 
     /// One pass of a loop waiting for the hardware at `at` (the SH-2 code's loop, for the machine's
@@ -100,22 +119,103 @@ impl Cpu<'_> {
 /// The return address a call from rewritten code gives (no code is there: odd).
 const RETURN: u32 = 0xFFFF_FFF1;
 
+/// A function's prologue as its SH-2 code has it: the registers it pushes, in order (PR_PUSH for
+/// the procedure register), and the room it makes below them for its locals. A rewrite makes the
+/// same pushes, with the registers it is called with, and takes the same frame: the stack then
+/// holds what the SH-2 code's would (the game reads stale stack: a struct field it left unset gets
+/// what a call before left there), and a struct a rewrite hands a callee on the stack is where the
+/// SH-2 code's was.
+pub struct Prologue {
+    pushes: Vec<u8>,
+    locals: u32,
+}
+
+const PR_PUSH: u8 = 16;
+
+impl Prologue {
+    /// Read from the code at `entry`, up to its first branch: the pushes (`mov.l Rm,@-R15`, then
+    /// `sts.l PR,@-R15`, after which a push is an argument's), and the locals (`add #imm,R15`, or
+    /// `mov.w @(disp,PC),Rn` then `add Rn,R15`). Other instructions may be scheduled among them.
+    pub fn read(bus: &mut dyn Bus, entry: u32) -> Prologue {
+        let mut p = Prologue { pushes: Vec::new(), locals: 0 };
+        let mut words = [None; 16];
+        let mut pc = entry;
+        for _ in 0..16 {
+            let op = bus.read16(pc);
+            let n = ((op >> 8) & 0xF) as usize;
+            let m = ((op >> 4) & 0xF) as u8;
+            let branch = matches!(op, 0x000B | 0x002B)
+                || matches!(op & 0xF0FF, 0x400B | 0x402B | 0x0003 | 0x0023)
+                || matches!(op & 0xF000, 0xA000 | 0xB000)
+                || matches!(op & 0xFF00, 0x8900 | 0x8B00 | 0x8D00 | 0x8F00);
+            if branch {
+                break;
+            }
+            if op & 0xFF0F == 0x2F06 {
+                if p.pushes.last() == Some(&PR_PUSH) {
+                    break;
+                }
+                p.pushes.push(m);
+            } else if op == 0x4F22 {
+                p.pushes.push(PR_PUSH);
+            } else if op & 0xFF00 == 0x7F00 {
+                p.locals = (op as u8 as i8 as i32).wrapping_neg() as u32;
+                break;
+            } else if op & 0xF000 == 0x9000 {
+                let at = pc + 4 + 2 * (op & 0xFF) as u32;
+                words[n] = Some(bus.read16(at) as i16 as i32);
+            } else if op & 0xFF0F == 0x3F0C {
+                if let Some(w) = words[m as usize] {
+                    p.locals = w.wrapping_neg() as u32;
+                }
+                break;
+            }
+            pc += 2;
+        }
+        p
+    }
+
+    /// The pushes made on `sh2`'s stack with its registers, and the room below: the stack pointer
+    /// after.
+    fn enter(&self, sh2: &mut Sh2, bus: &mut dyn Bus) -> u32 {
+        let mut sp = sh2.r[15];
+        for &r in &self.pushes {
+            sp = sp.wrapping_sub(4);
+            let v = if r == PR_PUSH { sh2.pr } else { sh2.r[r as usize] };
+            bus.write32(sp, v);
+        }
+        sp.wrapping_sub(self.locals)
+    }
+}
+
+/// `cpu.nested` for a call from one rewrite to another: `nested!(cpu, ENTRY, f(cpu, ...))`, the
+/// callee's SH-2 entry and the call.
+macro_rules! nested {
+    ($cpu:ident, $entry:expr, $call:expr) => {{
+        static PROLOGUE: std::sync::OnceLock<$crate::game::Prologue> = std::sync::OnceLock::new();
+        $cpu.nested(&PROLOGUE, $entry, |$cpu| $call)
+    }};
+}
+pub(crate) use nested;
+
 /// The rewritten functions, each at its SH-2 function's entry: `entry => name[args] -> result`
-/// (`-> ()` for none), arguments and result as u32, and for one that calls others the stack its
-/// SH-2 function took (`frame N`, from its prologue): its callees get the stack where the SH-2
-/// code had it (some hand the video chips' DMA a buffer of theirs on it). The SH-2 entry for each
-/// moves the arguments from r4-r7 and the result to r0, and returns to PR.
+/// (`-> ()` for none), arguments and result as u32. The SH-2 entry for each makes its SH-2
+/// function's prologue (its pushes and frame, [`Prologue`]: its callees get the stack where the
+/// SH-2 code had it; some hand the video chips' DMA a buffer of theirs on it), moves the
+/// arguments from r4-r7 and the result to r0, and returns to PR.
 macro_rules! rewrites {
-    ($n:ident; $($entry:literal => $f:path [$($arg:ident),*] -> $ret:tt $(frame $frame:literal)?),* $(,)?) => {
+    ($n:ident; $($entry:literal => $f:path [$($arg:ident),*] -> $ret:tt),* $(,)?) => {
         $(
             $n.register_as(
                 $entry,
                 |sh2: &mut Sh2, bus: &mut dyn Bus| {
+                    static PROLOGUE: std::sync::OnceLock<Prologue> = std::sync::OnceLock::new();
                     let (ret, sp) = (sh2.pr, sh2.r[15]);
                     #[allow(unused_mut, unused_variables)]
                     let mut args = sh2.r[4..8].iter().copied();
                     $( let $arg = args.next().unwrap_or(0); )*
-                    $( sh2.r[15] = sp - $frame; )?
+                    let prologue = PROLOGUE.get_or_init(|| Prologue::read(&mut *bus, $entry));
+                    sh2.r[15] = prologue.enter(sh2, &mut *bus);
                     let result = $f(&mut Cpu { sh2: &mut *sh2, bus }, $($arg),*);
                     rewrites!(@result sh2, result, $ret);
                     sh2.r[15] = sp;
@@ -136,35 +236,35 @@ macro_rules! rewrites {
 /// Registers the rewritten functions (over the translations registered before).
 pub fn register(n: &mut Natives) {
     rewrites! { n;
-        0x0604_0000 => main_loop::main_loop[] -> u32 frame 32,
+        0x0604_0000 => main_loop::main_loop[] -> u32,
         0x0600_44a0 => dma::dma_set[src, dst, size] -> u32,
         0x0600_44e8 => dma::mode_dma_set[src, dst, size, mode] -> u32,
         0x0600_4530 => dma::divdma_set[src, dst, size] -> u32,
-        0x0600_4580 => dma::dma_control[] -> () frame 32,
+        0x0600_4580 => dma::dma_control[] -> (),
         0x0600_46a0 => dma::dma_control_init[] -> (),
         0x0600_46b8 => dma::dma_check[] -> u32,
         0x0600_6a58 => math::fixed_mul[a, b] -> u32,
         0x0600_6a6e => math::remainder[a, b] -> u32,
         0x0600_6a78 => math::quotient[a, b] -> u32,
         0x0600_6a8e => math::fixed_div[a, b] -> u32,
-        0x0600_57f8 => objects::obj_size[bytes] -> u32 frame 20,
+        0x0600_57f8 => objects::obj_size[bytes] -> u32,
         0x0600_6aac => objects::find_free[area, blocks] -> u32,
-        0x0600_6b00 => objects::obj_set[area, blocks, exec] -> u32 frame 16,
+        0x0600_6b00 => objects::obj_set[area, blocks, exec] -> u32,
         0x0600_579c => objects::obj_free[obj] -> (),
-        0x0600_6b64 => objects::obj_exec[] -> () frame 16,
+        0x0600_6b64 => objects::obj_exec[] -> (),
         0x0600_5634 => objects::obj_init[] -> (),
         0x0600_584c => pads::pad_init[] -> (),
         0x0600_58a8 => pads::pad_read[] -> (),
         0x0600_5b18 => palette::set_colours[colours, index, count] -> (),
         0x0600_5b5c => palette::set_vdp1_colours[colours, index, count] -> (),
-        0x0600_5a70 => palette::send_colours[] -> () frame 12,
+        0x0600_5a70 => palette::send_colours[] -> (),
         0x0600_5da0 => files::file_no[name] -> u32,
-        0x0600_5e40 => files::load_file[name] -> u32 frame 16,
+        0x0600_5e40 => files::load_file[name] -> u32,
         0x0600_5fb0 => files::load_files[] -> (),
         0x0600_60c4 => files::clear_loads[] -> (),
         0x0600_5e10 => files::init_loads[] -> u32,
-        0x0600_4468 => vblank::init_vblank[] -> () frame 8,
-        0x0600_438c => vblank::run_callbacks[] -> () frame 24,
+        0x0600_4468 => vblank::init_vblank[] -> (),
+        0x0600_438c => vblank::run_callbacks[] -> (),
         0x0600_43d4 => vblank::add_callback[f] -> u32,
         0x0600_4408 => vblank::remove_callback[f] -> u32,
         0x0600_5f10 => files::read_file[name, dst] -> u32,
@@ -189,15 +289,15 @@ pub fn register(n: &mut Natives) {
         0x0600_4a64 => sound::map_area[n] -> u32,
         0x0600_4adc => sound::copy_to_area[n, src, size] -> (),
         0x0600_4b18 => sound::load_sound_file[n, buffer] -> u32,
-        0x0600_49e8 => sound::sound_load[] -> () frame 36,
-        0x0600_4ddc => sound::stop_effects[] -> () frame 32,
+        0x0600_49e8 => sound::sound_load[] -> (),
+        0x0600_4ddc => sound::stop_effects[] -> (),
         0x0600_4e98 => sound::request_music[music] -> (),
         0x0600_4f0c => sound::music_fade_out[frames] -> (),
-        0x0600_4f3c => sound::se_control[se] -> u32 frame 36,
-        0x0600_50d4 => sound::se_set[se] -> u32 frame 24,
-        0x0600_52e0 => sound::se_stop[se, control] -> u32 frame 20,
-        0x0600_53dc => sound::sound_exec[m] -> () frame 28,
-        0x0600_5598 => sound::sound_manager_set[] -> u32 frame 16,
+        0x0600_4f3c => sound::se_control[se] -> u32,
+        0x0600_50d4 => sound::se_set[se] -> u32,
+        0x0600_52e0 => sound::se_stop[se, control] -> u32,
+        0x0600_53dc => sound::sound_exec[m] -> (),
+        0x0600_5598 => sound::sound_manager_set[] -> u32,
         0x0600_817c => clib::memset[dst, c, n] -> u32,
         0x0600_81d0 => clib::memcpy[dst, src, n] -> u32,
         0x0600_79a8 => sound::seq_status[buf, control] -> (),
@@ -205,35 +305,35 @@ pub fn register(n: &mut Natives) {
         0x0600_8058 => system::set_scu_mask[mask, bits] -> (),
         0x0600_69d8 => system::shift_left[x, bits] -> u32,
         0x0600_6364 => backup::backup_byte[i] -> u32,
-        0x0600_637c => backup::backup_long[i] -> u32 frame 8,
+        0x0600_637c => backup::backup_long[i] -> u32,
         0x0600_63a4 => backup::set_backup_byte[i, v] -> (),
-        0x0600_63bc => backup::set_backup_long[i, v] -> u32 frame 8,
-        0x0600_63e4 => backup::load_backup[] -> u32 frame 40,
-        0x0600_66ec => backup::format_backup[why] -> () frame 24,
-        0x0600_65fc => backup::save_scores[] -> u32 frame 32,
-        0x0604_2db8 => director::game_set[] -> u32 frame 16,
-        0x0604_2b14 => director::game_exec[game] -> () frame 80,
+        0x0600_63bc => backup::set_backup_long[i, v] -> u32,
+        0x0600_63e4 => backup::load_backup[] -> u32,
+        0x0600_66ec => backup::format_backup[why] -> (),
+        0x0600_65fc => backup::save_scores[] -> u32,
+        0x0604_2db8 => director::game_set[] -> u32,
+        0x0604_2b14 => director::game_exec[game] -> (),
         0x0604_0c64 => director::mode_done[] -> (),
         0x0604_0cb4 => director::director_flags[] -> u32,
-        0x0604_02c4 => states::load_mode_file[mode] -> u32 frame 12,
-        0x0604_12e8 => states::state_reset[game] -> () frame 20,
-        0x0604_13b0 => states::state_load_mode[game] -> () frame 16,
-        0x0604_17a4 => states::state_run_mode[game] -> () frame 16,
-        0x0604_1578 => states::state_screen[game] -> () frame 16,
-        0x0604_1848 => states::state_title[game] -> () frame 32,
-        0x0604_1df0 => states::state_stage[game] -> () frame 132,
-        0x0604_2734 => states::state_stage_end[game] -> () frame 36,
-        0x0604_1010 => states::clear_mode[game] -> () frame 24,
+        0x0604_02c4 => states::load_mode_file[mode] -> u32,
+        0x0604_12e8 => states::state_reset[game] -> (),
+        0x0604_13b0 => states::state_load_mode[game] -> (),
+        0x0604_17a4 => states::state_run_mode[game] -> (),
+        0x0604_1578 => states::state_screen[game] -> (),
+        0x0604_1848 => states::state_title[game] -> (),
+        0x0604_1df0 => states::state_stage[game] -> (),
+        0x0604_2734 => states::state_stage_end[game] -> (),
+        0x0604_1010 => states::clear_mode[game] -> (),
         0x0605_e6dc => screen::set_fade_offset[r, g, b] -> (),
         0x0605_e8dc => screen::fade_new[r, g, b, speed] -> u32,
         0x0605_e93c => screen::fade_to[r, g, b, speed] -> (),
         0x0605_e9d8 => screen::stop_fades[] -> (),
-        0x0605_e73c => screen::fade_exec[fade] -> () frame 28,
-        0x0605_e1b0 => screen::screen_set[] -> () frame 16,
-        0x0605_e49c => screen::screen_exec[s] -> () frame 16,
+        0x0605_e73c => screen::fade_exec[fade] -> (),
+        0x0605_e1b0 => screen::screen_set[] -> (),
+        0x0605_e49c => screen::screen_exec[s] -> (),
         0x0605_e2dc => screen::screen_fields[] -> (),
-        0x0605_ea98 => screen::screen_vblank[] -> () frame 32,
-        0x0605_e6c0 => screen::offsets_clear[] -> () frame 8,
+        0x0605_ea98 => screen::screen_vblank[] -> (),
+        0x0605_e6c0 => screen::offsets_clear[] -> (),
         0x0605_fdc0 => screen::take_plane_shared[] -> (),
         0x0605_fde8 => screen::request_clear_text_plane[] -> (),
         0x0605_fdfc => screen::clear_text_plane[] -> (),
@@ -241,7 +341,7 @@ pub fn register(n: &mut Natives) {
         0x0605_edf8 => screen::copy_words[src, dst, bytes] -> (),
         0x0605_ed84 => screen::long_copies_on[] -> u32,
         0x0605_ef20 => screen::offset_list[delta, list, n] -> (),
-        0x0605_e24c => screen::screen_off[] -> () frame 8,
+        0x0605_e24c => screen::screen_off[] -> (),
         0x0604_0f24 => system::coin_settings_shown[] -> u32,
         0x0606_0ff8 => text::char_index[c] -> u32,
         0x0606_10e4 => text::put_char[c, at, attr] -> u32,
@@ -265,23 +365,56 @@ pub fn register(n: &mut Natives) {
         0x0606_0cd8 => text::credit_text[d, p, credits, coins] -> (),
         0x0606_0dac => text::draw_credits[d, p, at] -> (),
         0x0606_0e7c => text::credits_exec[d] -> (),
-        0x0604_3874 => hits::in_hit_set[of, obj] -> u32 frame 12,
-        0x0604_3d38 => hits::hits_exec[hits] -> () frame 228,
+        0x0604_3874 => hits::in_hit_set[of, obj] -> u32,
+        0x0604_37fc => hits::no_hit[] -> (),
+        0x0604_3978 => hits::no_hit[] -> (),
+        0x0604_3808 => hits::hit[a, b] -> (),
+        0x0604_38b8 => hits::hit_once[a, b] -> (),
+        0x0604_3984 => hits::touch[a, b] -> (),
+        0x0604_3088 => hits::damage[obj, power] -> u32,
+        0x0604_34e4 => hits::weapon_hit[shot, target] -> (),
+        0x0604_3108 => hits::score_kill[p, weapon, target, points] -> (),
+        0x0606_4f3c => math::clamp[x, limit] -> u32,
+        0x0604_39b0 => hits::sparks[a, b, a_box, b_box] -> (),
+        0x0604_3c64 => hits::absorb[a, b] -> (),
+        0x0604_5090 => hits::chain_reset[p] -> (),
+        0x0604_50d4 => hits::hits_reset[] -> (),
+        0x0604_5154 => hits::hits_set[] -> u32,
+        0x0604_51b4 => hits::register_boxes[obj] -> u32,
+        0x0604_6194 => camera::angle_diff[from, to] -> u32,
+        0x0604_2ff8 => camera::camera_set[] -> u32,
+        0x0604_2e6c => camera::camera_exec[cam] -> (),
+        0x0604_114c => play::player_reset[p] -> (),
+        0x0604_129c => play::game_start[] -> (),
+        0x0604_016c => main_loop::init_game[] -> (),
+        0x0604_5e30 => aim::angle_to[a, b] -> u32,
+        0x0604_5e60 => aim::length[dx, dy] -> u32,
+        0x0604_5ee4 => aim::distance[a, b] -> u32,
+        0x0604_0ccc => aim::target[obj, delay, out] -> u32,
+        0x0604_0df0 => aim::aim[obj, delay] -> u32,
+        0x0604_5df8 => aim::free_number[from] -> u32,
+        0x0604_5fd8 => aim::nearest[obj, out] -> u32,
+        0x0604_03c4 => sprites::draw_sprite[s] -> (),
+        0x0604_030c => sprites::draw_model[s] -> (),
+        0x0604_6138 => actors::end_by_flags[actor] -> u32,
+        0x0604_6168 => actors::approach[from, to, step] -> u32,
+        0x0604_d780 => actors::actor_exec[actor] -> (),
+        0x0604_3d38 => hits::hits_exec[hits] -> (),
         0x0604_5d78 => math::random_seed[seed] -> (),
-        0x0604_5d90 => math::random[n] -> u32 frame 8,
+        0x0604_5d90 => math::random[n] -> u32,
         0x0604_5dcc => math::by_difficulty[x] -> u32,
-        0x0606_14b0 => text::typewriter_set[s, at, flags, blink] -> u32 frame 28,
-        0x0606_131c => text::typewriter_exec[obj] -> () frame 16,
-        0x0606_1504 => text::message_exec[obj] -> () frame 12,
-        0x0606_12bc => text::stop_text_objects[] -> () frame 8,
+        0x0606_14b0 => text::typewriter_set[s, at, flags, blink] -> u32,
+        0x0606_131c => text::typewriter_exec[obj] -> (),
+        0x0606_1504 => text::message_exec[obj] -> (),
+        0x0606_12bc => text::stop_text_objects[] -> (),
         0x0605_fe34 => hud::put_digits[n, digits, at, p] -> (),
-        0x0606_0388 => hud::status_line[p, line] -> () frame 24,
-        0x0606_0550 => hud::gauge[p] -> () frame 20,
+        0x0606_0388 => hud::status_line[p, line] -> (),
+        0x0606_0550 => hud::gauge[p] -> (),
         0x0606_0354 => hud::status_reset[p] -> (),
-        0x0606_0a0c => hud::draw_status[p] -> () frame 8,
+        0x0606_0a0c => hud::draw_status[p] -> (),
         0x0600_4378 => system::count_vblank[] -> (),
         0x0604_0f44 => system::coin_byte3[slot] -> u32,
-        0x0604_0f5c => system::use_credit[slot] -> u32 frame 8,
+        0x0604_0f5c => system::use_credit[slot] -> u32,
         0x0604_0f74 => system::credits[slot] -> u32,
         0x0604_0fac => system::coin_settings_low[] -> u32,
         0x0603_3a6a => system::purge_cache[] -> (),

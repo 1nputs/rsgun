@@ -69,3 +69,16 @@ pub fn by_difficulty(cpu: &mut Cpu, x: u32) -> u32 {
     }
     ((d - MIDDLE).wrapping_mul(x as i32) / 2) as u32
 }
+
+/// `x` held within -`limit`..=`limit`.
+pub fn clamp(_cpu: &mut Cpu, x: u32, limit: u32) -> u32 {
+    let (x, limit) = (x as i32, limit as i32);
+    if x > limit {
+        limit as u32
+    } else if x < limit.wrapping_neg() {
+        limit.wrapping_neg() as u32
+    } else {
+        x as u32
+    }
+}
+

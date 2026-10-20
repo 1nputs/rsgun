@@ -6,8 +6,8 @@ is written to build/ghidra/c/, named as the translation names it (f_ADDR, f_ADDR
 
     .venv/bin/python tools/ghidra/project.py [--dump DIR] [--overlays DIR,DIR] [--only NAME,NAME]
 
-Defaults: --dump out/evidence/dumps/f003000, --overlays out/evidence/play1.overlays,
-out/evidence/attract.overlays. --only decompiles just those functions (the project is kept). Output
+Defaults: --dump out/evidence/dumps/f003000, --overlays every out/evidence/*.overlays (play1's, the
+attract mode's, the marathon's). --only decompiles just those functions (the project is kept). Output
 (ROM-derived, never committed): build/ghidra/rsgun/ (remade each time but with --only), build/ghidra/c/.
 Needs ref/ (tools/fetch_refs.sh): Ghidra, its JDK and the pyghidra package in .venv.
 """
@@ -168,8 +168,7 @@ def constant_literals(program, fns):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dump", default=str(ROOT / "out/evidence/dumps/f003000"))
-    ap.add_argument("--overlays", default=",".join(str(ROOT / d) for d in
-                                                   ("out/evidence/play1.overlays", "out/evidence/attract.overlays")))
+    ap.add_argument("--overlays", default=",".join(str(d) for d in sorted((ROOT / "out/evidence").glob("*.overlays"))))
     ap.add_argument("--only", default="")
     args = ap.parse_args()
     wanted = functions()

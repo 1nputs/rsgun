@@ -402,12 +402,11 @@ const PICTURE_BYTES: [u32; 2] = [0x29080, 0x28a80];
 const PICTURE_PALETTE: u32 = 0x100;
 /// Not rewritten yet: the title screen's VDP2 set up; a scroll screen shown (SGL); the title's
 /// object made (if there is none); a player started (lamps and the BIOS told, as far as can be
-/// told); the game started (both players' state made); the picture put in VRAM; the screen shown.
+/// told); the picture put in VRAM; the screen shown.
 const TITLE_SCREEN_SET: u32 = 0x0605_fe8c;
 const TITLE_SCREEN_SHOW: u32 = 0x0606_00d4;
 const TITLE_OBJ_SET: u32 = 0x0605_3aa0;
 const PLAYER_STARTED: u32 = 0x0600_68d8;
-const GAME_START: u32 = 0x0604_129c;
 const PICTURE_LOAD: u32 = 0x0606_001c;
 const PICTURE_SHOW: u32 = 0x0606_00f0;
 /// Each player's byte: counting down to continue (as far as can be told: set while the player's
@@ -553,7 +552,7 @@ fn title_end(cpu: &mut Cpu, game: u32) {
     if flags & LOW_ALL != LOW_ALL || flags & PICTURE_READY == 0 {
         return;
     }
-    cpu.call(GAME_START, &[game]);
+    super::play::game_start(cpu);
     if cpu.read32(game + STARTED) == 0 {
         if cpu.read8(game + TIMED_OUT) & 1 == 0 {
             cpu.write8(NEXT_MODE, GAME_OPENING);
@@ -704,10 +703,9 @@ const SL_COLOR_OFFSET_USE: u32 = 0x0606_98dc;
 const SL_COLOR_OFFSET_A: u32 = 0x0606_98ec;
 const SL_COLOR_OFFSET_B: u32 = 0x0606_98fc;
 const DARKER: u32 = -80i32 as u32;
-/// Not rewritten yet: a player object made (from a struct: x, y, z, the player), a player's play
-/// data made anew, a player ended (lamps and the BIOS told, as far as can be told).
+/// Not rewritten yet: a player object made (from a struct: x, y, z, the player), a player ended
+/// (lamps and the BIOS told, as far as can be told).
 const PLAYER_SET: u32 = 0x0604_816c;
-const PLAYER_RESET: u32 = 0x0604_114c;
 const PLAYER_ENDED: u32 = 0x0600_6928;
 
 /// State 7, a stage (or a demo of one): faded in, the mode's music started (in a demo: the random
@@ -865,7 +863,7 @@ fn stage_player(cpu: &mut Cpu, game: u32, p: u32) {
         PLAYER_JOINED | PLAYER_PLAYING => {
             if state == PLAYER_JOINED && cpu.read32(slot) != 0 {
                 if (cpu.read8(play_data + super::globals::CONTINUES) as i8) < 0 {
-                    cpu.call(PLAYER_RESET, &[p]);
+                    super::play::player_reset(cpu, p);
                     cpu.write8(play_data + super::globals::CONTINUES, 0);
                 }
                 text::show_buffers(cpu, p);
@@ -1128,7 +1126,7 @@ fn first_stage_end(cpu: &mut Cpu, game: u32) {
             scores[p] = cpu.read32(play_data + super::globals::SCORE);
         }
     }
-    cpu.call(GAME_START, &[game]);
+    super::play::game_start(cpu);
     clear_mode(cpu, game);
     for p in 0..2 {
         if alive[p] <= 0 {
