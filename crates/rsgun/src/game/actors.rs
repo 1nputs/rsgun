@@ -89,7 +89,7 @@ pub fn actor_exec(cpu: &mut Cpu, actor: u32) {
             return;
         }
         ENDED => {
-            objects::obj_free(cpu, actor);
+            nested!(cpu, 0x0600_579c, objects::obj_free(cpu, actor));
             return;
         }
         _ => return,
@@ -112,13 +112,13 @@ pub fn numbered_exec(cpu: &mut Cpu, actor: u32) {
             return;
         }
         FREE => {
-            objects::obj_free(cpu, actor);
+            nested!(cpu, 0x0600_579c, objects::obj_free(cpu, actor));
             return;
         }
         ENDED => {
             let n = cpu.read8(actor + NUMBER) as i8 as i32;
             cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), 0);
-            objects::obj_free(cpu, actor);
+            nested!(cpu, 0x0600_579c, objects::obj_free(cpu, actor));
             return;
         }
         _ => return,
@@ -137,7 +137,7 @@ pub fn plain_exec(cpu: &mut Cpu, actor: u32) {
             return;
         }
         ENDED => {
-            objects::obj_free(cpu, actor);
+            nested!(cpu, 0x0600_579c, objects::obj_free(cpu, actor));
             return;
         }
         _ => return,
@@ -252,4 +252,64 @@ pub fn drift(cpu: &mut Cpu, actor: u32) {
         let v = cpu.read32(actor + SPEED + 4 * k);
         cpu.write32(actor + SPEED + 4 * k, v.wrapping_add(a));
     }
+}
+
+/// An actor set up: its sprite, its hit fields, the word at +0x6c cleared.
+pub fn actor_setup(cpu: &mut Cpu, actor: u32) {
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, actor + SPRITE));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, actor + 0x3c));
+    cpu.write16(actor + 0x6c, 0);
+}
+
+/// A player's object: its size, its behaviour (not rewritten yet), its boxes, its kind (2), the
+/// kinds' table (the second kind's colour, a player 1 sixteen more), its gauge (hud.rs), a long at
+/// +0xa8 (not known yet), and each player's hit counts (seven longs, hits.rs).
+const PLAYER_SIZE: u32 = 0xac;
+const PLAYER_BEHAVIOUR: u32 = 0x0604_7f60;
+const PLAYER_BOXES: u32 = 0x0607_26f0;
+const PLAYER_KIND: u8 = 2;
+const PLAYER_COLOUR: u32 = 0x0607_421c;
+const PLAYER_A8: u32 = 0x0410_0000;
+const WEAPON_HITS: u32 = 0x0607_40a0;
+
+/// Makes player `st+0x1e`'s object at `st` (x, y, z): it (in the numbered objects), or 0.
+pub fn player_set(cpu: &mut Cpu, st: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, PLAYER_SIZE)) as i8 as i32 as u32;
+    let obj = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 1, blocks, 0x0604_d600));
+    if obj == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, obj + SPRITE));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, obj + 0x3c));
+    cpu.write32(obj + BEHAVIOUR, PLAYER_BEHAVIOUR);
+    for k in 0..3 {
+        let v = cpu.read32(st + 4 * k);
+        cpu.write32(obj + 0x14 + 4 * k, v);
+    }
+    cpu.write8(obj + 0x33, 4);
+    let p = cpu.read8(st + 0x1e);
+    cpu.write8(obj + NUMBER, p);
+    cpu.write8(obj + 0x2e, PLAYER_KIND);
+    cpu.write8(obj + 0x2f, 0);
+    let mut colour = cpu.read16(PLAYER_COLOUR);
+    cpu.write16(obj + COLOUR, colour);
+    if cpu.read8(obj + NUMBER) == 1 {
+        colour = colour.wrapping_add(16);
+        cpu.write16(obj + COLOUR, colour);
+    }
+    let c = cpu.read16(obj + COLOUR);
+    cpu.write16(obj + OWN_COLOUR, c);
+    cpu.write8(obj + 0x54, 0);
+    cpu.write32(obj + 0x50, 10000);
+    cpu.write32(obj + 0x3c, PLAYER_BOXES);
+    cpu.write32(obj + 0xa8, PLAYER_A8);
+    let n = cpu.read8(obj + NUMBER) as i8 as i32;
+    let hits = WEAPON_HITS.wrapping_add((28 * n) as u32);
+    for k in 0..7 {
+        cpu.write32(hits + 4 * k, 0);
+    }
+    cpu.write16(obj + 0x6c, 1);
+    let n = cpu.read8(obj + NUMBER) as i8 as i32;
+    cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), obj);
+    obj
 }

@@ -2,6 +2,7 @@
 //! the score (its last digit the continues used: Radiant Silvergun's count), the lives, a
 //! weapon's level with its icon (cycling through the weapons), and the gauge beside them.
 
+use super::nested;
 use super::globals::{self, mode, CONTINUES, GAME_MODE, PLAY_DATA, PLAY_DATA_SIZE, SCORE, VBLANKS};
 use super::{math, palette, text, Cpu};
 
@@ -71,15 +72,15 @@ pub fn status_line(cpu: &mut Cpu, p: u32, line: u32) {
     let shown = score / 10 * 10 + continues;
     if cpu.read32(SCORE_SHOWN + 4 * p) != shown as u32 {
         let shown = shown.min(99_999_999) as u32;
-        put_digits(cpu, shown, 8, line + SCORE_AT, p);
+        nested!(cpu, 0x0605_fe34, put_digits(cpu, shown, 8, line + SCORE_AT, p));
         cpu.write32(SCORE_SHOWN + 4 * p, shown);
     }
     if cpu.read8(LIVES_SHOWN + p) != cpu.read8(LIVES + p) {
         if cpu.read8(GAME_MODE) == mode::STG00 {
-            text::put_string(cpu, NO_LIVES, line + NO_LIVES_AT, 0);
+            nested!(cpu, 0x0606_11b8, text::put_string(cpu, NO_LIVES, line + NO_LIVES_AT, 0));
         } else {
             let lives = (cpu.read8(LIVES + p) as i8 as i32).min(99) as u32;
-            put_digits(cpu, lives, 2, line + LIVES_AT, p);
+            nested!(cpu, 0x0605_fe34, put_digits(cpu, lives, 2, line + LIVES_AT, p));
             cpu.write8(LIVES_SHOWN + p, lives as u8);
         }
     }
@@ -95,10 +96,10 @@ pub fn status_line(cpu: &mut Cpu, p: u32, line: u32) {
     let level = cpu.read8(WEAPON_LEVELS + 3 * p + step * weapon) as i8;
     if cpu.read8(LEVEL_SHOWN + p) as i8 != level {
         let level = (level as i32).min(99) as u32;
-        put_digits(cpu, level, 2, line + LEVEL_AT, p);
+        nested!(cpu, 0x0605_fe34, put_digits(cpu, level, 2, line + LEVEL_AT, p));
         cpu.write8(LEVEL_SHOWN + p, level as u8);
     }
-    gauge(cpu, p);
+    nested!(cpu, 0x0606_0550, gauge(cpu, p));
 }
 
 /// Player `p`'s gauge: its shown value moved toward the player's (an eighth of the way, and one),
@@ -143,12 +144,12 @@ pub fn gauge(cpu: &mut Cpu, p: u32) {
         ICON_STILL
     } else {
         let vblanks = cpu.read32(VBLANKS);
-        match math::remainder(cpu, vblanks, 3) as i32 {
+        match nested!(cpu, 0x0600_6a6e, math::remainder(cpu, vblanks, 3)) as i32 {
             k @ 0..=2 => ICON_CHARGING[k as usize],
             _ => return,
         }
     };
-    palette::set_colours(cpu, colours, index, 2);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, index, 2));
 }
 
 /// Player `p`'s status line to be drawn whole next time.
@@ -163,8 +164,8 @@ pub fn status_reset(cpu: &mut Cpu, p: u32) {
 /// Player `p`'s status line, in that player's own buffer.
 pub fn draw_status(cpu: &mut Cpu, p: u32) {
     match p {
-        0 => status_line(cpu, 0, STATUS_BUFFERS[0]),
-        1 => status_line(cpu, 1, STATUS_BUFFERS[1]),
+        0 => nested!(cpu, 0x0606_0388, status_line(cpu, 0, STATUS_BUFFERS[0])),
+        1 => nested!(cpu, 0x0606_0388, status_line(cpu, 1, STATUS_BUFFERS[1])),
         _ => {}
     }
 }

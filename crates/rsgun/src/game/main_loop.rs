@@ -22,9 +22,20 @@ const SL_0606713C: u32 = 0x0606_713c;
 /// A word whose bit 31 lasts one game frame.
 const ONE_FRAME: u32 = 0x0607_405c;
 
+/// The SH-2 main loop's registers as it keeps them, for its callees' pushes (the game reads stack
+/// it never set, and gets what was pushed there): r8 0 from its second call, SL_SYNCH's address
+/// once it calls it; r9 GAME_END's address after the first pass; r10-r13 ONE_FRAME's, ELAPSED's,
+/// LAST_VBLANKS's and VBLANKS's addresses through the loop. Kept for the caller, as the SH-2 code
+/// keeps them.
+fn hold(cpu: &mut Cpu, r: usize, v: u32) {
+    cpu.sh2.r[r] = v;
+}
+
 /// Runs the game until something sets GAME_END: what it was set to.
 pub fn main_loop(cpu: &mut Cpu) -> u32 {
+    let kept: [u32; 6] = cpu.sh2.r[8..14].try_into().unwrap_or([0; 6]);
     cpu.call(SL_0606705C, &[1]);
+    hold(cpu, 8, 0);
     cpu.call(SL_06067088, &[0x80]);
     cpu.call(SL_060670AC, &[0x200, 0x200]);
     cpu.call(SL_060670FC, &[1]);
@@ -35,6 +46,9 @@ pub fn main_loop(cpu: &mut Cpu) -> u32 {
     cpu.write32(sound::SE_LOCK, 0);
     cpu.call(SL_TV_ON, &[]);
     cpu.write32(GAME_END, 0);
+    for (r, v) in [(13, VBLANKS), (12, LAST_VBLANKS), (11, ELAPSED), (10, ONE_FRAME)] {
+        hold(cpu, r, v);
+    }
     loop {
         cpu.call(SL_INIT_MATRIX, &[]);
         cpu.call(SL_0606713C, &[1]);
@@ -56,14 +70,18 @@ pub fn main_loop(cpu: &mut Cpu) -> u32 {
         nested!(cpu, 0x0600_5a70, palette::send_colours(cpu));
         nested!(cpu, 0x0600_5fb0, files::load_files(cpu));
         nested!(cpu, 0x0600_4580, dma::dma_control(cpu));
+        hold(cpu, 8, SL_SYNCH);
         cpu.call(SL_SYNCH, &[]);
+        hold(cpu, 9, GAME_END);
         if cpu.read32(GAME_END) != 0 {
             break;
         }
     }
     cpu.call(SL_SYNCH, &[]);
     cpu.call(SL_SYNCH, &[]);
-    cpu.read32(GAME_END)
+    let end = cpu.read32(GAME_END);
+    cpu.sh2.r[8..14].copy_from_slice(&kept);
+    end
 }
 
 /// The kinds of objects (79, 16 bytes each): their sprites (+4), first character and attributes

@@ -2,6 +2,7 @@
 //! ("GAME.BIN", "TITLE.BIN", "STG00.BIN" ...), listed in a table of `FILE_INF` (name, where in the
 //! cart, size; dma.c's types). A load (`LOAD_FILE_INF`) copies a file into work RAM a piece a frame.
 
+use super::nested;
 use super::Cpu;
 
 /// `FILE_INF files[206]`: the name, its address in the cart, its size. The first is not a file the
@@ -71,7 +72,7 @@ pub fn load_file(cpu: &mut Cpu, name: u32) -> u32 {
     let Some(load) = (0..LOADS).map(|i| LOAD_FILE_INF + LOAD * i).find(|&l| cpu.read32(l + FILE_NO) == 0) else {
         return 0;
     };
-    let file = file_no(cpu, name);
+    let file = nested!(cpu, 0x0600_5da0, file_no(cpu, name));
     if file == 0 {
         return 0;
     }
@@ -114,6 +115,7 @@ pub fn clear_loads(cpu: &mut Cpu) {
 
 /// At the game's start: frees every load.
 pub fn init_loads(cpu: &mut Cpu) -> u32 {
+    // inline: clear_loads's loop is the SH-2 function's own here
     clear_loads(cpu);
     cpu.write32(NEXT_RATE, DEFAULT_RATE);
     1
@@ -122,7 +124,7 @@ pub fn init_loads(cpu: &mut Cpu) -> u32 {
 /// Reads the file named `name` into `dst` at once: its size (in whole words), or 0 if there is
 /// no such file.
 pub fn read_file(cpu: &mut Cpu, name: u32, dst: u32) -> u32 {
-    let file = file_no(cpu, name);
+    let file = nested!(cpu, 0x0600_5da0, file_no(cpu, name));
     if file == 0 {
         return 0;
     }
@@ -140,7 +142,7 @@ pub fn read_file(cpu: &mut Cpu, name: u32, dst: u32) -> u32 {
 
 /// The size of the file named `name` (in whole words), or 0.
 pub fn file_size(cpu: &mut Cpu, name: u32) -> u32 {
-    match file_no(cpu, name) {
+    match nested!(cpu, 0x0600_5da0, file_no(cpu, name)) {
         0 => 0,
         file => {
             let size = cpu.read32(FILE_INF + FILE * file + FILE_SIZE);
@@ -170,7 +172,7 @@ pub fn start_load(cpu: &mut Cpu, load: u32, dst: u32) -> u32 {
     cpu.write32(load + LOAD_ADR, dst);
     cpu.write32(load + LOADED, 0);
     cpu.write32(load + TRANS_SIZE, rate);
-    load_size(cpu, load)
+    nested!(cpu, 0x0600_5edc, load_size(cpu, load))
 }
 
 /// Whether `load` has its whole file (then it is freed): 1, or 0 while it goes on.
@@ -182,7 +184,7 @@ pub fn load_done(cpu: &mut Cpu, load: u32) -> u32 {
     if cpu.read32(load + LOADED) != cpu.read32(FILE_INF + FILE * file + FILE_SIZE) {
         return 0;
     }
-    free_load(cpu, load);
+    nested!(cpu, 0x0600_60b0, free_load(cpu, load));
     1
 }
 

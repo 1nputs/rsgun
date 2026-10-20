@@ -4,6 +4,7 @@
 //! the screen adds, as a rule) toward a target. Three fade channels let one fade at a time touch
 //! each colour.
 
+use super::nested;
 use super::globals::{GAME_FLAGS, HELD};
 use super::{objects, vblank, Cpu};
 
@@ -65,8 +66,8 @@ pub fn set_fade_offset(cpu: &mut Cpu, r: u32, g: u32, b: u32) {
 /// A fade toward (r, g, b) at `speed` (16.16 of the way a frame), not yet told what to move: it,
 /// or 0.
 pub fn fade_new(cpu: &mut Cpu, r: u32, g: u32, b: u32, speed: u32) -> u32 {
-    let blocks = objects::obj_size(cpu, FADE_SIZE);
-    let fade = objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, FADE_EXEC);
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, FADE_SIZE));
+    let fade = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, FADE_EXEC));
     if fade != 0 {
         cpu.write16(fade + TO, r as u16);
         cpu.write16(fade + TO + 2, g as u16);
@@ -78,7 +79,7 @@ pub fn fade_new(cpu: &mut Cpu, r: u32, g: u32, b: u32, speed: u32) -> u32 {
 
 /// Fades the screen's colour offset toward (r, g, b) at `speed`, on channel 0.
 pub fn fade_to(cpu: &mut Cpu, r: u32, g: u32, b: u32, speed: u32) {
-    let fade = fade_new(cpu, r as i16 as i32 as u32, g as i16 as i32 as u32, b as i16 as i32 as u32, speed);
+    let fade = nested!(cpu, 0x0605_e8dc, fade_new(cpu, r as i16 as i32 as u32, g as i16 as i32 as u32, b as i16 as i32 as u32, speed));
     if fade != 0 {
         let s = screen(cpu);
         cpu.write32(fade + COLOUR, s + FADE_OFFSET);
@@ -118,7 +119,7 @@ pub fn fade_exec(cpu: &mut Cpu, fade: u32) {
             return;
         }
         STOPPING => {
-            objects::obj_free(cpu, fade);
+            nested!(cpu, 0x0600_579c, objects::obj_free(cpu, fade));
             return;
         }
         _ => return,
@@ -172,16 +173,16 @@ pub fn fade_exec(cpu: &mut Cpu, fade: u32) {
 /// queues and the fade channels empty.
 pub fn screen_set(cpu: &mut Cpu) {
     cpu.call(SCROLL_SETUP, &[]);
-    let blocks = objects::obj_size(cpu, SCREEN_SIZE);
-    let s = objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, SCREEN_EXEC);
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, SCREEN_SIZE));
+    let s = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, SCREEN_EXEC));
     cpu.write32(SCREEN, s);
     cpu.write8(s + SCREEN_OFF, 1);
-    screen_fields(cpu);
-    offsets_clear(cpu);
+    nested!(cpu, 0x0605_e2dc, screen_fields(cpu));
+    nested!(cpu, 0x0605_e6c0, offsets_clear(cpu));
     for count in [QUEUE_COUNT, LONG_COUNT, SCROLL_COUNT, LONG_ON] {
         cpu.write32(count, 0);
     }
-    vblank::add_callback(cpu, SCREEN_VBLANK);
+    nested!(cpu, 0x0600_43d4, vblank::add_callback(cpu, SCREEN_VBLANK));
     for c in (0..CHANNEL_COUNT).rev() {
         cpu.write32(CHANNELS + 4 * c, 0);
     }
@@ -192,7 +193,7 @@ pub fn screen_off(cpu: &mut Cpu) {
     let s = screen(cpu);
     cpu.write8(s + SCREEN_OFF, 1);
     cpu.call(0x0606_3294, &[]);
-    stop_fades(cpu);
+    nested!(cpu, 0x0605_e9d8, stop_fades(cpu));
 }
 
 /// The screen's hook while game frames are held (a function, or 0), the mode's scroll (its index
@@ -220,7 +221,7 @@ pub fn screen_exec(cpu: &mut Cpu, s: u32) {
     if cpu.read8(s + SCREEN_OFF) != 0 {
         return;
     }
-    if super::director::director_flags(cpu) & 8 != 0 {
+    if nested!(cpu, 0x0604_0cb4, super::director::director_flags(cpu)) & 8 != 0 {
         cpu.call(SCREEN_ALT, &[]);
         return;
     }
@@ -238,8 +239,8 @@ pub fn screen_exec(cpu: &mut Cpu, s: u32) {
     if requested {
         cpu.write32(REQUEST, 0);
     }
-    take_plane_shared(cpu);
-    clear_scroll_word(cpu);
+    nested!(cpu, 0x0605_fdc0, take_plane_shared(cpu));
+    nested!(cpu, 0x0605_ef44, clear_scroll_word(cpu));
     let at = screen(cpu);
     let index = cpu.read8(at + SCROLL_INDEX) as i8 as i32;
     let table = cpu.read32(SCROLL_TABLE);
@@ -387,10 +388,10 @@ const DMAX_MODE: u32 = 0x11;
 pub fn screen_vblank(cpu: &mut Cpu) {
     cpu.write32(VBLANK_CLEARED, 0);
     if cpu.read32(CLEAR_TEXT_PLANE) != 0 {
-        clear_text_plane(cpu);
+        nested!(cpu, 0x0605_fdfc, clear_text_plane(cpu));
         cpu.write32(CLEAR_TEXT_PLANE, 0);
     }
-    super::text::clear_hidden_lines(cpu);
+    nested!(cpu, 0x0606_0824, super::text::clear_hidden_lines(cpu));
     let s = screen(cpu);
     if cpu.read8(s + SCREEN_OFF) == 0 {
         let mut i = 0;
@@ -427,7 +428,7 @@ pub fn screen_vblank(cpu: &mut Cpu) {
         }
         cpu.write32(SCROLL_COUNT, 0);
     }
-    super::text::send_lines(cpu);
+    nested!(cpu, 0x0606_08bc, super::text::send_lines(cpu));
 }
 
 /// The long copy's next piece (the rest, when that is no more than a piece: then the next long

@@ -56,7 +56,7 @@ const OTHERS_33: u8 = 0xf8;
 
 const EFFECT_SIZE: u32 = 0x80;
 const PLAIN_EXEC: u32 = 0x0604_dcb4;
-/// The effects' behaviour (not rewritten yet).
+/// The effects' behaviour (effect_exec).
 const EFFECT_EXEC: u32 = 0x0604_deb4;
 /// The rewrites' SH-2 entries (for nested!).
 const SPRITE_INIT: u32 = 0x0604_6264;
@@ -162,4 +162,265 @@ pub fn effect_set(cpu: &mut Cpu, fx: u32) -> u32 {
         cpu.write8(obj + A_LINK_FRAME, f);
     }
     obj
+}
+
+/// A link's fields: its script (or, with LINK_TABLE, a table of scripts by LINK_WHICH), its phase
+/// (16.16: a whole step moves a frame), its speed, its flags, which script, the frame it is at.
+/// A script: its last frame's index (bit 7: each frame names the sprite's kind too), then for each
+/// frame (kind,) the sprite's frame and the steps it lasts.
+const LINK_PHASE: u32 = 4;
+const LINK_SPEED: u32 = 8;
+const LINK_FLAGS: u32 = 0xc;
+const LINK_WHICH: u32 = 0xd;
+const LINK_AT: u32 = 0xe;
+/// The flags: scripts in a table, paused, played backwards, hold at the end (paused and ended
+/// both), ended.
+const LINK_TABLE: u8 = 0x80;
+const LINK_PAUSED: u8 = 0x10;
+const LINK_BACKWARDS: u8 = 0x20;
+const LINK_HOLD: u8 = 0x40;
+const LINK_HELD: u8 = 0x11;
+const LINK_ENDED: u8 = 2;
+const WITH_KIND: u8 = 0x80;
+/// A sprite's kind and frame (sprites.rs's struct).
+const SPRITE_KIND: u32 = 0x1e;
+const SPRITE_FRAME: u32 = 0x1f;
+
+/// One step of the animation `link` plays on the sprite at `s`: the frame (and kind) set, the
+/// phase moved by the speed (unless paused); a whole step past the frame's time moves to the next
+/// frame (or the one before, played backwards), and at the end either holds or starts again
+/// (flagged ended).
+pub fn link_step(cpu: &mut Cpu, s: u32, link: u32) {
+    let mut script = cpu.read32(link);
+    if script == 0 {
+        return;
+    }
+    if cpu.read8(link + LINK_FLAGS) & LINK_TABLE != 0 {
+        let which = cpu.read8(link + LINK_WHICH) as i8 as i32;
+        script = cpu.read32(script.wrapping_add((4 * which) as u32));
+    }
+    let mut last = cpu.read8(script);
+    let at = cpu.read8(link + LINK_AT) as i8 as i32;
+    let mut entry = script + 1;
+    if last & WITH_KIND != 0 {
+        last &= !WITH_KIND;
+        entry = entry.wrapping_add((3 * at) as u32);
+        let kind = cpu.read8(entry);
+        cpu.write8(s + SPRITE_KIND, kind);
+        entry += 1;
+    } else {
+        entry = entry.wrapping_add((2 * at) as u32);
+    }
+    let frame = cpu.read8(entry);
+    cpu.write8(s + SPRITE_FRAME, frame);
+    entry += 1;
+    let flags = cpu.read8(link + LINK_FLAGS);
+    if flags & LINK_PAUSED == 0 {
+        let phase = cpu.read32(link + LINK_PHASE);
+        let speed = cpu.read32(link + LINK_SPEED);
+        let phase = if flags & LINK_BACKWARDS != 0 { phase.wrapping_sub(speed) } else { phase.wrapping_add(speed) };
+        cpu.write32(link + LINK_PHASE, phase);
+    }
+    let phase = cpu.read32(link + LINK_PHASE) as i32;
+    let whole = ((phase / 0x1_0000) as i16 as i32).abs();
+    if whole < cpu.read8(entry) as i32 {
+        return;
+    }
+    let last = last as i32;
+    if phase >= 0 {
+        let at = cpu.read8(link + LINK_AT) as i8 as i32;
+        if at < last {
+            cpu.write8(link + LINK_AT, (at + 1) as u8);
+        } else {
+            let flags = cpu.read8(link + LINK_FLAGS);
+            if flags & LINK_HOLD != 0 {
+                cpu.write8(link + LINK_FLAGS, flags | LINK_HELD);
+            } else {
+                cpu.write8(link + LINK_AT, 0);
+                let flags = cpu.read8(link + LINK_FLAGS);
+                cpu.write8(link + LINK_FLAGS, flags | LINK_ENDED);
+            }
+        }
+    } else {
+        let at = cpu.read8(link + LINK_AT) as i8 as i32;
+        if at <= 0 {
+            cpu.write8(link + LINK_AT, last as u8);
+        } else {
+            let at = at - 1;
+            cpu.write8(link + LINK_AT, at as u8);
+            if at == 0 {
+                let flags = cpu.read8(link + LINK_FLAGS);
+                let flags = if flags & LINK_HOLD != 0 { flags | LINK_HELD } else { flags | LINK_ENDED };
+                cpu.write8(link + LINK_FLAGS, flags);
+            }
+        }
+    }
+    cpu.write16(link + LINK_PHASE, 0);
+}
+
+/// The effect's state (0 new, 1 running), its flags (the struct's, A_FLAGS: also SLOWS, LOOPS,
+/// PARENT_SCALES), the frames its scales shrink over at the end, its frames left, its speed (or,
+/// relative, its offset), its slowing (or relative angle), its scales' speed, its parent (relative).
+const A_STATE: u32 = 0x3c;
+const A_SPEED: u32 = 0x44;
+const A_SLOW: u32 = 0x4c;
+const A_SCALE_SPEED: u32 = 0x54;
+const A_PARENT: u32 = 0x5c;
+const A_SPIN: u32 = 0x42;
+const A_LINK_FLAGS: u32 = 0x7c;
+/// The flags: slowing to a stop over its frames (or, relative, closing in), playing its link until
+/// the link ends, the parent's scales taken.
+const SLOWS: u8 = 8;
+const LOOPS: u8 = 2;
+const PARENT_SCALES: u8 = 0x40;
+/// SGL's (as far as can be told): a 16.16 division.
+const SL_DIV: u32 = 0x0606_62d8;
+const SL_TURN: u32 = 0x0606_4eac;
+const QUOTIENT: u32 = 0x0600_6a78;
+const APPROACH: u32 = 0x0604_6168;
+const LINK_STEP: u32 = 0x0604_6558;
+const OBJ_MODE: u32 = 3;
+const ENDING: u8 = 0x70;
+
+fn end(cpu: &mut Cpu, obj: u32) {
+    cpu.write8(obj + OBJ_MODE, ENDING);
+}
+
+/// An effect's behaviour: started (a slowing effect takes the slowing that stops it at its last
+/// frame), it ends with its parent or (looping) its link; its frames counted down (its scales
+/// shrinking over the last ones), its scales moved (ended at none), then moved (by its speed, or
+/// placed by its parent: its offset turned with the parent), turned, its link played.
+pub fn effect_exec(cpu: &mut Cpu, obj: u32) {
+    match cpu.read8(obj + A_STATE) {
+        0 => {
+            let flags = cpu.read8(obj + A_FLAGS);
+            if flags & SLOWS != 0 {
+                let frames = cpu.read16(obj + A_COUNT_W) as i16 as i32 as u32;
+                if frames != 0 && flags & RELATIVE == 0 {
+                    for k in 0..2 {
+                        if cpu.read32(obj + A_SLOW + 4 * k) == 0 {
+                            let speed = cpu.read32(obj + A_SPEED + 4 * k);
+                            let q = nested!(cpu, QUOTIENT, super::math::quotient(cpu, speed, frames));
+                            cpu.write32(obj + A_SLOW + 4 * k, q.wrapping_neg());
+                        }
+                    }
+                }
+            }
+            cpu.write8(obj + A_STATE, 1);
+        }
+        1 => {}
+        _ => return,
+    }
+    let mut parent = 0;
+    if cpu.read8(obj + A_FLAGS) & RELATIVE != 0 {
+        parent = cpu.read32(obj + A_PARENT);
+        if cpu.read8(parent + OBJ_MODE) as i8 >= ENDING as i8 {
+            end(cpu, obj);
+            return;
+        }
+    }
+    if cpu.read8(obj + A_FLAGS) & LOOPS != 0 && cpu.read8(obj + A_LINK_FLAGS) & 3 != 0 && cpu.read16(obj + A_COUNT_W) == 0 {
+        end(cpu, obj);
+        return;
+    }
+    let frames = cpu.read16(obj + A_COUNT_W) as i16 as i32;
+    if frames != 0 {
+        let shrink = cpu.read8(obj + A_COUNT_B) as i8 as i32;
+        if shrink > 0 && frames <= shrink {
+            for k in 0..2 {
+                let n = cpu.read8(obj + A_COUNT_B) as i8 as i32 as u32;
+                let scale = cpu.read32(obj + A_SCALES + 4 * k);
+                let step = cpu.call(SL_DIV, &[scale, n]);
+                cpu.write32(obj + A_SCALE_SPEED + 4 * k, step.wrapping_neg());
+            }
+            cpu.write8(obj + A_COUNT_B, 0xff);
+        }
+        let left = cpu.read16(obj + A_COUNT_W).wrapping_sub(1);
+        cpu.write16(obj + A_COUNT_W, left);
+        if left == 0 {
+            if cpu.read8(obj + A_FLAGS) & LOOPS != 0 {
+                let f = cpu.read8(obj + A_LINK_FLAGS);
+                cpu.write8(obj + A_LINK_FLAGS, f & !2);
+            } else {
+                end(cpu, obj);
+            }
+        }
+    }
+    let sx = cpu.read32(obj + A_SCALES).wrapping_add(cpu.read32(obj + A_SCALE_SPEED));
+    cpu.write32(obj + A_SCALES, sx);
+    let sy = cpu.read32(obj + A_SCALES + 4).wrapping_add(cpu.read32(obj + A_SCALE_SPEED + 4));
+    cpu.write32(obj + A_SCALES + 4, sy);
+    if cpu.read32(obj + A_SCALES) as i32 <= 0 {
+        if sy == 0 {
+            end(cpu, obj);
+        }
+        cpu.write32(obj + A_SCALE_SPEED, 0);
+        cpu.write32(obj + A_SCALES, 0);
+    }
+    if cpu.read32(obj + A_SCALES + 4) as i32 <= 0 {
+        if cpu.read32(obj + A_SCALES) == 0 {
+            end(cpu, obj);
+        }
+        cpu.write32(obj + A_SCALE_SPEED + 4, 0);
+        cpu.write32(obj + A_SCALES + 4, 0);
+    }
+    let (angle, spin) = if parent == 0 {
+        for k in 0..2 {
+            let at = obj + A_SPEED + 4 * k;
+            if cpu.read8(obj + A_FLAGS) & SLOWS != 0 {
+                let slow = (cpu.read32(obj + A_SLOW + 4 * k) as i32).wrapping_abs() as u32;
+                let v = cpu.read32(at);
+                let v = nested!(cpu, APPROACH, super::actors::approach(cpu, v, 0, slow));
+                cpu.write32(at, v);
+            } else {
+                let v = cpu.read32(at).wrapping_add(cpu.read32(obj + A_SLOW + 4 * k));
+                cpu.write32(at, v);
+            }
+        }
+        for k in 0..2 {
+            let p = cpu.read32(obj + A_POSITION + 4 * k).wrapping_add(cpu.read32(obj + A_SPEED + 4 * k));
+            cpu.write32(obj + A_POSITION + 4 * k, p);
+        }
+        (cpu.read16(obj + A_ANGLE), cpu.read16(obj + A_SPIN))
+    } else {
+        let a = cpu.read32(obj + A_REL_ANGLE).wrapping_add(cpu.read16(obj + A_SPIN) as i16 as i32 as u32);
+        cpu.write32(obj + A_REL_ANGLE, a);
+        if cpu.read8(obj + A_FLAGS) & SLOWS != 0 {
+            for k in 0..2 {
+                let at = obj + A_REL + 4 * k;
+                let v = cpu.read32(at) as i32;
+                cpu.write32(at, v.wrapping_add(v.wrapping_neg() / 16) as u32);
+            }
+        }
+        let t = cpu.stack();
+        for k in 0..2 {
+            let v = cpu.read32(obj + A_REL + 4 * k);
+            cpu.write32(t + 4 * k, v);
+        }
+        if cpu.read8(obj + A_FLAGS) & PARENT_SCALES != 0 {
+            for k in 0..2 {
+                let v = cpu.read32(parent + A_SCALES + 4 * k);
+                cpu.write32(obj + A_SCALES + 4 * k, v);
+            }
+        }
+        for k in 0..2 {
+            let v = cpu.read32(parent + A_SCALES + 4 * k);
+            cpu.write32(t + 0xc + 4 * k, v);
+        }
+        cpu.write32(t + 0x14, 0);
+        let turn = cpu.read16(parent + A_ANGLE).wrapping_add(cpu.read16(obj + A_50 + 2));
+        cpu.write16(t + 0x18, turn);
+        cpu.call(SL_TURN, &[t]);
+        for k in 0..2 {
+            let p = cpu.read32(parent + A_POSITION + 4 * k).wrapping_add(cpu.read32(t + 4 * k));
+            cpu.write32(obj + A_POSITION + 4 * k, p);
+        }
+        let z = cpu.read32(parent + A_POSITION + 8);
+        cpu.write32(obj + A_POSITION + 8, z);
+        (cpu.read16(parent + A_ANGLE), cpu.read16(obj + A_REL_ANGLE + 2))
+    };
+    cpu.write16(obj + A_ANGLE, angle.wrapping_add(spin));
+    if cpu.read8(obj + A_FLAGS) & LINKED != 0 {
+        nested!(cpu, LINK_STEP, link_step(cpu, obj + 0x10, obj + A_LINK));
+    }
 }

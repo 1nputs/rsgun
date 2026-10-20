@@ -1,6 +1,7 @@
 //! The game's arithmetic helpers (assembly beside its main program): 16.16 fixed-point multiply and
 //! divide, and division on the SH-2's divide unit, which the game's division goes through.
 
+use super::nested;
 use super::Cpu;
 
 /// The divide unit: divisor, 32-bit dividend (writing it divides), and the 64-bit dividend's
@@ -54,7 +55,7 @@ pub fn random(cpu: &mut Cpu, n: u32) -> u32 {
     if n == 0 {
         return r;
     }
-    remainder(cpu, r, n)
+    nested!(cpu, 0x0600_6a6e, remainder(cpu, r, n))
 }
 
 /// The difficulty (the first setting, backup.rs: 0-4, the demos' 2 the middle).

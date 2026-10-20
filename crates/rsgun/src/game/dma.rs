@@ -3,6 +3,7 @@
 //! linked at 0x060044a0, and its work area `dma_wk`, with the types its debug information gives.
 //! Long copies are queued apart and made a piece a frame.
 
+use super::nested;
 use super::Cpu;
 
 /// `DMA_WK dma_wk`: the queue (count, each copy's SGL mode, source, destination, size) and the long
@@ -74,7 +75,7 @@ pub fn dma_control(cpu: &mut Cpu) {
     if long_copies != 0 {
         let (src, dst, left) = (cpu.read32(DSRC), cpu.read32(DDST), cpu.read32(DSIZE));
         let piece = if left > PIECE_MAX { PIECE } else { left };
-        if dma_set(cpu, src, dst, piece) != 0 {
+        if nested!(cpu, 0x0600_44a0, dma_set(cpu, src, dst, piece)) != 0 {
             if piece < left {
                 cpu.write32(DSRC, src.wrapping_add(piece));
                 cpu.write32(DSIZE, left - piece);

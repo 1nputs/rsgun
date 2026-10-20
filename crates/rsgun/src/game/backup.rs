@@ -3,6 +3,7 @@
 //! through the BIOS (its area, its 32-bit reads and writes) and reads and writes its bytes itself
 //! (the odd bytes of each 16-bit word: the RAM is 8 bits wide).
 
+use super::nested;
 use super::globals;
 use super::Cpu;
 
@@ -134,17 +135,17 @@ pub fn load_backup(cpu: &mut Cpu) -> u32 {
         bad = NO_SIGNATURE;
     }
     let last = if bad != 0 {
-        format_backup(cpu, bad);
-        save_scores(cpu)
+        nested!(cpu, 0x0600_66ec, format_backup(cpu, bad));
+        nested!(cpu, 0x0600_65fc, save_scores(cpu))
     } else {
         let mut last = 0;
         for (i, entry) in entries().enumerate() {
             let i = i as u32 * ENTRY;
             for b in 0..4 {
-                let v = backup_byte(cpu, i + b);
+                let v = nested!(cpu, 0x0600_6364, backup_byte(cpu, i + b));
                 cpu.write8(entry + b, v as u8);
             }
-            last = backup_long(cpu, i + 4);
+            last = nested!(cpu, 0x0600_637c, backup_long(cpu, i + 4));
             cpu.write32(entry + 4, last);
         }
         last
@@ -193,6 +194,7 @@ pub fn format_backup(cpu: &mut Cpu, why: u32) {
     cpu.write32(AREA, area);
     cpu.write32(DATA, area);
     for i in 0..AREA_BYTES {
+        // inline
         set_backup_byte(cpu, i, 0);
     }
     // the signature, the data pointer past it
@@ -229,10 +231,10 @@ pub fn save_scores(cpu: &mut Cpu) -> u32 {
         let i = i as u32 * ENTRY;
         for b in 0..4 {
             let v = cpu.read8(entry + b) as i8 as i32 as u32;
-            set_backup_byte(cpu, i + b, v);
+            nested!(cpu, 0x0600_63a4, set_backup_byte(cpu, i + b, v));
         }
         let score = cpu.read32(entry + 4);
-        last = set_backup_long(cpu, i + 4, score);
+        last = nested!(cpu, 0x0600_63bc, set_backup_long(cpu, i + 4, score));
     }
     last
 }

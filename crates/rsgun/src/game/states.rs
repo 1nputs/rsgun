@@ -2,6 +2,7 @@
 //! director's byte +0x3c and the state's number +0x3d; a state moves on by setting the step, or
 //! another state at its step 0 (the two as a word).
 
+use super::nested;
 use super::globals::mode::{GAME_LOGO, GAME_NAME_ENTRY, GAME_OPENING, GAME_OPTION, GAME_TITLE};
 use super::globals::{GAME_FLAGS, GAME_MODE, LOOPS};
 use super::{dma, files, math, objects, screen, sound, system, text, Cpu};
@@ -63,9 +64,9 @@ fn set_step(cpu: &mut Cpu, game: u32, step: u8) {
 /// Starts loading game mode `mode`'s file into the overlay window: the load.
 pub fn load_mode_file(cpu: &mut Cpu, mode: u32) -> u32 {
     let name = cpu.read32(MODE_FILES + 4 * mode);
-    let load = files::load_file(cpu, name);
+    let load = nested!(cpu, 0x0600_5e40, files::load_file(cpu, name));
     cpu.write32(NEXT_RATE, MODE_RATE);
-    files::start_load(cpu, load, OVERLAY);
+    nested!(cpu, 0x0600_603c, files::start_load(cpu, load, OVERLAY));
     load
 }
 
@@ -82,11 +83,11 @@ pub fn state_reset(cpu: &mut Cpu, game: u32) {
             cpu.write8(game + FIELD_4C, f);
             cpu.write8(game + FIELD_4D, 0);
             cpu.write8(GAME_MODE, GAME_LOGO);
-            if !system::free_play(cpu) && (system::coin_byte3(cpu, 0) != 0 || system::coin_byte3(cpu, 1) != 0) {
+            if !system::free_play(cpu) && (nested!(cpu, 0x0604_0f44, system::coin_byte3(cpu, 0)) != 0 || nested!(cpu, 0x0604_0f44, system::coin_byte3(cpu, 1)) != 0) {
                 cpu.write8(GAME_MODE, GAME_TITLE);
             }
-            text::credits_shown(cpu);
-            text::set_mode(cpu, 1);
+            nested!(cpu, 0x0606_0c08, text::credits_shown(cpu));
+            nested!(cpu, 0x0606_0894, text::set_mode(cpu, 1));
             set_step(cpu, game, 1);
         }
         1 => {}
@@ -122,13 +123,13 @@ pub fn state_load_mode(cpu: &mut Cpu, game: u32) {
         }
         1 => {
             let mode = cpu.read8(GAME_MODE) as i8 as i32 as u32;
-            let load = load_mode_file(cpu, mode);
+            let load = nested!(cpu, 0x0604_02c4, load_mode_file(cpu, mode));
             cpu.write32(game + LOAD, load);
             set_step(cpu, game, 2);
         }
         2 => {
             let load = cpu.read32(game + LOAD);
-            if files::load_done(cpu, load) != 0 {
+            if nested!(cpu, 0x0600_6074, files::load_done(cpu, load)) != 0 {
                 cpu.write32(game + LOAD, 0);
                 cpu.write16(game + MUSIC, 0xFFFF);
                 set_step(cpu, game, 3);
@@ -140,7 +141,7 @@ pub fn state_load_mode(cpu: &mut Cpu, game: u32) {
             }
         }
         4 => {
-            if dma::dma_check(cpu) == 0 && cpu.call(SL_DMA_BUSY, &[]) == 0 {
+            if nested!(cpu, 0x0600_46b8, dma::dma_check(cpu)) == 0 && cpu.call(SL_DMA_BUSY, &[]) == 0 {
                 set_step(cpu, game, 5);
             }
         }
@@ -170,20 +171,20 @@ const FADE_IN_SPEED: u32 = 0x888;
 pub fn state_run_mode(cpu: &mut Cpu, game: u32) {
     match cpu.read8(game + STEP) {
         0 => {
-            screen::set_fade_offset(cpu, BLACK, BLACK, BLACK);
-            screen::fade_to(cpu, 0, 0, 0, FADE_IN_SPEED);
+            nested!(cpu, 0x0605_e6dc, screen::set_fade_offset(cpu, BLACK, BLACK, BLACK));
+            nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, 0, 0, 0, FADE_IN_SPEED));
             let f = cpu.read32(game + GAME_FLAGS_44);
             cpu.write32(game + GAME_FLAGS_44, f & !MODE_START_CLEARS);
             let flags = cpu.read8(game + FLAGS);
             cpu.write8(game + FLAGS, flags | RUNNING);
-            text::hide_line(cpu, 0);
-            text::hide_line(cpu, 1);
+            nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 0));
+            nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 1));
             set_step(cpu, game, 1);
         }
         1 if cpu.read8(game + FLAGS) & DONE != 0 => {
             cpu.write8(game + FLAGS, 0);
-            screen::stop_fades(cpu);
-            screen::set_fade_offset(cpu, 0, 0, 0);
+            nested!(cpu, 0x0605_e9d8, screen::stop_fades(cpu));
+            nested!(cpu, 0x0605_e6dc, screen::set_fade_offset(cpu, 0, 0, 0));
             go_to(cpu, game, 6);
         }
         _ => {}
@@ -218,10 +219,10 @@ const SET_SKIPPED: u32 = 0x0604_0c8c;
 pub fn state_screen(cpu: &mut Cpu, game: u32) {
     match cpu.read8(game + STEP) {
         0 => {
-            screen::set_fade_offset(cpu, BLACK, BLACK, BLACK);
-            screen::fade_to(cpu, 0, 0, 0, FADE_IN_SPEED);
-            text::hide_line(cpu, 0);
-            text::hide_line(cpu, 1);
+            nested!(cpu, 0x0605_e6dc, screen::set_fade_offset(cpu, BLACK, BLACK, BLACK));
+            nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, 0, 0, 0, FADE_IN_SPEED));
+            nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 0));
+            nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 1));
             let flags = cpu.read8(game + FLAGS);
             cpu.write8(game + FLAGS, flags | RUNNING);
             set_step(cpu, game, 1);
@@ -229,44 +230,44 @@ pub fn state_screen(cpu: &mut Cpu, game: u32) {
         1 => {
             if cpu.read8(GAME_MODE) == GAME_OPENING {
                 let loops = cpu.read32(LOOPS);
-                let second = math::remainder(cpu, loops, 60) as i32;
+                let second = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, loops, 60)) as i32;
                 if system::free_play(cpu) {
                     let message = if second > 29 { MESSAGE_START } else { MESSAGE_FREE };
-                    text::show_message(cpu, 0, message);
-                    text::show_message(cpu, 1, message);
+                    nested!(cpu, 0x0606_0b78, text::show_message(cpu, 0, message));
+                    nested!(cpu, 0x0606_0b78, text::show_message(cpu, 1, message));
                     let pressed = cpu.read16(PAD_TRIG[0]) | cpu.read16(PAD_TRIG[1]);
                     if pressed & START != 0 {
-                        text::hide_line(cpu, 0);
-                        text::hide_line(cpu, 1);
+                        nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 0));
+                        nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 1));
                         cpu.write8(NEXT_MODE, 1);
                         cpu.call(SET_SKIPPED, &[]);
                         go_to(cpu, game, 9);
                     }
                 } else if second > 39 {
-                    text::hide_line(cpu, 0);
-                    text::hide_line(cpu, 1);
+                    nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 0));
+                    nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 1));
                 } else {
-                    text::show_message(cpu, 0, MESSAGE_COIN);
-                    text::show_message(cpu, 1, MESSAGE_COIN);
+                    nested!(cpu, 0x0606_0b78, text::show_message(cpu, 0, MESSAGE_COIN));
+                    nested!(cpu, 0x0606_0b78, text::show_message(cpu, 1, MESSAGE_COIN));
                 }
             }
             if cpu.read8(game + FLAGS) & DONE != 0 {
-                text::hide_line(cpu, 0);
-                text::hide_line(cpu, 1);
+                nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 0));
+                nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 1));
                 set_step(cpu, game, 2);
             }
         }
         2 => {
             cpu.write32(GAME_FLAGS, 0);
-            screen::stop_fades(cpu);
+            nested!(cpu, 0x0605_e9d8, screen::stop_fades(cpu));
             if cpu.read8(game + FLAGS) & SKIPPED != 0 {
-                screen::set_fade_offset(cpu, BLACK, BLACK, BLACK);
+                nested!(cpu, 0x0605_e6dc, screen::set_fade_offset(cpu, BLACK, BLACK, BLACK));
                 cpu.write32(game + COUNT, 0);
-                sound::music_fade_out(cpu, 0);
+                nested!(cpu, 0x0600_4f0c, sound::music_fade_out(cpu, 0));
             } else {
-                screen::fade_to(cpu, BLACK, BLACK, BLACK, FADE_OUT_SPEED);
+                nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, BLACK, BLACK, BLACK, FADE_OUT_SPEED));
                 cpu.write32(game + COUNT, 30);
-                sound::music_fade_out(cpu, 20);
+                nested!(cpu, 0x0600_4f0c, sound::music_fade_out(cpu, 20));
             }
             set_step(cpu, game, 3);
         }
@@ -284,7 +285,7 @@ pub fn state_screen(cpu: &mut Cpu, game: u32) {
             let n = cpu.read32(game + COUNT).wrapping_sub(1);
             cpu.write32(game + COUNT, n);
             if n as i32 <= 0 {
-                clear_mode(cpu, game);
+                nested!(cpu, 0x0604_1010, clear_mode(cpu, game));
                 cpu.write8(game + FLAGS, 0);
                 let next = cpu.read8(NEXT_MODE);
                 cpu.write8(GAME_MODE, next);
@@ -325,9 +326,9 @@ pub fn clear_mode(cpu: &mut Cpu, game: u32) {
     cpu.call(change_mask, &[u32::MAX, TIMER_1]);
     cpu.write32(T1MD, 0);
     cpu.call(SL_06064F68, &[0x43, 0]);
-    sound::stop_effects(cpu);
-    screen::screen_off(cpu);
-    files::clear_loads(cpu);
+    nested!(cpu, 0x0600_4ddc, sound::stop_effects(cpu));
+    nested!(cpu, 0x0605_e24c, screen::screen_off(cpu));
+    nested!(cpu, 0x0600_60c4, files::clear_loads(cpu));
     cpu.write32(ONE_FRAME, 0);
     for i in (0..PLAYERS_SIZE).step_by(4) {
         cpu.write32(PLAYERS + i, 0);
@@ -343,14 +344,14 @@ pub fn clear_mode(cpu: &mut Cpu, game: u32) {
                 }
             }
             if !kept {
-                objects::obj_free(cpu, obj);
+                nested!(cpu, 0x0600_579c, objects::obj_free(cpu, obj));
             }
             obj = cpu.read32(obj + objects::NEXT);
         }
     }
     cpu.write8(game + FLAGS, 0);
-    screen::stop_fades(cpu);
-    screen::set_fade_offset(cpu, BLACK, BLACK, BLACK);
+    nested!(cpu, 0x0605_e9d8, screen::stop_fades(cpu));
+    nested!(cpu, 0x0605_e6dc, screen::set_fade_offset(cpu, BLACK, BLACK, BLACK));
 }
 
 
@@ -440,7 +441,7 @@ pub fn state_title(cpu: &mut Cpu, game: u32) {
             }
             let step = if system::free_play(cpu) {
                 4
-            } else if system::coin_settings_shown(cpu) & SLOT_EACH != 0 {
+            } else if nested!(cpu, 0x0604_0f24, system::coin_settings_shown(cpu)) & SLOT_EACH != 0 {
                 3
             } else {
                 2
@@ -449,7 +450,7 @@ pub fn state_title(cpu: &mut Cpu, game: u32) {
         }
         2..=4 => title_players(cpu, game),
         5 => {
-            screen::fade_to(cpu, BLACK, BLACK, BLACK, FADE_OUT_SPEED);
+            nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, BLACK, BLACK, BLACK, FADE_OUT_SPEED));
             cpu.write32(game + FRAMES, STARTED_TIME);
             set_step(cpu, game, 6);
         }
@@ -462,18 +463,18 @@ pub fn state_title(cpu: &mut Cpu, game: u32) {
 /// The second within the title's frames.
 fn title_second(cpu: &mut Cpu, game: u32) -> i32 {
     let frames = cpu.read32(game + FRAMES);
-    math::remainder(cpu, frames, 60) as i32
+    nested!(cpu, 0x0600_6a6e, math::remainder(cpu, frames, 60)) as i32
 }
 
 /// Player `p`'s line: `message` for the first half of each second, then MESSAGE_SECOND if the coin
 /// settings ask for it.
 fn title_line(cpu: &mut Cpu, game: u32, p: u32, message: u32) {
     if title_second(cpu, game) <= 29 {
-        text::show_message(cpu, p, message);
-    } else if system::coin_settings_shown(cpu) & SHOW_SECOND != 0 {
-        text::show_message(cpu, p, MESSAGE_SECOND);
+        nested!(cpu, 0x0606_0b78, text::show_message(cpu, p, message));
+    } else if nested!(cpu, 0x0604_0f24, system::coin_settings_shown(cpu)) & SHOW_SECOND != 0 {
+        nested!(cpu, 0x0606_0b78, text::show_message(cpu, p, MESSAGE_SECOND));
     } else {
-        text::hide_line(cpu, p);
+        nested!(cpu, 0x0606_0b34, text::hide_line(cpu, p));
     }
 }
 
@@ -483,7 +484,7 @@ fn title_line(cpu: &mut Cpu, game: u32, p: u32, message: u32) {
 fn title_players(cpu: &mut Cpu, game: u32) {
     let mut waiting = 0;
     for p in 0..2 {
-        match system::coin_byte3(cpu, p) {
+        match nested!(cpu, 0x0604_0f44, system::coin_byte3(cpu, p)) {
             0 => {
                 title_line(cpu, game, p, MESSAGE_COIN);
                 waiting += 1;
@@ -491,17 +492,17 @@ fn title_players(cpu: &mut Cpu, game: u32) {
             1 => title_line(cpu, game, p, MESSAGE_SHORT),
             2 => {
                 if title_second(cpu, game) <= 29 {
-                    text::show_message(cpu, p, MESSAGE_START);
+                    nested!(cpu, 0x0606_0b78, text::show_message(cpu, p, MESSAGE_START));
                 } else if cpu.read8(game + STEP) == 4 {
-                    text::show_message(cpu, p, MESSAGE_FREE);
+                    nested!(cpu, 0x0606_0b78, text::show_message(cpu, p, MESSAGE_FREE));
                 } else {
-                    text::hide_line(cpu, p);
+                    nested!(cpu, 0x0606_0b34, text::hide_line(cpu, p));
                 }
-                if cpu.read16(PAD_TRIG[p as usize]) & START != 0 && system::use_credit(cpu, p) != 0 {
+                if cpu.read16(PAD_TRIG[p as usize]) & START != 0 && nested!(cpu, 0x0604_0f5c, system::use_credit(cpu, p)) != 0 {
                     let lives = cpu.read8(START_LIVES);
                     cpu.write8(LIVES + p, lives);
                     cpu.call(PLAYER_STARTED, &[p]);
-                    let bit = system::shift_left(cpu, 1, p);
+                    let bit = nested!(cpu, 0x0600_69d8, system::shift_left(cpu, 1, p));
                     let started = cpu.read32(game + STARTED);
                     cpu.write32(game + STARTED, started | bit);
                     set_step(cpu, game, 5);
@@ -515,9 +516,9 @@ fn title_players(cpu: &mut Cpu, game: u32) {
     }
     match cpu.read8(game + STEP) {
         5 => {
-            sound::se_set(cpu, SE_START);
-            text::hide_line(cpu, 0);
-            text::hide_line(cpu, 1);
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, SE_START));
+            nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 0));
+            nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 1));
         }
         step => {
             if step == 4 {
@@ -536,12 +537,12 @@ fn title_players(cpu: &mut Cpu, game: u32) {
 fn title_end(cpu: &mut Cpu, game: u32) {
     if cpu.read32(game + STARTED) != 0 {
         let frames = cpu.read32(game + FRAMES);
-        let flash = math::remainder(cpu, frames, 10) as i32;
+        let flash = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, frames, 10)) as i32;
         let y = cpu.read16(STARTED_Y) as i16 as i32;
         let x = cpu.read16(STARTED_X) as i16 as i32;
         let at = ((y + 0x70) / 8 * 0x80 + (x + 0xb0) / 8 * 2) as u32;
         let s = cpu.read32(STARTED_STRINGS + if flash > 4 { 0 } else { 4 });
-        text::put_string(cpu, s, TEXT_PLANE.wrapping_add(at), 0);
+        nested!(cpu, 0x0606_11b8, text::put_string(cpu, s, TEXT_PLANE.wrapping_add(at), 0));
     }
     let frames = cpu.read32(game + FRAMES);
     if frames as i32 > 0 {
@@ -552,7 +553,7 @@ fn title_end(cpu: &mut Cpu, game: u32) {
     if flags & LOW_ALL != LOW_ALL || flags & PICTURE_READY == 0 {
         return;
     }
-    super::play::game_start(cpu);
+    nested!(cpu, 0x0604_129c, super::play::game_start(cpu));
     if cpu.read32(game + STARTED) == 0 {
         if cpu.read8(game + TIMED_OUT) & 1 == 0 {
             cpu.write8(NEXT_MODE, GAME_OPENING);
@@ -562,12 +563,12 @@ fn title_end(cpu: &mut Cpu, game: u32) {
             if n == 15 {
                 cpu.write8(NEXT_MODE, LAST_DEMO_MODE);
             } else {
-                let r = math::remainder(cpu, n as u32, 3);
+                let r = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, n as u32, 3));
                 let m = cpu.read8(NEXT_MODE).wrapping_add(r as u8);
                 cpu.write8(NEXT_MODE, m);
             }
             cpu.write8(LIVES, 1);
-            text::set_mode(cpu, 2);
+            nested!(cpu, 0x0606_0894, text::set_mode(cpu, 2));
         }
         let n = cpu.read8(game + TIMED_OUT).wrapping_add(1);
         cpu.write8(game + TIMED_OUT, n);
@@ -575,8 +576,8 @@ fn title_end(cpu: &mut Cpu, game: u32) {
             cpu.write8(game + TIMED_OUT, 0);
         }
     } else {
-        text::set_mode(cpu, 0);
-        text::credits_hidden(cpu);
+        nested!(cpu, 0x0606_0894, text::set_mode(cpu, 0));
+        nested!(cpu, 0x0606_0c2c, text::credits_hidden(cpu));
         let mode = cpu.read8(game + START_MODE);
         cpu.write8(NEXT_MODE, mode);
     }
@@ -595,7 +596,7 @@ fn title_time(cpu: &mut Cpu, game: u32) {
     if timing & !TIMING_NOW != 0 {
         cpu.write32(game + TIMING, TIMING_NOW);
         if cpu.read32(game + TIME_LEFT) == TITLE_FADE {
-            screen::fade_to(cpu, BLACK, BLACK, BLACK, FADE_OUT_SPEED);
+            nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, BLACK, BLACK, BLACK, FADE_OUT_SPEED));
         }
         let left = cpu.read32(game + TIME_LEFT);
         if left == 0 {
@@ -609,8 +610,8 @@ fn title_time(cpu: &mut Cpu, game: u32) {
         }
     } else {
         if timing & TIMING_NOW != 0 {
-            screen::stop_fades(cpu);
-            screen::set_fade_offset(cpu, 0, 0, 0);
+            nested!(cpu, 0x0605_e9d8, screen::stop_fades(cpu));
+            nested!(cpu, 0x0605_e6dc, screen::set_fade_offset(cpu, 0, 0, 0));
             cpu.write32(game + TIMING, 0);
         }
         cpu.write32(game + TIME_LEFT, TITLE_TIME);
@@ -716,8 +717,8 @@ const PLAYER_ENDED: u32 = 0x0600_6928;
 pub fn state_stage(cpu: &mut Cpu, game: u32) {
     match cpu.read8(game + STEP) {
         0 => {
-            screen::set_fade_offset(cpu, BLACK, BLACK, BLACK);
-            screen::fade_to(cpu, 0, 0, 0, FADE_IN_SPEED);
+            nested!(cpu, 0x0605_e6dc, screen::set_fade_offset(cpu, BLACK, BLACK, BLACK));
+            nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, 0, 0, 0, FADE_IN_SPEED));
             let flags = cpu.read8(game + FLAGS);
             cpu.write8(game + FLAGS, flags | RUNNING);
             for field in [ALL_OUT, PLAYER_STATE + 4, PLAYER_STATE] {
@@ -727,7 +728,7 @@ pub fn state_stage(cpu: &mut Cpu, game: u32) {
             if cpu.read8(GAME_MODE) as i8 > 11 {
                 cpu.write32(game + PLAYER_STATE + 4, PLAYER_IDLE);
                 cpu.write32(game + PLAYER_STATE, PLAYER_IDLE);
-                math::random_seed(cpu, 0);
+                nested!(cpu, 0x0604_5d78, math::random_seed(cpu, 0));
                 cpu.write32(game + DEMO_FRAME, 0);
                 cpu.write8(SETTING_0, DEMO_SETTING_0);
                 if cpu.read32(BIOS_SOUND) & DEMO_SOUNDS == 0 {
@@ -738,7 +739,7 @@ pub fn state_stage(cpu: &mut Cpu, game: u32) {
                 cpu.write8(SETTING_0, kept);
                 let music = cpu.read16(game + MUSIC);
                 if music as i16 >= 0 {
-                    sound::request_music(cpu, music as u32);
+                    nested!(cpu, 0x0600_4e98, sound::request_music(cpu, music as u32));
                 }
             }
             set_step(cpu, game, 1);
@@ -784,24 +785,24 @@ fn stage_demo(cpu: &mut Cpu, game: u32) {
     }
     let skip = if system::free_play(cpu) {
         let loops = cpu.read32(LOOPS);
-        let message = if math::remainder(cpu, loops, 60) as i32 > 29 { MESSAGE_START } else { MESSAGE_FREE };
-        text::show_message(cpu, 0, message);
-        text::show_message(cpu, 1, message);
+        let message = if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, loops, 60)) as i32 > 29 { MESSAGE_START } else { MESSAGE_FREE };
+        nested!(cpu, 0x0606_0b78, text::show_message(cpu, 0, message));
+        nested!(cpu, 0x0606_0b78, text::show_message(cpu, 1, message));
         (cpu.read16(PAD_TRIG[0]) | cpu.read16(PAD_TRIG[1])) & START != 0
     } else {
         let loops = cpu.read32(LOOPS);
-        if math::remainder(cpu, loops, 60) as i32 > 39 {
-            text::hide_line(cpu, 0);
-            text::hide_line(cpu, 1);
+        if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, loops, 60)) as i32 > 39 {
+            nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 0));
+            nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 1));
         } else {
-            text::show_message(cpu, 0, MESSAGE_COIN);
-            text::show_message(cpu, 1, MESSAGE_COIN);
+            nested!(cpu, 0x0606_0b78, text::show_message(cpu, 0, MESSAGE_COIN));
+            nested!(cpu, 0x0606_0b78, text::show_message(cpu, 1, MESSAGE_COIN));
         }
-        system::coin_byte3(cpu, 0) != 0 || system::coin_byte3(cpu, 1) != 0 || cpu.read32(game + DEMO_INPUT) == 0
+        nested!(cpu, 0x0604_0f44, system::coin_byte3(cpu, 0)) != 0 || nested!(cpu, 0x0604_0f44, system::coin_byte3(cpu, 1)) != 0 || cpu.read32(game + DEMO_INPUT) == 0
     };
     if skip {
-        text::hide_line(cpu, 0);
-        text::hide_line(cpu, 1);
+        nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 0));
+        nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 1));
         cpu.write8(NEXT_MODE, GAME_TITLE);
         cpu.call(SET_SKIPPED, &[]);
         go_to(cpu, game, 9);
@@ -854,7 +855,7 @@ fn stage_player(cpu: &mut Cpu, game: u32, p: u32) {
         }
         PLAYER_OUT | PLAYER_CONTINUE => {
             if state == PLAYER_CONTINUE && cpu.read32(game + ALL_OUT) == 0 && continue_count(cpu, game, p, &mut frames) {
-                text::show_message(cpu, p, MESSAGE_OVER);
+                nested!(cpu, 0x0606_0b78, text::show_message(cpu, p, MESSAGE_OVER));
                 state = PLAYER_OVER;
             } else {
                 state = player_line(cpu, game, p, state, &mut frames, play_data);
@@ -863,16 +864,16 @@ fn stage_player(cpu: &mut Cpu, game: u32, p: u32) {
         PLAYER_JOINED | PLAYER_PLAYING => {
             if state == PLAYER_JOINED && cpu.read32(slot) != 0 {
                 if (cpu.read8(play_data + super::globals::CONTINUES) as i8) < 0 {
-                    super::play::player_reset(cpu, p);
+                    nested!(cpu, 0x0604_114c, super::play::player_reset(cpu, p));
                     cpu.write8(play_data + super::globals::CONTINUES, 0);
                 }
-                text::show_buffers(cpu, p);
-                super::hud::status_reset(cpu, p);
+                nested!(cpu, 0x0606_0a48, text::show_buffers(cpu, p));
+                nested!(cpu, 0x0606_0354, super::hud::status_reset(cpu, p));
                 state = PLAYER_PLAYING;
             }
             if state == PLAYER_PLAYING {
                 if cpu.read32(slot) != 0 {
-                    super::hud::draw_status(cpu, p);
+                    nested!(cpu, 0x0606_0a0c, super::hud::draw_status(cpu, p));
                 } else if cpu.read8(lives) == 0 {
                     cpu.write32(game + COUNTDOWN, COUNT_FROM);
                     cpu.write32(game + TICKS, 0);
@@ -925,39 +926,39 @@ fn player_line(cpu: &mut Cpu, game: u32, p: u32, state: u32, frames: &mut u32, p
     system::bios(cpu, BIOS_CONTINUING, &[CONTINUING]);
     let mut state = state;
     let mut alternate = false;
-    let second = |cpu: &mut Cpu, frames: u32| math::remainder(cpu, frames, 60) as i32;
-    match system::coin_byte3(cpu, p) {
+    let second = |cpu: &mut Cpu, frames: u32| nested!(cpu, 0x0600_6a6e, math::remainder(cpu, frames, 60)) as i32;
+    match nested!(cpu, 0x0604_0f44, system::coin_byte3(cpu, p)) {
         0 | 1 => {
             if second(cpu, *frames) <= 29 {
-                let message = if system::coin_byte3(cpu, p) == 0 { MESSAGE_COIN } else { MESSAGE_SHORT };
-                text::show_message(cpu, p, message);
+                let message = if nested!(cpu, 0x0604_0f44, system::coin_byte3(cpu, p)) == 0 { MESSAGE_COIN } else { MESSAGE_SHORT };
+                nested!(cpu, 0x0606_0b78, text::show_message(cpu, p, message));
             } else {
                 alternate = true;
-                if state == PLAYER_OUT && system::coin_settings_shown(cpu) & SHOW_SECOND != 0 {
-                    text::show_message(cpu, p, MESSAGE_SECOND);
+                if state == PLAYER_OUT && nested!(cpu, 0x0604_0f24, system::coin_settings_shown(cpu)) & SHOW_SECOND != 0 {
+                    nested!(cpu, 0x0606_0b78, text::show_message(cpu, p, MESSAGE_SECOND));
                     alternate = false;
                 }
             }
         }
         2 if cpu.read8(JOIN_HELD) != 0 => {
             if second(cpu, *frames) <= 29 {
-                text::show_message(cpu, p, MESSAGE_HELD);
+                nested!(cpu, 0x0606_0b78, text::show_message(cpu, p, MESSAGE_HELD));
             } else {
-                text::hide_line(cpu, p);
+                nested!(cpu, 0x0606_0b34, text::hide_line(cpu, p));
             }
             cpu.write32(game + TICKS, 0);
             cpu.write32(game + COUNTDOWN, COUNT_FROM);
         }
         2 => {
             if second(cpu, *frames) <= 29 {
-                text::show_message(cpu, p, MESSAGE_START);
+                nested!(cpu, 0x0606_0b78, text::show_message(cpu, p, MESSAGE_START));
             } else {
                 if system::free_play(cpu) {
-                    text::show_message(cpu, p, MESSAGE_FREE);
+                    nested!(cpu, 0x0606_0b78, text::show_message(cpu, p, MESSAGE_FREE));
                 }
                 alternate = true;
             }
-            if cpu.read16(PLAYER_TRIG + 8 * p) & START != 0 && system::use_credit(cpu, p) != 0 {
+            if cpu.read16(PLAYER_TRIG + 8 * p) & START != 0 && nested!(cpu, 0x0604_0f5c, system::use_credit(cpu, p)) != 0 {
                 let n = cpu.read8(START_LIVES);
                 cpu.write8(LIVES + p, n);
                 let continues = play_data + super::globals::CONTINUES;
@@ -978,9 +979,9 @@ fn player_line(cpu: &mut Cpu, game: u32, p: u32, state: u32, frames: &mut u32, p
     if alternate {
         if state == PLAYER_CONTINUE {
             let count = cpu.read32(game + COUNTDOWN);
-            text::show_message(cpu, p, count);
+            nested!(cpu, 0x0606_0b78, text::show_message(cpu, p, count));
         } else if state == PLAYER_OUT {
-            text::hide_line(cpu, p);
+            nested!(cpu, 0x0606_0b34, text::hide_line(cpu, p));
         }
     }
     *frames = frames.wrapping_add(1);
@@ -1001,7 +1002,7 @@ fn stage_continue(cpu: &mut Cpu, game: u32) {
         cpu.write32(game + TICKS, 0);
         cpu.call(SL_COLOR_OFFSET_A, &[DARKER, DARKER, DARKER]);
         cpu.call(SL_COLOR_OFFSET_B, &[DARKER, DARKER, DARKER]);
-        text::credits_shown(cpu);
+        nested!(cpu, 0x0606_0c08, text::credits_shown(cpu));
         cpu.write32(game + PLAYER_FRAMES + 4, 0);
         cpu.write32(game + PLAYER_FRAMES, 0);
         cpu.write32(game + ALL_OUT, 1);
@@ -1009,11 +1010,11 @@ fn stage_continue(cpu: &mut Cpu, game: u32) {
     }
     cpu.call(SL_COLOR_OFFSET_A, &[DARKER, DARKER, DARKER]);
     cpu.call(SL_COLOR_OFFSET_B, &[DARKER, DARKER, DARKER]);
-    text::put_large_string(cpu, CONTINUE_TEXT, CONTINUE_AT, 0);
+    nested!(cpu, 0x0606_1204, text::put_large_string(cpu, CONTINUE_TEXT, CONTINUE_AT, 0));
     let count = cpu.read32(game + COUNTDOWN);
     if count as i32 >= 0 {
         let digit = cpu.read32(DIGITS + 4 * count);
-        text::put_large_string(cpu, digit, DIGIT_AT, 0);
+        nested!(cpu, 0x0606_1204, text::put_large_string(cpu, digit, DIGIT_AT, 0));
     }
     let ticks = cpu.read32(game + TICKS);
     cpu.write32(game + TICKS, ticks.wrapping_add(1));
@@ -1031,18 +1032,18 @@ fn stage_continue(cpu: &mut Cpu, game: u32) {
         let count = cpu.read32(game + COUNTDOWN).wrapping_sub(1);
         cpu.write32(game + COUNTDOWN, count);
         if (count as i32) < 0 {
-            text::put_large_string(cpu, OVER_TEXT, OVER_AT, 0);
-            text::put_large_string(cpu, BLANK_DIGIT, DIGIT_AT, 0);
+            nested!(cpu, 0x0606_1204, text::put_large_string(cpu, OVER_TEXT, OVER_AT, 0));
+            nested!(cpu, 0x0606_1204, text::put_large_string(cpu, BLANK_DIGIT, DIGIT_AT, 0));
             cpu.write8(NEXT_MODE, super::globals::mode::GAME_NAME_ENTRY);
             go_to(cpu, game, 9);
         }
     }
     if cpu.read32(PLAYERS) != 0 || cpu.read32(PLAYERS + 4) != 0 {
-        text::put_large_string(cpu, BLANK_LINE, OVER_AT, 0);
-        text::put_large_string(cpu, BLANK_DIGIT, DIGIT_AT, 0);
+        nested!(cpu, 0x0606_1204, text::put_large_string(cpu, BLANK_LINE, OVER_AT, 0));
+        nested!(cpu, 0x0606_1204, text::put_large_string(cpu, BLANK_DIGIT, DIGIT_AT, 0));
         let f = cpu.read32(GAME_FLAGS);
         cpu.write32(GAME_FLAGS, f & !CONTINUE_SCREEN);
-        text::credits_hidden(cpu);
+        nested!(cpu, 0x0606_0c2c, text::credits_hidden(cpu));
         cpu.write32(game + ALL_OUT, 0);
     }
 }
@@ -1065,22 +1066,22 @@ pub fn state_stage_end(cpu: &mut Cpu, game: u32) {
     match cpu.read8(game + STEP) {
         step @ (0 | 1) => {
             if step == 0 {
-                text::stop_text_objects(cpu);
+                nested!(cpu, 0x0606_12bc, text::stop_text_objects(cpu));
                 set_step(cpu, game, 1);
             }
-            screen::stop_fades(cpu);
+            nested!(cpu, 0x0605_e9d8, screen::stop_fades(cpu));
             if cpu.read8(game + FLAGS) & SKIPPED != 0 {
-                screen::set_fade_offset(cpu, BLACK, BLACK, BLACK);
+                nested!(cpu, 0x0605_e6dc, screen::set_fade_offset(cpu, BLACK, BLACK, BLACK));
                 cpu.write32(game + END_COUNT, 0);
-                sound::music_fade_out(cpu, 0);
+                nested!(cpu, 0x0600_4f0c, sound::music_fade_out(cpu, 0));
             } else if cpu.read8(GAME_MODE) == super::globals::mode::STG05 {
-                screen::fade_to(cpu, BLACK, BLACK, BLACK, LAST_FADE_SPEED);
+                nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, BLACK, BLACK, BLACK, LAST_FADE_SPEED));
                 cpu.write32(game + END_COUNT, LAST_END_FRAMES);
-                sound::music_fade_out(cpu, LAST_MUSIC_FADE);
+                nested!(cpu, 0x0600_4f0c, sound::music_fade_out(cpu, LAST_MUSIC_FADE));
             } else {
-                screen::fade_to(cpu, BLACK, BLACK, BLACK, FADE_OUT_SPEED);
+                nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, BLACK, BLACK, BLACK, FADE_OUT_SPEED));
                 cpu.write32(game + END_COUNT, 30);
-                sound::music_fade_out(cpu, 20);
+                nested!(cpu, 0x0600_4f0c, sound::music_fade_out(cpu, 20));
             }
             set_step(cpu, game, 2);
         }
@@ -1106,8 +1107,8 @@ pub fn state_stage_end(cpu: &mut Cpu, game: u32) {
             let next = cpu.read8(NEXT_MODE);
             cpu.write8(GAME_MODE, next);
             if next.wrapping_sub(super::globals::mode::STG00) > 5 {
-                text::set_mode(cpu, 1);
-                clear_mode(cpu, game);
+                nested!(cpu, 0x0606_0894, text::set_mode(cpu, 1));
+                nested!(cpu, 0x0604_1010, clear_mode(cpu, game));
             }
             go_to(cpu, game, 1);
         }
@@ -1126,8 +1127,8 @@ fn first_stage_end(cpu: &mut Cpu, game: u32) {
             scores[p] = cpu.read32(play_data + super::globals::SCORE);
         }
     }
-    super::play::game_start(cpu);
-    clear_mode(cpu, game);
+    nested!(cpu, 0x0604_129c, super::play::game_start(cpu));
+    nested!(cpu, 0x0604_1010, clear_mode(cpu, game));
     for p in 0..2 {
         if alive[p] <= 0 {
             continue;

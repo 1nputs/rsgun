@@ -5,6 +5,7 @@
 //! keeps a sound manager: the background music, its fades, and the sound effects (se_set, the
 //! leftover source's name), each effect played as a sequence on one of the driver's controls.
 
+use super::nested;
 use super::{dma, files, Cpu};
 
 /// Sound RAM as the SH-2 sees it, and the command slots in it.
@@ -59,30 +60,30 @@ pub fn send_to(cpu: &mut Cpu, slot: u32, command: u32, len: u32) -> u32 {
 
 /// Puts the command in the first sequence slot the driver has done: 1, or 0 if none.
 pub fn send(cpu: &mut Cpu, command: u32, len: u32) -> u32 {
-    (1..SLOT_COUNT).any(|slot| send_to(cpu, slot, command, len) != 0) as u32
+    (1..SLOT_COUNT).any(|slot| nested!(cpu, 0x0600_4718, send_to(cpu, slot, command, len)) != 0) as u32
 }
 
 /// Whether the driver has done every command (1) or not (0).
 pub fn driver_idle(cpu: &mut Cpu) -> u32 {
-    (0..SLOT_COUNT).all(|slot| command_done(cpu, slot) != 0) as u32
+    (0..SLOT_COUNT).all(|slot| nested!(cpu, 0x0600_475c, command_done(cpu, slot)) != 0) as u32
 }
 
 fn wait_idle(cpu: &mut Cpu, at: u32) {
-    while driver_idle(cpu) == 0 {
+    while nested!(cpu, 0x0600_4780, driver_idle(cpu)) == 0 {
         cpu.wait(at, WAIT_PASS);
     }
 }
 
 /// The command built at COMMAND, sent to the settings slot (waiting for it).
 fn send_setting(cpu: &mut Cpu, len: u32, at: u32) {
-    while send_to(cpu, 0, COMMAND, len) == 0 {
+    while nested!(cpu, 0x0600_4718, send_to(cpu, 0, COMMAND, len)) == 0 {
         cpu.wait(at, WAIT_PASS);
     }
 }
 
 /// The command built at COMMAND, sent to a sequence slot (waiting for one).
 fn send_sequence(cpu: &mut Cpu, len: u32, at: u32) {
-    while send(cpu, COMMAND, len) == 0 {
+    while nested!(cpu, 0x0600_47bc, send(cpu, COMMAND, len)) == 0 {
         cpu.wait(at, WAIT_PASS);
     }
 }
@@ -124,16 +125,16 @@ pub fn mixer_param(cpu: &mut Cpu, which: u32, level: u32, pan: u32) {
 /// The driver set up: its flags, no total volume, effect bank and mixer 0, and the two mixer
 /// settings' pans `pan1` and `pan0` at full level.
 pub fn sound_setup(cpu: &mut Cpu, pan1: u32, pan0: u32) {
-    set_flags(cpu, 0x18);
-    total_volume(cpu, 0);
-    mixer(cpu, 0, 0);
-    mixer_param(cpu, 1, 7, pan1 as i8 as i32 as u32);
-    mixer_param(cpu, 0, 7, pan0 as i8 as i32 as u32);
+    nested!(cpu, 0x0600_4804, set_flags(cpu, 0x18));
+    nested!(cpu, 0x0600_48b8, total_volume(cpu, 0));
+    nested!(cpu, 0x0600_48ec, mixer(cpu, 0, 0));
+    nested!(cpu, 0x0600_4928, mixer_param(cpu, 1, 7, pan1 as i8 as i32 as u32));
+    nested!(cpu, 0x0600_4928, mixer_param(cpu, 0, 7, pan0 as i8 as i32 as u32));
 }
 
 /// The driver set up as the game starts it.
 pub fn sound_setup_default(cpu: &mut Cpu) {
-    sound_setup(cpu, -15i32 as u32, 15);
+    nested!(cpu, 0x0600_4974, sound_setup(cpu, -15i32 as u32, 15));
 }
 
 /// Starts song `song` on the driver's sequence control `control` at `priority`.
@@ -175,15 +176,15 @@ pub fn map_area(cpu: &mut Cpu, n: u32) -> u32 {
 /// Copies `size` bytes from `src` into sound data file `n`'s area, a piece a frame (dma.c's long
 /// copies).
 pub fn copy_to_area(cpu: &mut Cpu, n: u32, src: u32, size: u32) {
-    let area = map_area(cpu, n);
-    dma::divdma_set(cpu, src, SOUND_RAM.wrapping_add(area), size);
+    let area = nested!(cpu, 0x0600_4a64, map_area(cpu, n));
+    nested!(cpu, 0x0600_4530, dma::divdma_set(cpu, src, SOUND_RAM.wrapping_add(area), size));
 }
 
 /// Loads sound data file `n` into `buffer`, then into its area: its size.
 pub fn load_sound_file(cpu: &mut Cpu, n: u32, buffer: u32) -> u32 {
     let name = cpu.read32(SOUND_FILES + 8 * n);
-    let size = files::read_file(cpu, name, buffer);
-    let area = SOUND_RAM.wrapping_add(map_area(cpu, n));
+    let size = nested!(cpu, 0x0600_5f10, files::read_file(cpu, name, buffer));
+    let area = SOUND_RAM.wrapping_add(nested!(cpu, 0x0600_4a64, map_area(cpu, n)));
     for i in 0..(size as i32 / 4).max(0) as u32 {
         let w = cpu.read32(buffer + 4 * i);
         cpu.write32(area + 4 * i, w);
@@ -283,14 +284,14 @@ pub fn stop_effects(cpu: &mut Cpu) {
     if manager(cpu) == 0 {
         return;
     }
-    music_fade_out(cpu, 0);
+    nested!(cpu, 0x0600_4f0c, music_fade_out(cpu, 0));
     let kept = [SE_COIN, SE_CREDIT, SE_KETTEI].map(|se| SE_TABLE + SE * se);
     for control in 1..8 {
         let playing = seq(cpu, control);
         if kept.iter().any(|&e| cpu.read16(e) as i16 == playing) {
             continue;
         }
-        stop_seq(cpu, control as i8 as i32 as u32);
+        nested!(cpu, 0x0600_4c00, stop_seq(cpu, control as i8 as i32 as u32));
         clear_control(cpu, control);
     }
 }
@@ -387,7 +388,7 @@ pub fn se_set(cpu: &mut Cpu, se: u32) -> u32 {
         return -4i32 as u32;
     }
     // (with no table, se_control's -3 goes on as a control, as the SH-2 code had it)
-    let control = se_control(cpu, n as u32) as u8;
+    let control = nested!(cpu, 0x0600_4f3c, se_control(cpu, n as u32)) as u8;
     if control == 0 {
         return 0;
     }
@@ -395,7 +396,7 @@ pub fn se_set(cpu: &mut Cpu, se: u32) -> u32 {
     // the entry's sequence: the song in its high byte, the driver's priority in its low
     let sequence = cpu.read16(entry) as i16 as i32;
     let (song, driver_priority) = (sequence / 256, cpu.read8(entry + 1));
-    start_seq(cpu, control as i8 as i32 as u32, song as i8 as i32 as u32, driver_priority as u32);
+    nested!(cpu, 0x0600_4b88, start_seq(cpu, control as i8 as i32 as u32, song as i8 as i32 as u32, driver_priority as u32));
     let m = manager(cpu);
     let c = control as u32;
     let song = cpu.read16(entry);
@@ -427,7 +428,7 @@ pub fn se_stop(cpu: &mut Cpu, se: u32, control: u32) -> u32 {
     if seq(cpu, c) != cpu.read16(entry) as i16 {
         return 0;
     }
-    stop_seq(cpu, c);
+    nested!(cpu, 0x0600_4c00, stop_seq(cpu, c));
     let m = manager(cpu);
     cpu.write16(m + SEQ + 2 * c, 0xFFFF);
     cpu.write8(m + PRIORITY + c, 0);
@@ -440,7 +441,7 @@ pub fn se_stop(cpu: &mut Cpu, se: u32, control: u32) -> u32 {
 fn music_volume(cpu: &mut Cpu, m: u32, volume: u32) -> u8 {
     let music = cpu.read16(m + REQUESTED) as i16 as i32 as u32;
     let half = (cpu.read8(MUSIC_VOLUMES.wrapping_add(music)) >> 1) as u32;
-    (super::math::fixed_mul(cpu, half, volume).wrapping_add(half)) as u8
+    (nested!(cpu, 0x0600_6a58, super::math::fixed_mul(cpu, half, volume)).wrapping_add(half)) as u8
 }
 
 /// The sound manager's frame: the controls' counts, the music asked for started, the fade on.
@@ -470,7 +471,7 @@ pub fn sound_exec(cpu: &mut Cpu, m: u32) {
     }
     let requested = cpu.read16(m + REQUESTED);
     if cpu.read16(m + PLAYING) != requested {
-        start_seq(cpu, 0, 0, 0);
+        nested!(cpu, 0x0600_4b88, start_seq(cpu, 0, 0, 0));
         let requested = cpu.read16(m + REQUESTED);
         cpu.write16(m + PLAYING, requested);
     }
@@ -481,12 +482,12 @@ pub fn sound_exec(cpu: &mut Cpu, m: u32) {
     let frame = cpu.read16(m + FADE_FRAME) as i16;
     let sent = if len > frame {
         let (from, to) = (cpu.read32(m + FADE_FROM), cpu.read32(m + FADE_TO));
-        let t = super::math::fixed_div(cpu, frame as i32 as u32, len as i32 as u32);
-        let volume = from.wrapping_add(super::math::fixed_mul(cpu, to.wrapping_sub(from), t));
+        let t = nested!(cpu, 0x0600_6a8e, super::math::fixed_div(cpu, frame as i32 as u32, len as i32 as u32));
+        let volume = from.wrapping_add(nested!(cpu, 0x0600_6a58, super::math::fixed_mul(cpu, to.wrapping_sub(from), t)));
         cpu.write32(m + VOLUME, volume);
         let v = music_volume(cpu, m, volume);
         if cpu.read8(m + SENT) & 0xF8 != v & 0xF8 {
-            seq_volume(cpu, 0, v as u32, 0);
+            nested!(cpu, 0x0600_4bc4, seq_volume(cpu, 0, v as u32, 0));
         }
         cpu.write16(m + FADE_FRAME, (frame + 1) as u16);
         v
@@ -494,13 +495,13 @@ pub fn sound_exec(cpu: &mut Cpu, m: u32) {
         let to = cpu.read32(m + FADE_TO);
         cpu.write32(m + VOLUME, to);
         let v = if to == 0 {
-            stop_seq(cpu, 0);
+            nested!(cpu, 0x0600_4c00, stop_seq(cpu, 0));
             cpu.write16(m + REQUESTED, 0);
             cpu.write16(m + PLAYING, 0);
             0
         } else {
             let v = music_volume(cpu, m, to);
-            seq_volume(cpu, 0, v as u32, 0);
+            nested!(cpu, 0x0600_4bc4, seq_volume(cpu, 0, v as u32, 0));
             v
         };
         cpu.write16(m + FADE_LEN, 0xFFFF);
@@ -511,8 +512,8 @@ pub fn sound_exec(cpu: &mut Cpu, m: u32) {
 
 /// The sound manager made (object list 0): it, or 0 if the list had no room.
 pub fn sound_manager_set(cpu: &mut Cpu) -> u32 {
-    let blocks = super::objects::obj_size(cpu, MANAGER_SIZE);
-    let m = super::objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, SOUND_EXEC);
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, MANAGER_SIZE));
+    let m = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, SOUND_EXEC));
     cpu.write32(MANAGER, m);
     if m == 0 {
         return 0;
@@ -545,13 +546,13 @@ const SND_COMMAND_82: u32 = 0x0600_6e0c;
 
 /// Loads the sound driver and its map from the cart and starts it: no stage's effects yet.
 pub fn sound_load(cpu: &mut Cpu) {
-    let driver_size = files::read_file(cpu, DRIVER_FILE, DRIVER_BUFFER);
+    let driver_size = nested!(cpu, 0x0600_5f10, files::read_file(cpu, DRIVER_FILE, DRIVER_BUFFER));
     // the init's struct, at the bottom of the frame
     let init = cpu.stack();
     cpu.write32(init, DRIVER_BUFFER);
     cpu.write16(init + 4, driver_size as u16);
     let map = (driver_size << 1).wrapping_add(DRIVER_BUFFER);
-    let map_size = files::read_file(cpu, MAP_FILE, map);
+    let map_size = nested!(cpu, 0x0600_5f10, files::read_file(cpu, MAP_FILE, map));
     cpu.write32(init + 8, map);
     cpu.write16(init + 12, map_size as u16);
     cpu.call(SND_INIT, &[init]);
@@ -575,7 +576,7 @@ pub fn seq_status(cpu: &mut Cpu, buf: u32, control: u32) {
 /// Starts a load of sound data file `n` into `dst`: the load (or 0).
 pub fn load_sound_data(cpu: &mut Cpu, n: u32, dst: u32) -> u32 {
     let name = cpu.read32(SOUND_FILES + 8 * n);
-    let load = files::load_file(cpu, name);
-    files::start_load(cpu, load, dst);
+    let load = nested!(cpu, 0x0600_5e40, files::load_file(cpu, name));
+    nested!(cpu, 0x0600_603c, files::start_load(cpu, load, dst));
     load
 }

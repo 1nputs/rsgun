@@ -4,6 +4,7 @@
 //! with its own range of the pool. Each frame every object's `exec` runs, list by list (obj_exec).
 //! obj_set and obj_size are the leftover source's names.
 
+use super::nested;
 use super::Cpu;
 use super::math;
 
@@ -41,10 +42,10 @@ pub fn obj_size(cpu: &mut Cpu, bytes: u32) -> u32 {
     if bytes == 0 {
         return 1;
     }
-    let blocks = if math::remainder(cpu, bytes, BLOCK) == 0 {
-        math::quotient(cpu, bytes, BLOCK)
+    let blocks = if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, bytes, BLOCK)) == 0 {
+        nested!(cpu, 0x0600_6a78, math::quotient(cpu, bytes, BLOCK))
     } else {
-        math::quotient(cpu, bytes, BLOCK).wrapping_add(1)
+        nested!(cpu, 0x0600_6a78, math::quotient(cpu, bytes, BLOCK)).wrapping_add(1)
     };
     blocks as i8 as i32 as u32
 }
@@ -80,7 +81,7 @@ pub fn find_free(cpu: &mut Cpu, area: u32, blocks: u32) -> u32 {
 /// 0 if its range of the pool has no room.
 pub fn obj_set(cpu: &mut Cpu, area: u32, blocks: u32, exec: u32) -> u32 {
     let area = area as i16 as i32 as u32;
-    let obj = find_free(cpu, area, blocks);
+    let obj = nested!(cpu, 0x0600_6aac, find_free(cpu, area, blocks));
     if obj == 0 {
         return 0;
     }

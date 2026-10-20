@@ -56,8 +56,8 @@ pub fn angle_diff(_cpu: &mut Cpu, from: u32, to: u32) -> u32 {
 
 /// Makes the camera at the start (looking down from EYE_Z at 0, 0): it, or 0.
 pub fn camera_set(cpu: &mut Cpu) -> u32 {
-    let blocks = objects::obj_size(cpu, CAMERA_SIZE);
-    let cam = objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, CAMERA_EXEC);
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, CAMERA_SIZE));
+    let cam = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, CAMERA_EXEC));
     cpu.write32(CAMERA, cam);
     if cam != 0 {
         cpu.write16(cam + ROLL, 0);
@@ -90,7 +90,7 @@ fn ease(cpu: &mut Cpu, cam: u32, to: u32, field: u32) {
     if target == at {
         return;
     }
-    let step = math::clamp(cpu, (target.wrapping_sub(at) / 16) as u32, EASE_MOST) as i32;
+    let step = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, (target.wrapping_sub(at) / 16) as u32, EASE_MOST)) as i32;
     if step.abs() < EASE_SNAP {
         let target = cpu.read32(cam + to);
         cpu.write32(cam + field, target);
@@ -113,7 +113,7 @@ pub fn camera_exec(cpu: &mut Cpu, cam: u32) {
             return;
         }
         ENDED => {
-            objects::obj_free(cpu, cam);
+            nested!(cpu, 0x0600_579c, objects::obj_free(cpu, cam));
             cpu.write32(CAMERA, 0);
             return;
         }
@@ -127,9 +127,9 @@ pub fn camera_exec(cpu: &mut Cpu, cam: u32) {
         let d = nested!(cpu, ANGLE_DIFF, angle_diff(cpu, roll, to)) as i32;
         let step = if d.abs() > ROLL_NEAR {
             let d = nested!(cpu, ANGLE_DIFF, angle_diff(cpu, roll, to)) as i32 / 16;
-            math::clamp(cpu, d as u32, ROLL_EASE_MOST)
+            nested!(cpu, 0x0606_4f3c, math::clamp(cpu, d as u32, ROLL_EASE_MOST))
         } else {
-            math::clamp(cpu, d as u32, 1)
+            nested!(cpu, 0x0606_4f3c, math::clamp(cpu, d as u32, 1))
         } as i32;
         if step.abs() <= 0 {
             let to = cpu.read16(cam + ROLL_TO);

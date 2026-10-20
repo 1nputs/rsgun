@@ -4,6 +4,7 @@
 //! plane at the VBlank, where their place depends on the display's mode and on whether each player
 //! has a coin slot.
 
+use super::nested;
 use super::globals::{GAME_FLAGS, HELD};
 use super::{objects, screen, sound, system, Cpu};
 
@@ -76,7 +77,7 @@ fn tile(cpu: &mut Cpu, font: u32, index: u32) -> u16 {
 
 /// Puts character `c` at `at` (attributes `attr` or'd in): 1 (tile).
 pub fn put_char(cpu: &mut Cpu, c: u32, at: u32, attr: u32) -> u32 {
-    let i = char_index(cpu, c);
+    let i = nested!(cpu, 0x0606_0ff8, char_index(cpu, c));
     let t = tile(cpu, FONT, i);
     cpu.write16(at, attr as u16 | t);
     1
@@ -90,7 +91,7 @@ pub fn put_string(cpu: &mut Cpu, s: u32, at: u32, attr: u32) {
         if c == 0 {
             break;
         }
-        let i = char_index(cpu, c as u32);
+        let i = nested!(cpu, 0x0606_0ff8, char_index(cpu, c as u32));
         let t = tile(cpu, FONT, i);
         cpu.write16(at, t | attr as u16);
         s += 1;
@@ -102,18 +103,18 @@ pub fn put_string(cpu: &mut Cpu, s: u32, at: u32, attr: u32) {
 pub fn put_number(cpu: &mut Cpu, n: u32, at: u32) -> u32 {
     let n = n as i32;
     if n < 10 {
-        put_char(cpu, (b'0' as i32 + n) as u32, at, 0);
+        nested!(cpu, 0x0606_10e4, put_char(cpu, (b'0' as i32 + n) as u32, at, 0));
         return 1;
     }
     let tens = n / 10;
-    put_char(cpu, (b'0' as i32 + tens) as u32, at, 0);
-    put_char(cpu, (b'0' as i32 + n - 10 * tens) as u32, at + 2, 0);
+    nested!(cpu, 0x0606_10e4, put_char(cpu, (b'0' as i32 + tens) as u32, at, 0));
+    nested!(cpu, 0x0606_10e4, put_char(cpu, (b'0' as i32 + n - 10 * tens) as u32, at + 2, 0));
     2
 }
 
 /// Puts character `c` in the large font at `at`: the columns it took.
 pub fn put_large_char(cpu: &mut Cpu, c: u32, at: u32, attr: u32) -> u32 {
-    let i = char_index(cpu, c) as i32;
+    let i = nested!(cpu, 0x0606_0ff8, char_index(cpu, c)) as i32;
     let attr = attr as u16;
     let base = LARGE_FONT.wrapping_add((8 * i) as u32);
     if i < LARGE_NARROW {
@@ -136,6 +137,7 @@ pub fn put_large_string(cpu: &mut Cpu, s: u32, at: u32, attr: u32) {
     let (mut s, mut at) = (s, at);
     while cpu.read8(s) != 0 {
         let c = cpu.read8(s) as u32;
+        // inline: put_large_char's code is the SH-2 function's own here (it calls char_index)
         let columns = put_large_char(cpu, c, at, attr);
         at += 2 * columns;
         s += 1;
@@ -145,8 +147,8 @@ pub fn put_large_string(cpu: &mut Cpu, s: u32, at: u32, attr: u32) {
 /// The display's mode for the next VBlank, both players' lines hidden.
 pub fn set_mode(cpu: &mut Cpu, mode: u32) {
     cpu.write32(NEXT_MODE, mode);
-    hide_line(cpu, 0);
-    hide_line(cpu, 1);
+    nested!(cpu, 0x0606_0b34, hide_line(cpu, 0));
+    nested!(cpu, 0x0606_0b34, hide_line(cpu, 1));
 }
 
 /// Player `p`'s line and credit line hidden (cleared at the VBlank if they were shown).
@@ -168,7 +170,7 @@ pub fn show_message(cpu: &mut Cpu, p: u32, message: u32) {
     let line = MESSAGE_LINES + MESSAGE_LINE * p;
     for i in 0..LINE_TILES {
         let c = cpu.read8(text.wrapping_add(i)) as i8 as i32 as u32;
-        put_char(cpu, c, line + 2 * i, 0);
+        nested!(cpu, 0x0606_10e4, put_char(cpu, c, line + 2 * i, 0));
     }
     let p4 = 4 * p;
     cpu.write32(LINE + p4, line);
@@ -180,7 +182,7 @@ pub fn show_message(cpu: &mut Cpu, p: u32, message: u32) {
 
 /// Player `p`'s own buffers shown (line and credit line).
 pub fn show_buffers(cpu: &mut Cpu, p: u32) {
-    hide_line(cpu, p);
+    nested!(cpu, 0x0606_0b34, hide_line(cpu, p));
     if let Some(&(line, credit)) = BUFFERS.get(p as usize) {
         cpu.write32(LINE + 4 * p, line);
         cpu.write32(CREDIT_LINE + 4 * p, credit);
@@ -211,15 +213,15 @@ pub fn credits_hidden(cpu: &mut Cpu) -> u32 {
 
 /// The credit display made (object list 0): it, or 0.
 pub fn credits_set(cpu: &mut Cpu) -> u32 {
-    let blocks = objects::obj_size(cpu, CREDITS_SIZE);
-    objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, CREDITS_EXEC)
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, CREDITS_SIZE));
+    nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, CREDITS_EXEC))
 }
 
 /// Where player `p`'s line goes on the plane in the current mode (None: it has none: one coin slot
 /// for both, the second player).
 fn line_place(cpu: &mut Cpu, p: u32) -> Option<u32> {
     let mode = cpu.read32(MODE);
-    let shared = |cpu: &mut Cpu| system::coin_settings_shown(cpu) & 4 == 0;
+    let shared = |cpu: &mut Cpu| nested!(cpu, 0x0604_0f24, system::coin_settings_shown(cpu)) & 4 == 0;
     let either = |p: u32, first: u32, second: u32| if p != 0 { second } else { first };
     let at = match mode {
         0 => either(p, 0x25e7_e104, 0x25e7_e12e),
@@ -278,13 +280,13 @@ pub fn send_line(cpu: &mut Cpu, src: u32, dst: u32, tiles: u32) {
 pub fn clear_hidden_lines(cpu: &mut Cpu) {
     for p in 0..2 {
         if cpu.read32(CLEAR_LINE + 4 * p) != 0 {
-            clear_line(cpu, p);
+            nested!(cpu, 0x0606_06dc, clear_line(cpu, p));
             cpu.write32(CLEAR_LINE + 4 * p, 0);
         }
     }
     for p in 0..2 {
         if cpu.read32(CLEAR_CREDIT + 4 * p) != 0 {
-            clear_credit_line(cpu, p);
+            nested!(cpu, 0x0606_0790, clear_credit_line(cpu, p));
             cpu.write32(CLEAR_CREDIT + 4 * p, 0);
         }
     }
@@ -316,25 +318,25 @@ pub fn credit_text(cpu: &mut Cpu, d: u32, p: u32, credits: u32, coins: u32) {
     let mut at = d + SECTION + SECTION_SIZE * p;
     let mut width;
     if (credits as i32) < 2 {
-        put_char(cpu, b' ' as u32, at + 0xc, 0);
+        nested!(cpu, 0x0606_10e4, put_char(cpu, b' ' as u32, at + 0xc, 0));
         at += 0xe;
         width = 7;
     } else {
-        put_string(cpu, PLURAL, at + 0xc, 0);
+        nested!(cpu, 0x0606_11b8, put_string(cpu, PLURAL, at + 0xc, 0));
         at += 0x10;
         width = 8;
     }
-    let n = put_number(cpu, credits, at);
+    let n = nested!(cpu, 0x0606_0c58, put_number(cpu, credits, at));
     at += 2 * n;
     width += n;
     if coins != 0 {
-        put_char(cpu, b' ' as u32, at, 0);
+        nested!(cpu, 0x0606_10e4, put_char(cpu, b' ' as u32, at, 0));
         at += 2;
-        let m = put_number(cpu, coins, at);
+        let m = nested!(cpu, 0x0606_0c58, put_number(cpu, coins, at));
         at += 2 * m;
-        put_char(cpu, b'/' as u32, at, 0);
+        nested!(cpu, 0x0606_10e4, put_char(cpu, b'/' as u32, at, 0));
         let per = system::coins_per_credit(cpu, p);
-        let k = put_number(cpu, per, at + 2);
+        let k = nested!(cpu, 0x0606_0c58, put_number(cpu, per, at + 2));
         width += m + 2 + k;
     }
     cpu.write32(d + WIDTH + 4 * p, width);
@@ -343,8 +345,8 @@ pub fn credit_text(cpu: &mut Cpu, d: u32, p: u32, credits: u32, coins: u32) {
 /// Player `p`'s credits on the plane at `at` (the second player's to its left): made anew when
 /// they changed, sent when shown or not zero.
 pub fn draw_credits(cpu: &mut Cpu, d: u32, p: u32, at: u32) {
-    let coins = system::coins(cpu, p);
-    let credits = system::credits(cpu, p);
+    let coins = nested!(cpu, 0x0604_0fc0, system::coins(cpu, p));
+    let credits = nested!(cpu, 0x0604_0f74, system::credits(cpu, p));
     let e = d + 4 * p;
     if cpu.read32(e + DRAWN) != credits || cpu.read32(e + COINS_DRAWN) != coins {
         let width = cpu.read32(e + WIDTH);
@@ -352,14 +354,14 @@ pub fn draw_credits(cpu: &mut Cpu, d: u32, p: u32, at: u32) {
         for i in 0..(width as i32).max(0) as u32 {
             cpu.write16(dst + 2 * i, 0);
         }
-        credit_text(cpu, d, p, credits, coins);
+        nested!(cpu, 0x0606_0cd8, credit_text(cpu, d, p, credits, coins));
         cpu.write32(e + DRAWN, credits);
         cpu.write32(e + COINS_DRAWN, coins);
     }
     if cpu.read8(d + SHOWN) != 0 || credits != 0 || coins != 0 {
         let width = cpu.read32(e + WIDTH);
         let dst = if p != 0 { at.wrapping_sub(2 * width) } else { at };
-        send_line(cpu, d + SECTION + SECTION_SIZE * p, dst, width);
+        nested!(cpu, 0x0606_07c4, send_line(cpu, d + SECTION + SECTION_SIZE * p, dst, width));
     }
 }
 
@@ -384,7 +386,7 @@ pub fn credits_exec(cpu: &mut Cpu, d: u32) {
                 let at = d + SECTION + SECTION_SIZE * p;
                 for i in 0..TEMPLATE_LEN {
                     let c = cpu.read8(TEMPLATE + i) as i8 as i32 as u32;
-                    put_char(cpu, c, at + 2 * i, 0);
+                    nested!(cpu, 0x0606_10e4, put_char(cpu, c, at + 2 * i, 0));
                 }
                 cpu.write32(d + WIDTH + 4 * p, 0);
                 cpu.write32(d + DRAWN + 4 * p, u32::MAX);
@@ -399,7 +401,7 @@ pub fn credits_exec(cpu: &mut Cpu, d: u32) {
             return;
         }
         b's' => {
-            objects::obj_free(cpu, d);
+            nested!(cpu, 0x0600_579c, objects::obj_free(cpu, d));
             return;
         }
         _ => return,
@@ -409,11 +411,11 @@ pub fn credits_exec(cpu: &mut Cpu, d: u32) {
         cpu.write32(CREDITS, 0);
         return;
     }
-    if system::coin_settings_shown(cpu) & 4 == 0 {
-        draw_credits(cpu, d, 0, CREDITS_SHARED_AT);
+    if nested!(cpu, 0x0604_0f24, system::coin_settings_shown(cpu)) & 4 == 0 {
+        nested!(cpu, 0x0606_0dac, draw_credits(cpu, d, 0, CREDITS_SHARED_AT));
     } else {
-        draw_credits(cpu, d, 0, CREDITS_AT[0]);
-        draw_credits(cpu, d, 1, CREDITS_AT[1]);
+        nested!(cpu, 0x0606_0dac, draw_credits(cpu, d, 0, CREDITS_AT[0]));
+        nested!(cpu, 0x0606_0dac, draw_credits(cpu, d, 1, CREDITS_AT[1]));
     }
 }
 
@@ -430,26 +432,26 @@ pub fn send_lines(cpu: &mut Cpu) {
             let line = cpu.read32(LINE + 4 * p as u32);
             if line != 0 {
                 let (dst, tiles) = if line == BUFFERS[p].0 { (MODE0_LINE[p].0, OWN_TILES) } else { (MODE0_LINE[p].1, LINE_TILES) };
-                send_line(cpu, line, dst, tiles);
+                nested!(cpu, 0x0606_07c4, send_line(cpu, line, dst, tiles));
             }
             let credit = cpu.read32(CREDIT_LINE + 4 * p as u32);
             if credit != 0 {
-                send_line(cpu, credit, MODE0_CREDIT[p], OWN_TILES);
+                nested!(cpu, 0x0606_07c4, send_line(cpu, credit, MODE0_CREDIT[p], OWN_TILES));
             }
         }
         return;
     }
     let (shared_at, each_at) = if cpu.read32(MODE) == 1 { (0x25e7_ea18, [0x25e7_ea04, 0x25e7_ea2e]) } else { (0x25e7_e698, [0x25e7_e684, 0x25e7_e6ae]) };
-    if system::coin_settings_shown(cpu) & 4 == 0 {
+    if nested!(cpu, 0x0604_0f24, system::coin_settings_shown(cpu)) & 4 == 0 {
         let line = cpu.read32(LINE);
         if line != 0 {
-            send_line(cpu, line, shared_at, LINE_TILES);
+            nested!(cpu, 0x0606_07c4, send_line(cpu, line, shared_at, LINE_TILES));
         }
     } else {
         for p in 0..2 {
             let line = cpu.read32(LINE + 4 * p);
             if line != 0 {
-                send_line(cpu, line, each_at[p as usize], LINE_TILES);
+                nested!(cpu, 0x0606_07c4, send_line(cpu, line, each_at[p as usize], LINE_TILES));
             }
         }
     }
@@ -485,8 +487,8 @@ const SE_CLICK: u32 = 0x35;
 
 /// Makes a typewriter for string `s` at `at`: it, or 0.
 pub fn typewriter_set(cpu: &mut Cpu, s: u32, at: u32, flags: u32, blink: u32) -> u32 {
-    let blocks = objects::obj_size(cpu, TYPE_SIZE);
-    let obj = objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, TYPE_EXEC);
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, TYPE_SIZE));
+    let obj = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, TYPE_EXEC));
     if obj != 0 {
         cpu.write32(obj + TYPE_STRING, s);
         cpu.write32(obj + TYPE_AT, at);
@@ -499,9 +501,9 @@ pub fn typewriter_set(cpu: &mut Cpu, s: u32, at: u32, flags: u32, blink: u32) ->
 /// A character put by the typewriter's font: the columns it took.
 fn type_char(cpu: &mut Cpu, large: bool, c: u32, at: u32, attr: u32) -> u32 {
     if large {
-        put_large_char(cpu, c, at, attr)
+        nested!(cpu, 0x0606_111c, put_large_char(cpu, c, at, attr))
     } else {
-        put_char(cpu, c, at, attr)
+        nested!(cpu, 0x0606_10e4, put_char(cpu, c, at, attr))
     }
 }
 
@@ -525,9 +527,9 @@ pub fn typewriter_exec(cpu: &mut Cpu, obj: u32) {
         }
         ENDED => {
             if cpu.read32(obj + TYPE_FLAGS) & TYPE_CLEARS != 0 {
-                screen::request_clear_text_plane(cpu);
+                nested!(cpu, 0x0605_fde8, screen::request_clear_text_plane(cpu));
             }
-            objects::obj_free(cpu, obj);
+            nested!(cpu, 0x0600_579c, objects::obj_free(cpu, obj));
             return;
         }
         _ => return,
@@ -558,7 +560,7 @@ pub fn typewriter_exec(cpu: &mut Cpu, obj: u32) {
             cpu.write32(obj + TYPE_AT, at);
             type_char(cpu, large, CURSOR, at, 0);
             if cpu.read32(obj + TYPE_FLAGS) & TYPE_QUIET == 0 {
-                sound::se_set(cpu, SE_CLICK);
+                nested!(cpu, 0x0600_50d4, sound::se_set(cpu, SE_CLICK));
             }
             let i = cpu.read32(obj + TYPE_INDEX);
             cpu.write32(obj + TYPE_INDEX, i.wrapping_add(1));
@@ -606,7 +608,7 @@ pub fn message_exec(cpu: &mut Cpu, obj: u32) {
             return;
         }
         ENDED => {
-            objects::obj_free(cpu, obj);
+            nested!(cpu, 0x0600_579c, objects::obj_free(cpu, obj));
             return;
         }
         _ => return,
@@ -624,12 +626,12 @@ pub fn message_exec(cpu: &mut Cpu, obj: u32) {
     let lines = cpu.read32(obj + MESSAGE_LINES_AT);
     let s = cpu.read32(lines + 4 * line);
     if line < 3 {
-        let t = typewriter_set(cpu, s, MESSAGE_PLACES[line as usize], TYPE_LARGE, 0);
+        let t = nested!(cpu, 0x0606_14b0, typewriter_set(cpu, s, MESSAGE_PLACES[line as usize], TYPE_LARGE, 0));
         cpu.write32(obj + TYPEWRITER, t);
         let n = cpu.read8(obj + LINE_TYPED);
         cpu.write8(obj + LINE_TYPED, n.wrapping_add(1));
     } else {
-        let t = typewriter_set(cpu, s, MESSAGE_PLACES[3], TYPE_CLEARS, LAST_BLINK);
+        let t = nested!(cpu, 0x0606_14b0, typewriter_set(cpu, s, MESSAGE_PLACES[3], TYPE_CLEARS, LAST_BLINK));
         cpu.write32(obj + TYPEWRITER, t);
         cpu.write8(obj + OBJ_MODE, ENDING);
     }
@@ -652,5 +654,5 @@ pub fn stop_text_objects(cpu: &mut Cpu) {
         }
         obj = cpu.read32(obj + objects::NEXT);
     }
-    screen::request_clear_text_plane(cpu);
+    nested!(cpu, 0x0605_fde8, screen::request_clear_text_plane(cpu));
 }

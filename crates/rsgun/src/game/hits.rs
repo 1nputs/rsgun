@@ -74,7 +74,7 @@ const ENDED: u8 = 0x73;
 /// Whether `obj` is in `of`'s hit set (the set's bit, nonzero, or 0).
 pub fn in_hit_set(cpu: &mut Cpu, of: u32, obj: u32) -> u32 {
     let n = cpu.read8(obj + NUMBER) as i8 as i32;
-    let (bit, word) = if n > 31 { (system::shift_left(cpu, 1, (n - 32) as u32), of + HIT_SET + 4) } else { (system::shift_left(cpu, 1, n as u32), of + HIT_SET) };
+    let (bit, word) = if n > 31 { (nested!(cpu, 0x0600_69d8, system::shift_left(cpu, 1, (n - 32) as u32)), of + HIT_SET + 4) } else { (nested!(cpu, 0x0600_69d8, system::shift_left(cpu, 1, n as u32)), of + HIT_SET) };
     cpu.read32(word) & bit
 }
 
@@ -211,7 +211,7 @@ pub fn hits_exec(cpu: &mut Cpu, hits: u32) {
     if cpu.read8(hits + OBJ_MODE) == ENDING {
         cpu.write8(hits + OBJ_MODE, ENDED);
         cpu.write32(HITS, 0);
-        objects::obj_free(cpu, hits);
+        nested!(cpu, 0x0600_579c, objects::obj_free(cpu, hits));
         return;
     }
     const ANY: i32 = i32::MIN;
@@ -378,10 +378,10 @@ pub fn hit_once(cpu: &mut Cpu, a: u32, b: u32) {
         return;
     }
     let n = cpu.read8(b + NUMBER) as i8 as i32;
-    let (bit, word) = if n > 31 { (system::shift_left(cpu, 1, (n - 32) as u32), a + HIT_SET + 4) } else { (system::shift_left(cpu, 1, n as u32), a + HIT_SET) };
+    let (bit, word) = if n > 31 { (nested!(cpu, 0x0600_69d8, system::shift_left(cpu, 1, (n - 32) as u32)), a + HIT_SET + 4) } else { (nested!(cpu, 0x0600_69d8, system::shift_left(cpu, 1, n as u32)), a + HIT_SET) };
     let set = cpu.read32(word);
     cpu.write32(word, set ^ bit);
-    // hit's own code, inline in the SH-2 function (not a call)
+    // inline: hit's code is the SH-2 function's own here, not a call
     hit(cpu, a, b);
 }
 
@@ -401,7 +401,7 @@ pub fn damage(cpu: &mut Cpu, obj: u32, power: u32) -> u32 {
     }
     let mut p = power as i16 as i32;
     if cpu.read32(PLAYERS) != 0 && cpu.read32(PLAYERS + 4) != 0 {
-        p = (math::fixed_mul(cpu, p as u32, TWO_PLAYERS_DAMAGE) as i32 + 1) as i16 as i32;
+        p = (nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, p as u32, TWO_PLAYERS_DAMAGE)) as i32 + 1) as i16 as i32;
     }
     if p != 0 {
         let life = cpu.read32(obj + LIFE) as i32;
@@ -646,20 +646,20 @@ fn chain_kill(cpu: &mut Cpu, p: i32, target: u32, points: u32, score: u32) -> u3
     }
     let chain_score = cpu.read32(HITS) + 2 * p + CHAIN_SCORE;
     let sum = (cpu.read16(chain_score) as i16 as i32).wrapping_add(points as i32);
-    let capped = math::clamp(cpu, sum as u32, CHAIN_SCORE_CAP);
+    let capped = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, sum as u32, CHAIN_SCORE_CAP));
     let chain_score = cpu.read32(HITS) + 2 * p + CHAIN_SCORE;
     cpu.write16(chain_score, capped as u16);
     let hits = cpu.read32(HITS);
     let n = cpu.read16(hits + 2 * p + CHAIN) as u32;
-    if math::remainder(cpu, n, 3) != 0 {
+    if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, n, 3)) != 0 {
         return points;
     }
     let hits = cpu.read32(HITS);
     let n = cpu.read16(hits + 2 * p + CHAIN) as u32;
-    let thirds = math::quotient(cpu, n, 3) as i32;
+    let thirds = nested!(cpu, 0x0600_6a78, math::quotient(cpu, n, 3)) as i32;
     let hits = cpu.read32(HITS);
     let chain_score = cpu.read16(hits + 2 * p + CHAIN_SCORE) as i16 as i32;
-    let bonus = math::clamp(cpu, thirds.wrapping_mul(chain_score) as u32, CHAIN_BONUS_CAP);
+    let bonus = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, thirds.wrapping_mul(chain_score) as u32, CHAIN_BONUS_CAP));
     let s = cpu.read32(SCORE + 200 * p);
     cpu.write32(SCORE + 200 * p, s.wrapping_add(bonus));
     points = points.wrapping_add(bonus);
@@ -768,9 +768,9 @@ pub fn sparks(cpu: &mut Cpu, a: u32, b: u32, a_box: u32, b_box: u32) {
     cpu.write32(s + FX_SCALE + 4, 0x1_0000);
     cpu.write32(s + FX_SCALE, 0x1_0000);
     cpu.write32(s + FX_KIND, SPARK_KIND);
-    let angle = math::random(cpu, 0);
+    let angle = nested!(cpu, 0x0604_5d90, math::random(cpu, 0));
     cpu.write16(s + FX_ANGLE, angle as u16);
-    let frames = math::random(cpu, 5) as u16 + SPARK_FRAMES;
+    let frames = nested!(cpu, 0x0604_5d90, math::random(cpu, 5)) as u16 + SPARK_FRAMES;
     cpu.write16(s + FX_FRAMES, frames);
     cpu.write8(s + FX_26, 0);
     let ch = cpu.read16(CHAR_BASE);
@@ -786,21 +786,21 @@ pub fn sparks(cpu: &mut Cpu, a: u32, b: u32, a_box: u32, b_box: u32) {
     for k in 0..3 {
         cpu.write16(spark + 0x70 + 2 * k, 0);
     }
-    let r = math::random(cpu, 4);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 4));
     cpu.write16(spark + 0x76, r as u16);
-    let r = math::random(cpu, 0x2000);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x2000));
     cpu.write16(spark + 0x42, r as u16);
     cpu.write32(s + FX_X, 0);
-    let r = math::random(cpu, 0x2_0000);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x2_0000));
     cpu.write32(s + FX_Y, r.wrapping_sub(0x3_0000));
     cpu.write32(s + FX_KIND, 0);
     let push_y = cpu.read32(b + PUSH + 4);
     let push_x = cpu.read32(b + PUSH);
     let away = cpu.call(SL_ATAN, &[push_x, push_y]);
-    let r = math::random(cpu, 0x800);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x800));
     let mut angle = (r as u16).wrapping_add(0x4000).wrapping_add(away as u16);
     cpu.write16(s + FX_ANGLE, angle);
-    let side = math::random(cpu, 0) as i32;
+    let side = nested!(cpu, 0x0604_5d90, math::random(cpu, 0)) as i32;
     angle = cpu.read16(s + FX_ANGLE).wrapping_add(if side > 0 { 0x4800 } else { 0xb800 });
     cpu.write16(s + FX_ANGLE, angle);
     cpu.call(SL_ROTATE, &[s]);
@@ -834,7 +834,7 @@ pub fn absorb(cpu: &mut Cpu, a: u32, b: u32) {
         let player = cpu.read32(PLAYERS.wrapping_add((4 * n) as u32));
         if player != 0 {
             let g = cpu.read32(player + GAUGE).wrapping_add(ABSORB_CHARGE);
-            let g = math::clamp(cpu, g, GAUGE_MOST);
+            let g = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, g, GAUGE_MOST));
             cpu.write32(player + GAUGE, g);
         }
     }
@@ -902,8 +902,8 @@ const HITS_AREA: u32 = 4;
 
 /// Makes the hit manager (object list 4), its lists empty: it, or 0.
 pub fn hits_set(cpu: &mut Cpu) -> u32 {
-    let blocks = objects::obj_size(cpu, HITS_SIZE);
-    let hits = objects::obj_set(cpu, HITS_AREA, blocks as i8 as i32 as u32, HITS_EXEC);
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, HITS_SIZE));
+    let hits = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, HITS_AREA, blocks as i8 as i32 as u32, HITS_EXEC));
     cpu.write32(HITS, hits);
     if hits != 0 {
         nested!(cpu, HITS_RESET, hits_reset(cpu));
@@ -1034,7 +1034,7 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
         for (k, scale) in [(6, OBJ_SCALE_X), (7, OBJ_SCALE_Y)] {
             let half = cpu.read8(desc + k) as u32;
             let s = cpu.read32(obj + scale);
-            let v = (math::fixed_mul(cpu, half, s) as i32).wrapping_abs();
+            let v = (nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, half, s)) as i32).wrapping_abs();
             let e = entry(cpu);
             cpu.write16(e + if k == 6 { HALF_W } else { HALF_H }, v as u16);
         }
@@ -1101,4 +1101,15 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
     let flags = cpu.read32(obj + FLAGS);
     cpu.write32(obj + FLAGS, flags & !UNREGISTERED);
     1
+}
+
+/// An actor's hit fields set up (from +0x3c, `h`): no boxes, a full hit set (hits every numbered
+/// object), its type 4, no hit flags, a damage of 100.
+pub fn hit_init(cpu: &mut Cpu, h: u32) {
+    cpu.write32(h, 0);
+    cpu.write32(h + 0x10, u32::MAX);
+    cpu.write32(h + 0xc, u32::MAX);
+    cpu.write8(h + 0x19, 4);
+    cpu.write16(h + 0x1a, 0);
+    cpu.write16(h + 0x1c, 100);
 }

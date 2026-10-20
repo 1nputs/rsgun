@@ -53,10 +53,10 @@ fn length_of(cpu: &mut Cpu, dx: u32, dy: u32) -> u32 {
     let (x, y) = (dx as i32, dy as i32);
     let r = if x.wrapping_abs() > y.wrapping_abs() {
         let s = cpu.call(SL_SIN, &[a]);
-        math::fixed_div(cpu, dx, s)
+        nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, dx, s))
     } else {
         let c = cpu.call(SL_COS, &[a]);
-        math::fixed_div(cpu, dy, c)
+        nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, dy, c))
     } as i32;
     r.wrapping_abs() as u32
 }

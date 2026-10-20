@@ -1,6 +1,7 @@
 //! The VBlank callbacks: up to four functions the game has SGL call at each VBlank (the first, the
 //! VBlank count).
 
+use super::nested;
 use super::Cpu;
 
 /// How many are set, and the list.
@@ -18,7 +19,7 @@ const COUNT_VBLANK: u32 = 0x0600_4378;
 pub fn init_vblank(cpu: &mut Cpu) {
     cpu.write32(COUNT, 0);
     cpu.call(SL_INT_FUNCTION, &[RUN_CALLBACKS]);
-    add_callback(cpu, COUNT_VBLANK);
+    nested!(cpu, 0x0600_43d4, add_callback(cpu, COUNT_VBLANK));
 }
 
 /// At each VBlank: each callback, in the order they were set.

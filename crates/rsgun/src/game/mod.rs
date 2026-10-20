@@ -113,15 +113,18 @@ impl Cpu<'_> {
 
     /// Runs `f` (a rewrite called by another) as the SH-2 function at `entry` runs when called:
     /// its prologue's pushes made and its frame below them, as [`Prologue`] reads them from its
-    /// code (through `prologue`, a cache for the call site; see [`nested!`]).
+    /// code (through `prologue`, a cache for the call site; see [`nested!`]), r14 its frame
+    /// pointer meanwhile.
     pub fn nested<R>(&mut self, prologue: &std::sync::OnceLock<Prologue>, entry: u32, f: impl FnOnce(&mut Cpu) -> R) -> R {
         let p = prologue.get_or_init(|| Prologue::read(&mut *self.bus, entry));
-        let (sp, pr) = (self.sh2.r[15], self.sh2.pr);
+        let (sp, pr, fp) = (self.sh2.r[15], self.sh2.pr, self.sh2.r[14]);
         self.sh2.pr = RETURN;
         self.sh2.r[15] = p.enter(self.sh2, &mut *self.bus);
+        self.sh2.r[14] = self.sh2.r[15];
         self.sh2.pr = pr;
         let r = f(self);
         self.sh2.r[15] = sp;
+        self.sh2.r[14] = fp;
         r
     }
 
@@ -137,8 +140,9 @@ const RETURN: u32 = 0xFFFF_FFF1;
 
 /// A function's prologue as its SH-2 code has it: the registers it pushes, in order (PR_PUSH for
 /// the procedure register), and the room it makes below them for its locals. A rewrite makes the
-/// same pushes, with the registers it is called with, and takes the same frame: the stack then
-/// holds what the SH-2 code's would (the game reads stale stack: a struct field it left unset gets
+/// same pushes, with the registers it is called with, and takes the same frame, r14 its frame
+/// pointer while it runs (the game's code always keeps its frame pointer there, so the r14 its
+/// callees push is the SH-2 code's): the stack then holds what the SH-2 code's would (the game reads stale stack: a struct field it left unset gets
 /// what a call before left there), and a struct a rewrite hands a callee on the stack is where the
 /// SH-2 code's was.
 pub struct Prologue {
@@ -236,9 +240,12 @@ macro_rules! rewrites {
                     $($( #[allow(unused_assignments)] let $sarg = { let v = bus.read32(at); at = at.wrapping_add(4); v }; )+)?
                     let prologue = PROLOGUE.get_or_init(|| Prologue::read(&mut *bus, $entry));
                     sh2.r[15] = prologue.enter(sh2, &mut *bus);
+                    let fp = sh2.r[14];
+                    sh2.r[14] = sh2.r[15];
                     let result = $f(&mut Cpu { sh2: &mut *sh2, bus }, $($arg),* $(, $($sarg),+)?);
                     rewrites!(@result sh2, result, $ret);
                     sh2.r[15] = sp;
+                    sh2.r[14] = fp;
                     sh2.pc = ret;
                 },
                 stringify!($f),
@@ -433,6 +440,11 @@ pub fn register(n: &mut Natives) {
         0x0604_dd50 => effects::actor_init[actor] -> (),
         0x0604_6530 => effects::link_init[link, to] -> (),
         0x0604_e1cc => effects::effect_set[fx] -> u32,
+        0x0604_6558 => effects::link_step[s, link] -> (),
+        0x0604_6284 => hits::hit_init[h] -> (),
+        0x0604_62ac => actors::actor_setup[actor] -> (),
+        0x0604_816c => actors::player_set[st] -> u32,
+        0x0604_deb4 => effects::effect_exec[obj] -> (),
         0x0604_d780 => actors::actor_exec[actor] -> (),
         0x0604_3d38 => hits::hits_exec[hits] -> (),
         0x0604_5d78 => math::random_seed[seed] -> (),

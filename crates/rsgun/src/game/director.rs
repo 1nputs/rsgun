@@ -5,6 +5,7 @@
 //! (through the BIOS, with their sounds). A `SYS_OBJ` (dma.c's types): its `SYS_WK` holds the
 //! point enemies aim at when no player is there.
 
+use super::nested;
 use super::globals::{ELAPSED, GAME_FLAGS, GAME_FRAMES, HELD, LAST_VBLANKS, LOOPS, VBLANKS};
 use super::{objects, sound, system, Cpu};
 
@@ -82,8 +83,8 @@ const SE_CREDIT: u32 = 49;
 
 /// game_set: the director made (object list 0), the game's counts from zero: it, or 0.
 pub fn game_set(cpu: &mut Cpu) -> u32 {
-    let blocks = objects::obj_size(cpu, GAME_SIZE);
-    let game = objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, GAME_EXEC);
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, GAME_SIZE));
+    let game = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, GAME_EXEC));
     cpu.write32(GAME, game);
     if game == 0 {
         return 0;
@@ -121,7 +122,7 @@ pub fn game_exec(cpu: &mut Cpu, game: u32) {
         TO_STOP => cpu.write8(game + MODE, STOPPING),
         STOPPING => {
             cpu.write32(GAME, 0);
-            objects::obj_free(cpu, game);
+            nested!(cpu, 0x0600_579c, objects::obj_free(cpu, game));
         }
         _ => {}
     }
@@ -197,7 +198,7 @@ fn coins(cpu: &mut Cpu, game: u32) {
     let pending = cpu.read8(game + COIN_SOUND);
     if pending != 0 {
         let se = if pending == 1 { SE_COIN } else { SE_CREDIT };
-        if sound::se_set(cpu, se) as i8 != 0 {
+        if nested!(cpu, 0x0600_50d4, sound::se_set(cpu, se)) as i8 != 0 {
             cpu.write8(game + COIN_SOUND, 0);
         }
     }
