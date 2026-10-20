@@ -254,6 +254,120 @@ pub fn drift(cpu: &mut Cpu, actor: u32) {
     }
 }
 
+/// A drifting effect's description (as its makers fill it, on their stack): its position (x, y,
+/// z), its scales (x, y), its speed and direction (a word), its colour (a word: the low 13 bits
+/// from the first character's; bit 15 a sprite attribute bit (0x100 of the flags), bit 13 flipped),
+/// its animation script.
+pub const E_POSITION: u32 = 0x00;
+pub const E_SCALES: u32 = 0x0c;
+pub const E_SPEED: u32 = 0x14;
+pub const E_ANGLE: u32 = 0x18;
+pub const E_COLOUR: u32 = 0x20;
+pub const E_SCRIPT: u32 = 0x3c;
+const E_ATTR: u16 = 0x8000;
+const E_UNCULLED: u16 = 0x4000;
+const E_FLIPPED: u16 = 0x2000;
+const E_COLOUR_BITS: u16 = 0x1fff;
+/// The drifting effect: its size, list (3), flags (never culled; an attribute bit), and lift.
+const DRIFT_SIZE: u32 = 100;
+const DRIFT_LIST: u32 = 3;
+const DRIFT_FLAGS: u32 = 0x2000_1000;
+const DRIFT_ATTR: u32 = 0x100;
+const DRIFT_UNCULLED: u32 = 0x2000_0000;
+const DRIFT_FLIP: u32 = 0x10;
+const DRIFT_LIFT: u8 = 0xf8;
+const DRIFT: u32 = 0x0605_73f0;
+const PLAIN_EXEC: u32 = 0x0604_dcb4;
+/// The sprite's fields from the actor: its kind, angle, scales.
+const SPRITE_KIND: u32 = 0x2e;
+const ANGLE: u32 = 0x30;
+const SCALES: u32 = 0x20;
+const LIFT: u32 = 0x33;
+/// SGL's sine and cosine.
+const SL_SIN: u32 = 0x0606_9a0c;
+const SL_COS: u32 = 0x0606_9a30;
+
+/// Makes a drifting effect from the description at `e`: it moves off in its direction, slowed by
+/// a 64th of its speed a frame, while its animation runs. The effect, or 0 when there is no room.
+pub fn drift_effect(cpu: &mut Cpu, e: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, DRIFT_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, DRIFT_LIST, blocks, PLAIN_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    cpu.write32(o + BEHAVIOUR, DRIFT);
+    cpu.write32(o + FLAGS, DRIFT_FLAGS);
+    // the SH-2 code keeps the colour's address in its frame
+    let frame = cpu.stack();
+    cpu.write32(frame, e + E_COLOUR);
+    if cpu.read16(e + E_COLOUR) & E_ATTR != 0 {
+        cpu.write32(o + FLAGS, DRIFT_FLAGS | DRIFT_ATTR);
+    }
+    if cpu.read16(e + E_COLOUR) & E_UNCULLED != 0 {
+        let f = cpu.read32(o + FLAGS) | DRIFT_UNCULLED;
+        cpu.write32(o + FLAGS, f);
+    }
+    if cpu.read16(e + E_COLOUR) & E_FLIPPED != 0 {
+        let f = cpu.read32(o + FLAGS) | DRIFT_FLIP;
+        cpu.write32(o + FLAGS, f);
+    }
+    for k in 0..3 {
+        let v = cpu.read32(e + E_POSITION + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    let angle = cpu.read16(e + E_ANGLE);
+    cpu.write16(o + ANGLE, angle);
+    let angle = angle as i16 as i32 as u32;
+    let speed = cpu.read32(e + E_SPEED);
+    let s = cpu.call(SL_SIN, &[angle]);
+    let dx = nested!(cpu, 0x0600_6a58, super::math::fixed_mul(cpu, s, speed));
+    cpu.write32(o + SPEED, dx);
+    let speed = cpu.read32(e + E_SPEED);
+    let c = cpu.call(SL_COS, &[angle]);
+    let dy = nested!(cpu, 0x0600_6a58, super::math::fixed_mul(cpu, c.wrapping_neg(), speed));
+    cpu.write32(o + SPEED + 4, dy);
+    for k in 0..2 {
+        let v = (cpu.read32(o + SPEED + 4 * k) as i32).wrapping_neg();
+        cpu.write32(o + ACCEL + 4 * k, (v / 64) as u32);
+    }
+    let script = cpu.read32(e + E_SCRIPT);
+    cpu.write32(o + SCRIPT, script);
+    let first = cpu.read8(script);
+    cpu.write8(o + SPRITE_FRAME, first);
+    let time = cpu.read8(script + 1);
+    cpu.write8(o + SHOWN_LEFT, time);
+    cpu.write32(o + SCRIPT, script + 2);
+    cpu.write8(o + SPRITE_KIND, 0);
+    let colour = (cpu.read16(e + E_COLOUR) & E_COLOUR_BITS).wrapping_add(cpu.read16(CHAR_BASE));
+    cpu.write16(o + COLOUR, colour);
+    for k in 0..2 {
+        let v = cpu.read32(e + E_SCALES + 4 * k);
+        cpu.write32(o + SCALES + 4 * k, v);
+    }
+    cpu.write8(o + LIFT, DRIFT_LIFT);
+    o
+}
+
+/// The enemies' own fields (from +0x6c to the end of their 0xbc bytes) cleared.
+pub fn enemy_clear(cpu: &mut Cpu, enemy: u32) {
+    // the SH-2 code keeps the first fields' offsets in its frame
+    let frame = cpu.stack();
+    for (i, offset) in [0x80, 0x84, 0x88, 0x89, 0x8a, 0x8c, 0x8e, 0x90, 0x92, 0x94, 0x96, 0x98, 0x9a, 0x9c].into_iter().enumerate() {
+        cpu.write32(frame + 4 * i as u32, offset);
+    }
+    cpu.write8(enemy + 0x7c, 0);
+    for offset in [0x6c, 0x70, 0x74, 0x78, 0x80, 0x84, 0xac, 0xb0, 0xb4, 0xb8] {
+        cpu.write32(enemy + offset, 0);
+    }
+    for offset in [0x88, 0x89] {
+        cpu.write8(enemy + offset, 0);
+    }
+    for offset in (0x8a..=0xa8).step_by(2).chain([0x7e]) {
+        cpu.write16(enemy + offset, 0);
+    }
+}
+
 /// An actor set up: its sprite, its hit fields, the word at +0x6c cleared.
 pub fn actor_setup(cpu: &mut Cpu, actor: u32) {
     nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, actor + SPRITE));

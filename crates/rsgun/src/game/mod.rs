@@ -12,6 +12,7 @@ mod actors;
 mod aim;
 mod backup;
 mod bg;
+mod bullets;
 mod camera;
 mod clib;
 mod director;
@@ -393,6 +394,15 @@ pub fn register(n: &mut Natives) {
         0x0605_f794 => bg::draw_models[n, list] -> (),
         0x0605_f860 => bg::edge_line[angle] -> u32,
         0x0605_f8c4 => bg::edge_window[table, y, angle] -> (),
+        0x0605_3b10 => bullets::bullet_ends[b, back] -> u32,
+        0x0605_3bfc => bullets::bullet_frame[b] -> (),
+        0x0605_3ccc => bullets::bullet_move[b] -> (),
+        0x0605_3cfc => bullets::bullet_swirl[b] -> (),
+        0x0605_3db0 => bullets::bullet_set[shot] -> u32,
+        0x0605_3f48 => bullets::bullet_set_plain[shot] -> u32,
+        0x0605_3f70 => bullets::shootable_bullet[b] -> (),
+        0x0605_7454 => actors::drift_effect[e] -> u32,
+        0x0605_681c => actors::enemy_clear[enemy] -> (),
         0x0605_2908 => models::model_init[obj] -> (),
         0x0605_2970 => models::follow_parent[obj] -> (),
         0x0605_29ac => models::model_boxes[obj] -> (),
