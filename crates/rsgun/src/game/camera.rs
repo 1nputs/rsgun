@@ -54,6 +54,21 @@ pub fn angle_diff(_cpu: &mut Cpu, from: u32, to: u32) -> u32 {
     d as u32
 }
 
+/// `angle` kept within `range` of `centre` (all angles, 16 bits): the nearer limit if it is
+/// further.
+pub fn angle_within(cpu: &mut Cpu, angle: u32, centre: u32, range: u32) -> u32 {
+    let (centre, range) = (centre as i16 as i32, range as i16 as i32);
+    let d = nested!(cpu, 0x0604_6194, angle_diff(cpu, centre as u32, angle)) as i32;
+    let a = if d > range {
+        centre + range
+    } else if d < -range {
+        centre - range
+    } else {
+        angle as i32
+    };
+    a as i16 as i32 as u32
+}
+
 /// Makes the camera at the start (looking down from EYE_Z at 0, 0): it, or 0.
 pub fn camera_set(cpu: &mut Cpu) -> u32 {
     let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, CAMERA_SIZE));

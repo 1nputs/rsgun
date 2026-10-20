@@ -3,7 +3,7 @@
 //! itself alive in its ship each frame (the ship's limits), ended off screen or where they hit
 //! something or the ground (with a spark).
 
-use super::{actors, bg, effects, math, nested, objects, Cpu};
+use super::{actors, bg, effects, math, nested, objects, sprites, Cpu};
 
 /// The objects' mode byte (ending).
 const OBJ_MODE: u32 = 3;
@@ -919,6 +919,343 @@ pub fn shot_c_set(cpu: &mut Cpu, p: u32) -> u32 {
         let a = cpu.read16(p + ANGLE).wrapping_add(angle);
         cpu.write16(f + 0x18, a);
         nested!(cpu, 0x0604_e1cc, effects::effect_set(cpu, f));
+    }
+    last
+}
+
+/// A+B's shots (the lock-on plasma): two seekers (plain actors), each held at the ship's nose 5
+/// pixels to its side (the second's flags mirror it) and drawn as a line ahead, never culled,
+/// whose reach grows toward 256 pixels. After 20 frames it sweeps out to its side and back (by up
+/// to 0x800 and 0x174 more each B level), its colour pulsing, until something to hit lies within
+/// 8 pixels of the line and nearer than its reach (on the other side from the ship, alive, not
+/// ending, not to be homed on): then it locks on (a lock ring there, the line's colour steady,
+/// aimed at it within the sweep) and holds the nearest along the line no further than 16 pixels
+/// beyond it (another: A+B's hit count cleared and a new ring); lost, it seeks again. Ended once
+/// its ship is not in A+B's state.
+const SEEKER_SIZE: u32 = 0x80;
+const SEEKER_EXEC: u32 = 0x0604_a29c;
+/// The seeker's phase, frames before it sweeps, its ship, target's number (a byte), sweep's step,
+/// reach (16.16), lock ring; the line's corners (x, y words: the base, the end).
+const SEEKER_PHASE: u32 = 0x3c;
+const SEEKER_WAIT: u32 = 0x3e;
+const SEEKER_SHIP: u32 = 0x5c;
+const SEEKER_TARGET: u32 = 0x60;
+const SEEKER_STEP: u32 = 0x61;
+const SEEKER_REACH: u32 = 0x64;
+const SEEKER_LOCK: u32 = 0x68;
+const SEEKER_CORNERS: u32 = 0x70;
+/// The flags: a line (two corners), never culled; mirrored (flipped).
+const LINE_FLAGS: u32 = 0x2000_0003;
+const MIRRORED: u32 = 0x10;
+const SEEKER_WAITS: u8 = 20;
+const SEEKER_REACH_MOST: i32 = 0x100_0000;
+const SEEKER_LOCK_BEYOND: u32 = 0x10_0000;
+const LINE_HALF_WIDTH: i32 = 0x8_0000;
+/// The first kind's colour (the line's: plus 0x2a pulsing by 4 while it seeks, 0x18 locked on).
+const SEEKING_COLOUR: u16 = 0x2a;
+const LOCKED_COLOUR: u16 = 0x18;
+const STATE_AB: u8 = 7;
+const LOCK_EXEC: u32 = 0x0604_a0f8;
+/// SGL's.
+const SL_COS: u32 = 0x0606_9a30;
+
+/// The frame's spills: the angle to the nearest thing found, the sweep, the ship.
+const F_FOUND_ANGLE: u32 = 0x40;
+const F_SWEEP: u32 = 0x44;
+const F_SHIP: u32 = 0x48;
+
+pub fn seeker_exec(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let ship = cpu.read32(o + SEEKER_SHIP);
+    cpu.write32(f + F_SHIP, ship);
+    if cpu.read8(ship + SHIP_STATE) != STATE_AB || cpu.read8(ship + OBJ_MODE) as i8 >= ENDING as i8 {
+        end(cpu, o);
+        return;
+    }
+    cpu.write32(f, 0x5_0000);
+    cpu.write32(f + 4, 0xfff7_0000);
+    for k in 0..2 {
+        let v = cpu.read32(ship + SCALES + 4 * k);
+        cpu.write32(f + 0x0c + 4 * k, v);
+    }
+    let flip = (cpu.read32(o + FLAGS) ^ cpu.read32(ship + FLAGS)) & FLIP;
+    cpu.write32(f + 0x14, flip);
+    let a = cpu.read16(ship + ANGLE);
+    cpu.write16(f + 0x18, a);
+    cpu.call(SL_TURN, &[f]);
+    for k in 0..2 {
+        let p = cpu.read32(ship + POSITION + 4 * k).wrapping_add(cpu.read32(f + 4 * k));
+        cpu.write32(o + POSITION + 4 * k, p);
+    }
+    let z = cpu.read32(ship + POSITION + 8);
+    cpu.write32(o + POSITION + 8, z);
+    let n = number(cpu, o);
+    let level = cpu.read8(B_LEVEL.wrapping_add((n * 3) as u32)) as i8 as i32;
+    let sweep = if cpu.read32(o + FLAGS) & MIRRORED == 0 { level * 0x174 + 0x800 } else { -0x800 - level * 0x174 } as i16 as i32;
+    cpu.write32(f + F_SWEEP, sweep as u32);
+    let phase = cpu.read8(o + SEEKER_PHASE);
+    if phase <= 2 {
+        if phase == 0 {
+            let flags = cpu.read32(o + FLAGS) | LINE_FLAGS;
+            cpu.write32(o + FLAGS, flags);
+            cpu.write8(o + LIFT, 0);
+            for k in [6, 4, 2, 0] {
+                cpu.write16(o + SEEKER_CORNERS + k, 0);
+            }
+            cpu.write32(o + CORNERS_AT, o + SEEKER_CORNERS);
+            cpu.write8(o + SEEKER_TARGET, 0xff);
+            cpu.write8(o + SEEKER_PHASE, 1);
+        }
+        if phase <= 1 {
+            cpu.write8(o + SEEKER_WAIT, SEEKER_WAITS);
+            cpu.write32(o + SEEKER_REACH, 0);
+            cpu.write8(o + SEEKER_STEP, 0);
+            cpu.write8(o + SEEKER_PHASE, 2);
+        }
+        seek(cpu, o, ship, sweep);
+    } else if phase <= 4 {
+        if phase == 3 {
+            let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, SEEKER_SIZE)) as i8 as i32 as u32;
+            let r = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 1, blocks, PLAIN_EXEC));
+            if r != 0 {
+                nested!(cpu, 0x0604_dd50, effects::actor_init(cpu, r));
+                let flags = cpu.read32(r + FLAGS) | cpu.read32(o + FLAGS) & FLIP;
+                cpu.write32(r + FLAGS, flags);
+                cpu.write32(r + BEHAVIOUR, LOCK_EXEC);
+                for k in 0..3 {
+                    let v = cpu.read32(o + POSITION + 4 * k);
+                    cpu.write32(r + POSITION + 4 * k, v);
+                }
+                let n = cpu.read8(o + NUMBER);
+                cpu.write8(r + NUMBER, n);
+                cpu.write32(r + LOCK_OF, o);
+                let ship = cpu.read32(o + SEEKER_SHIP);
+                cpu.write32(r + SEEKER_SHIP, ship);
+                cpu.write8(o + SEEKER_PHASE, 4);
+            }
+            let colour = cpu.read16(KIND_COLOURS).wrapping_add(LOCKED_COLOUR);
+            cpu.write16(o + COLOUR, colour);
+            cpu.write32(o + SEEKER_LOCK, r);
+        }
+        hold(cpu, o, ship, sweep);
+    }
+    let reach = cpu.read32(o + SEEKER_REACH) as i32;
+    cpu.write16(o + SEEKER_CORNERS + 6, (reach.wrapping_neg() / 0x1_0000) as u16);
+}
+
+/// Seeking: the reach grown, the sweep (after the wait), and the nearest within reach locked on.
+fn seek(cpu: &mut Cpu, o: u32, ship: u32, sweep: i32) {
+    let reach = cpu.read32(o + SEEKER_REACH) as i32;
+    let reach = reach.wrapping_add(SEEKER_REACH_MOST.wrapping_sub(reach) / 8);
+    cpu.write32(o + SEEKER_REACH, reach as u32);
+    let wait = cpu.read8(o + SEEKER_WAIT) as i8;
+    if wait > 0 {
+        cpu.write8(o + SEEKER_WAIT, (wait - 1) as u8);
+    } else {
+        let step = cpu.read8(o + SEEKER_STEP).wrapping_add(1);
+        cpu.write8(o + SEEKER_STEP, step);
+    }
+    let step = cpu.read8(o + SEEKER_STEP) as i8 as i32;
+    let c = cpu.call(SL_COS, &[(step * 0x800) as i16 as i32 as u32]);
+    let pulse = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, 4, c));
+    let colour = (pulse as u16).wrapping_add(SEEKING_COLOUR).wrapping_add(cpu.read16(KIND_COLOURS));
+    cpu.write16(o + COLOUR, colour);
+    let f = cpu.stack();
+    cpu.write16(f + 0x18, sweep as u16);
+    let c = cpu.call(SL_COS, &[(step * 0x200) as i16 as i32 as u32]);
+    let swing = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, sweep as u32, c));
+    cpu.write16(o + ANGLE, (sweep as u16).wrapping_sub(swing as u16));
+    let reach = cpu.read32(o + SEEKER_REACH) as i32;
+    let (t, d) = nearest_ahead(cpu, o, ship, reach, false);
+    if t != -1 {
+        cpu.write32(o + SEEKER_REACH, d as u32);
+        aim_within(cpu, o, sweep);
+        cpu.write8(o + SEEKER_TARGET, t as u8);
+        cpu.write8(o + SEEKER_PHASE, 3);
+    }
+}
+
+/// Locked on: the nearest along the line no further than just beyond the target held (another:
+/// A+B's hit count cleared, a new ring); none, seeking again.
+fn hold(cpu: &mut Cpu, o: u32, ship: u32, sweep: i32) {
+    let n = cpu.read8(o + SEEKER_TARGET) as i8 as i32;
+    let target = cpu.read32(NUMBERED.wrapping_add((n * 4) as u32));
+    let d = nested!(cpu, 0x0604_5ee4, super::aim::distance(cpu, o, target));
+    let (t, d) = nearest_ahead(cpu, o, ship, d.wrapping_add(SEEKER_LOCK_BEYOND) as i32, true);
+    if t == -1 {
+        cpu.write32(o + SEEKER_LOCK, 0);
+        cpu.write8(o + SEEKER_PHASE, 1);
+    } else {
+        cpu.write32(o + SEEKER_REACH, d as u32);
+        aim_within(cpu, o, sweep);
+        if t != cpu.read8(o + SEEKER_TARGET) as i8 {
+            let n = number(cpu, o);
+            cpu.write32(WEAPON_HITS.wrapping_add((n * 28) as u32 + 0xc), 0);
+            cpu.write8(o + SEEKER_PHASE, 3);
+        }
+    }
+    cpu.write8(o + SEEKER_TARGET, t as u8);
+}
+
+/// The nearest thing to hit along the seeker's line (within 8 pixels of it, ahead, on the other
+/// side from `ship`, alive, not ending, not to be homed on) nearer than `reach` (or as near,
+/// `or_as_near`): its number (or -1) and how far ahead; the angle to it spilled in the frame.
+fn nearest_ahead(cpu: &mut Cpu, o: u32, ship: u32, mut reach: i32, or_as_near: bool) -> (i8, i32) {
+    let f = cpu.stack();
+    cpu.write32(f + 0x10, 0x1_0000);
+    cpu.write32(f + 0x0c, 0x1_0000);
+    cpu.write32(f + 0x14, 0);
+    let a = cpu.read16(o + ANGLE).wrapping_neg();
+    cpu.write16(f + 0x18, a);
+    cpu.write32(f + F_FOUND_ANGLE, 0);
+    let mut found = -1;
+    for i in 2..=62u32 {
+        let t = cpu.read32(NUMBERED + 4 * i);
+        if t == 0
+            || cpu.read8(t + SIDE) == cpu.read8(ship + SIDE)
+            || cpu.read8(t + OBJ_MODE) as i8 >= ENDING as i8
+            || cpu.read32(t + FLAGS) & UNHOMED != 0
+            || cpu.read32(t + LIFE) as i32 <= 0
+        {
+            continue;
+        }
+        for k in 0..2 {
+            let d = cpu.read32(t + POSITION + 4 * k).wrapping_sub(cpu.read32(o + POSITION + 4 * k));
+            cpu.write32(f + 4 * k, d);
+        }
+        cpu.call(SL_TURN, &[f]);
+        let (x, y) = (cpu.read32(f) as i32, cpu.read32(f + 4) as i32);
+        if x.wrapping_abs() > LINE_HALF_WIDTH || y >= 0 {
+            continue;
+        }
+        let ahead = y.wrapping_neg();
+        if if or_as_near { ahead > reach } else { ahead >= reach } {
+            continue;
+        }
+        let to = nested!(cpu, 0x0604_5e30, super::aim::angle_to(cpu, o, t)) as i16 as i32 as u32;
+        cpu.write32(f + F_FOUND_ANGLE, to);
+        reach = ahead;
+        found = cpu.read8(t + NUMBER) as i8;
+    }
+    (found, reach)
+}
+
+/// The seeker turned to what it found, kept within its sweep.
+fn aim_within(cpu: &mut Cpu, o: u32, sweep: i32) {
+    let f = cpu.stack();
+    let to = cpu.read32(f + F_FOUND_ANGLE);
+    let range = sweep.wrapping_abs() as i16 as i32 as u32;
+    let a = nested!(cpu, 0x0604_6214, super::camera::angle_within(cpu, to, sweep as u32, range));
+    cpu.write16(o + ANGLE, a as u16);
+}
+
+/// The lock ring (a plain actor; kind 3, the kind's colour plus 0x20, unturned, lifted 4): it
+/// grows to full size at its seeker's target while the seeker holds it with this ring, making the
+/// plasma beam (until one is made); then it shrinks away.
+const LOCK_ANIMATION: u32 = 0x0607_28fc;
+const LOCK_PHASE: u32 = 0x3c;
+const LOCK_OF: u32 = 0x64;
+const LOCK_COLOUR: u16 = 0x20;
+const LOCK_FADING: u8 = 100;
+const LOCK_GONE: i32 = 0xff;
+const UNTURNED: u32 = 0x1000_0000;
+/// The plasma beam (an actor list's actor, with hits): its behaviour; what it is made with (its
+/// seeker, lock ring) and two fields cleared.
+const BEAM_SIZE: u32 = 0x198;
+const BEAM_EXEC: u32 = 0x0604_9c54;
+const BEAM_HITS: u32 = 0x3c;
+const BEAM_108: u32 = 0x108;
+const BEAM_SEEKER: u32 = 0xf4;
+const BEAM_LOCK: u32 = 0x6c;
+const BEAM_F0: u32 = 0xf0;
+
+pub fn lock_exec(cpu: &mut Cpu, r: u32) {
+    let phase = cpu.read8(r + LOCK_PHASE) as i8;
+    let seeker = cpu.read32(r + LOCK_OF);
+    match phase {
+        0 | 1 | 2 => {
+            if phase == 0 {
+                cpu.write32(r + SCALES, 0);
+                let flags = cpu.read32(r + FLAGS) | UNTURNED;
+                cpu.write32(r + FLAGS, flags);
+                cpu.write8(r + KIND, A_KIND);
+                nested!(cpu, 0x0604_6530, effects::link_init(cpu, r + 0x70, LOCK_ANIMATION));
+                let kind = cpu.read8(r + KIND) as i8 as i32;
+                let colour = cpu.read16(KIND_COLOURS.wrapping_add((kind * 16) as u32)).wrapping_add(LOCK_COLOUR);
+                cpu.write16(r + COLOUR, colour);
+                cpu.write8(r + LIFT, 4);
+                cpu.write8(r + LOCK_PHASE, 1);
+            }
+            if phase <= 1 {
+                let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, BEAM_SIZE)) as i8 as i32 as u32;
+                let b = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 1, blocks, ACTOR_EXEC));
+                if b != 0 {
+                    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, b + SPRITE));
+                    nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, b + BEAM_HITS));
+                    cpu.write8(b + BEAM_108, 0);
+                    cpu.write32(b + BEHAVIOUR, BEAM_EXEC);
+                    for k in 0..3 {
+                        let v = cpu.read32(r + POSITION + 4 * k);
+                        cpu.write32(b + POSITION + 4 * k, v);
+                    }
+                    let n = cpu.read8(r + NUMBER);
+                    cpu.write8(b + NUMBER, n);
+                    let seeker = cpu.read32(r + LOCK_OF);
+                    cpu.write32(b + BEAM_SEEKER, seeker);
+                    cpu.write32(b + BEAM_LOCK, r);
+                    cpu.write32(b + BEAM_F0, 0);
+                    cpu.write8(r + LOCK_PHASE, 2);
+                }
+            }
+            let size = cpu.read32(r + SCALES) as i32;
+            cpu.write32(r + SCALES, size.wrapping_add(0x1_0000i32.wrapping_sub(size) / 8) as u32);
+            if cpu.read8(seeker + OBJ_MODE) as i8 >= ENDING as i8 || cpu.read32(seeker + SEEKER_LOCK) != r {
+                cpu.write8(r + LOCK_PHASE, LOCK_FADING);
+            } else {
+                for k in 0..3 {
+                    let v = cpu.read32(seeker + POSITION + 4 * k);
+                    cpu.write32(r + POSITION + 4 * k, v);
+                }
+            }
+        }
+        p if p == LOCK_FADING as i8 => {
+            let size = cpu.read32(r + SCALES) as i32;
+            let size = size.wrapping_add(size.wrapping_neg() / 8);
+            cpu.write32(r + SCALES, size as u32);
+            if size <= LOCK_GONE {
+                end(cpu, r);
+            }
+        }
+        _ => {}
+    }
+    let w = cpu.read32(r + SCALES);
+    cpu.write32(r + SCALES + 4, w);
+    nested!(cpu, 0x0604_6558, effects::link_step(cpu, r + SPRITE, r + 0x70));
+}
+
+/// A+B's shot from ship `p`: its two seekers (the second mirrored). The second (or 0).
+pub fn shot_ab_set(cpu: &mut Cpu, p: u32) -> u32 {
+    let mut last = 0;
+    for k in 0..2 {
+        let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, SEEKER_SIZE)) as i8 as i32 as u32;
+        let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 1, blocks, PLAIN_EXEC));
+        if o == 0 {
+            return 0;
+        }
+        nested!(cpu, 0x0604_dd50, effects::actor_init(cpu, o));
+        cpu.write32(o + SEEKER_SHIP, p);
+        cpu.write32(o + BEHAVIOUR, SEEKER_EXEC);
+        for k in 0..3 {
+            let v = cpu.read32(p + POSITION + 4 * k);
+            cpu.write32(o + POSITION + 4 * k, v);
+        }
+        let n = cpu.read8(p + NUMBER);
+        cpu.write8(o + NUMBER, n);
+        if k == 1 {
+            let flags = cpu.read32(o + FLAGS) | MIRRORED;
+            cpu.write32(o + FLAGS, flags);
+        }
+        last = o;
     }
     last
 }
