@@ -1159,15 +1159,9 @@ const LOCK_COLOUR: u16 = 0x20;
 const LOCK_FADING: u8 = 100;
 const LOCK_GONE: i32 = 0xff;
 const UNTURNED: u32 = 0x1000_0000;
-/// The plasma beam (an actor list's actor, with hits): its behaviour; what it is made with (its
-/// seeker, lock ring) and two fields cleared.
+/// The plasma beam (an actor list's actor, with hits: below).
 const BEAM_SIZE: u32 = 0x198;
 const BEAM_EXEC: u32 = 0x0604_9c54;
-const BEAM_HITS: u32 = 0x3c;
-const BEAM_108: u32 = 0x108;
-const BEAM_SEEKER: u32 = 0xf4;
-const BEAM_LOCK: u32 = 0x6c;
-const BEAM_F0: u32 = 0xf0;
 
 pub fn lock_exec(cpu: &mut Cpu, r: u32) {
     let phase = cpu.read8(r + LOCK_PHASE) as i8;
@@ -1192,7 +1186,7 @@ pub fn lock_exec(cpu: &mut Cpu, r: u32) {
                 if b != 0 {
                     nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, b + SPRITE));
                     nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, b + BEAM_HITS));
-                    cpu.write8(b + BEAM_108, 0);
+                    cpu.write8(b + BEAM_PHASE, 0);
                     cpu.write32(b + BEHAVIOUR, BEAM_EXEC);
                     for k in 0..3 {
                         let v = cpu.read32(r + POSITION + 4 * k);
@@ -1203,7 +1197,7 @@ pub fn lock_exec(cpu: &mut Cpu, r: u32) {
                     let seeker = cpu.read32(r + LOCK_OF);
                     cpu.write32(b + BEAM_SEEKER, seeker);
                     cpu.write32(b + BEAM_LOCK, r);
-                    cpu.write32(b + BEAM_F0, 0);
+                    cpu.write32(b + BEAM_TARGET, 0);
                     cpu.write8(r + LOCK_PHASE, 2);
                 }
             }
@@ -1258,4 +1252,377 @@ pub fn shot_ab_set(cpu: &mut Cpu, p: u32) -> u32 {
         last = o;
     }
     last
+}
+
+/// The plasma beam (made by the lock ring): 16 segments of 32 pixels from its seeker toward the
+/// target, drawn by its own draw. It stretches out (16 pixels a frame) to the seeker's reach, then
+/// gets its head (an animation at the end) and holds, widening (0x800 to 0x1800, 0x20 a frame;
+/// sound 8 each 15 frames). Its power: half A's and B's levels summed plus 10, times one and up to
+/// two more by its width. Each segment turns toward the target: those more than 40 pixels short of
+/// it within its width of the aim (player 1's swaying toward a second angle by at most 0x300 a
+/// frame, a new one at random once there; player 2's at random), the rest straight at it, their
+/// length to reach it. A hit box each segment (at its end, or on odd frames its middle). Once the
+/// lock ring fades (before it is made: at once) it is drawn in from its base, 8 pixels a frame, and
+/// ends.
+const BEAM_HITS: u32 = 0x3c;
+const BEAM_DRAW: u32 = 0x34;
+const BEAM_LOCK: u32 = 0x6c;
+const BEAM_BOXES_AT: u32 = 0x70;
+const BEAM_TARGET: u32 = 0xf0;
+const BEAM_SEEKER: u32 = 0xf4;
+const BEAM_HEAD: u32 = 0xf8;
+const BEAM_PHASE: u32 = 0x108;
+const BEAM_SOUNDS: u32 = 0x109;
+const BEAM_WIDTH: u32 = 0x10a;
+const BEAM_LENGTH: u32 = 0x10c;
+const BEAM_DRAWN_IN: u32 = 0x110;
+/// Each segment's angle, the angle it sways toward (words), its length (16.16 of 32 pixels; the
+/// last 0).
+const BEAM_ANGLES: u32 = 0x114;
+const BEAM_SWAYS: u32 = 0x134;
+const BEAM_SEGMENTS: u32 = 0x154;
+const STRETCHING: u8 = 1;
+const HELD: u8 = 2;
+const DRAWING_IN: u8 = 3;
+const BEAM_GONE: u8 = 4;
+/// The flags: a model drawn by its own draw.
+const OWN_MODEL: u32 = 0xc0_0000;
+const BEAM_DRAW_FN: u32 = 0x0604_98d4;
+const BEAM_TYPE: u8 = 11;
+const BEAM_COLOUR: u16 = 0x20;
+const BEAM_HEAD_ANIMATION: u32 = 0x0607_2904;
+const BEAM_STRETCH: u32 = 0x10_0000;
+const BEAM_WIDTH_START: u16 = 0x800;
+const BEAM_WIDEST: u32 = 0x1800;
+const BEAM_WIDENING: u32 = 0x20;
+const SE_BEAM: u32 = 8;
+const SEGMENT: u32 = 0x20_0000;
+const SEGMENT_STEP: u32 = 0xffe0_0000;
+const SEGMENTS: u32 = 16;
+const SWAY_MOST: u32 = 0x300;
+const AIM_SHORT: u32 = 0x28_0000;
+const DRAW_IN: u32 = 0x8_0000;
+const DRAWN_IN_SHORT: u32 = 0x10_0000;
+/// The beam's hit box (attribute, kind, size: bytes 0, 1, 6, 7).
+const BEAM_BOX: u32 = 0x0607_2844;
+const LAST_BOX: u8 = 0x80;
+const SL_ATAN: u32 = 0x0606_780c;
+
+/// The frame's spills: the seeker, target, place along the beam (x, y), how far along, the
+/// segment (then its address), the width's and sways' offsets.
+const F_SEEKER: u32 = 0x54;
+const F_TARGET: u32 = 0x50;
+const F_X: u32 = 0x48;
+const F_Y: u32 = 0x4c;
+const F_ALONG: u32 = 0x40;
+const F_SEGMENT: u32 = 0x44;
+
+pub fn beam_exec(cpu: &mut Cpu, b: u32) {
+    let f = cpu.stack();
+    let seeker = cpu.read32(b + BEAM_SEEKER);
+    cpu.write32(f + F_SEEKER, seeker);
+    let phase = cpu.read8(b + BEAM_PHASE) as i8;
+    if phase <= HELD as i8 {
+        let lock = cpu.read32(b + BEAM_LOCK);
+        if cpu.read8(lock + OBJ_MODE) as i8 >= ENDING as i8 || cpu.read8(lock + LOCK_PHASE) as i8 >= LOCK_FADING as i8 {
+            cpu.write8(b + BEAM_PHASE, if phase == 0 { BEAM_GONE } else { DRAWING_IN });
+        }
+    }
+    let phase = cpu.read8(b + BEAM_PHASE);
+    match phase {
+        0 | STRETCHING => {
+            if phase == 0 {
+                let flags = cpu.read32(b + FLAGS) | OWN_MODEL;
+                cpu.write32(b + FLAGS, flags);
+                cpu.write32(b + BEAM_DRAW, BEAM_DRAW_FN);
+                cpu.write16(b + ANGLE, 0);
+                cpu.write8(b + SIDE, 0);
+                cpu.write8(b + TYPE, BEAM_TYPE);
+                cpu.write32(b + BEAM_LENGTH, 0);
+                cpu.write16(b + BEAM_WIDTH, BEAM_WIDTH_START);
+                let colour = cpu.read16(KIND_COLOURS).wrapping_add(BEAM_COLOUR);
+                cpu.write16(b + OWN_COLOUR, colour);
+                cpu.write16(b + COLOUR, colour);
+                cpu.write32(b + BEAM_DRAWN_IN, 0);
+                let t = cpu.read8(seeker + SEEKER_TARGET);
+                cpu.write8(b + BEAM_TARGET, t);
+                cpu.write8(b + BEAM_SOUNDS, 0);
+                cpu.write8(b + BEAM_PHASE, STRETCHING);
+            }
+            let (len, reach) = (cpu.read32(b + BEAM_LENGTH), cpu.read32(seeker + SEEKER_REACH));
+            let len = nested!(cpu, 0x0604_6168, actors::approach(cpu, len, reach, BEAM_STRETCH));
+            cpu.write32(b + BEAM_LENGTH, len);
+            if len as i32 >= cpu.read32(seeker + SEEKER_REACH) as i32 {
+                nested!(cpu, 0x0604_6530, effects::link_init(cpu, b + BEAM_HEAD, BEAM_HEAD_ANIMATION));
+                cpu.write8(b + BEAM_PHASE, HELD);
+            }
+        }
+        HELD => {}
+        DRAWING_IN => {
+            let drawn_in = cpu.read32(b + BEAM_DRAWN_IN).wrapping_add(DRAW_IN);
+            cpu.write32(b + BEAM_DRAWN_IN, drawn_in);
+            if (drawn_in as i32) < cpu.read32(b + BEAM_LENGTH).wrapping_sub(DRAWN_IN_SHORT) as i32 {
+                nested!(cpu, 0x0604_9aa0, beam_boxes(cpu, b));
+            } else {
+                end(cpu, b);
+            }
+            return;
+        }
+        BEAM_GONE => {
+            end(cpu, b);
+            return;
+        }
+        _ => return,
+    }
+    for k in 0..3 {
+        let v = cpu.read32(seeker + POSITION + 4 * k);
+        cpu.write32(b + POSITION + 4 * k, v);
+    }
+    let levels = LEVELS.wrapping_add((number(cpu, b) * 3) as u32);
+    let sum = cpu.read8(levels) as i8 as i32 + cpu.read8(levels + 1) as i8 as i32;
+    cpu.write16(b + POWER, (sum / 2 + 10) as u16);
+    let width = cpu.read16(b + BEAM_WIDTH) as i16 as i32 as u32;
+    let k = nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, width, BEAM_WIDEST));
+    let power = cpu.read16(b + POWER) as i16 as i32;
+    let more = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, (power * 2) as u32, k));
+    let power = (more as u16).wrapping_add(cpu.read16(b + POWER));
+    cpu.write16(b + POWER, power);
+    if cpu.read8(b + BEAM_PHASE) == HELD {
+        let reach = cpu.read32(seeker + SEEKER_REACH);
+        cpu.write32(b + BEAM_LENGTH, reach);
+        let width = cpu.read16(b + BEAM_WIDTH) as i16 as i32 as u32;
+        let width = nested!(cpu, 0x0604_6168, actors::approach(cpu, width, BEAM_WIDEST, BEAM_WIDENING));
+        cpu.write16(b + BEAM_WIDTH, width as u16);
+        let sounds = cpu.read8(b + BEAM_SOUNDS) as i8 as i32 as u32;
+        if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, sounds, 15)) == 0 {
+            nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_BEAM));
+        }
+        let sounds = cpu.read8(b + BEAM_SOUNDS).wrapping_add(1);
+        cpu.write8(b + BEAM_SOUNDS, sounds);
+    }
+    turn_segments(cpu, b, seeker);
+    nested!(cpu, 0x0604_9aa0, beam_boxes(cpu, b));
+}
+
+/// The segments turned toward the target, out to the beam's length.
+fn turn_segments(cpu: &mut Cpu, b: u32, seeker: u32) {
+    let f = cpu.stack();
+    let n = cpu.read8(b + BEAM_TARGET) as i8 as i32;
+    let target = cpu.read32(NUMBERED.wrapping_add((n * 4) as u32));
+    cpu.write32(f + F_TARGET, target);
+    let (mut x, mut y) = (cpu.read32(b + POSITION), cpu.read32(b + POSITION + 4));
+    cpu.write32(f + F_X, x);
+    cpu.write32(f + F_Y, y);
+    cpu.write32(f + 0x10, 0x1_0000);
+    cpu.write32(f + 0x0c, 0x1_0000);
+    cpu.write32(f + 0x14, 0);
+    let mut along = 0u32;
+    cpu.write32(f + F_ALONG, along);
+    cpu.write32(f + F_SEGMENT, 0);
+    cpu.write32(f + 0x58, BEAM_WIDTH);
+    cpu.write32(f + 0x5c, BEAM_SWAYS);
+    let width = |cpu: &mut Cpu| cpu.read16(b + BEAM_WIDTH) as i16 as i32 as u32;
+    let mut i = 0;
+    while i < SEGMENTS {
+        if along as i32 >= cpu.read32(b + BEAM_LENGTH) as i32 {
+            break;
+        }
+        let dx = cpu.read32(target + POSITION).wrapping_sub(x);
+        let dy = cpu.read32(target + POSITION + 4).wrapping_sub(y);
+        let aim = cpu.call(SL_ATAN, &[dx, dy]).wrapping_add(0x4000);
+        cpu.write16(f + 0x18, aim as u16);
+        let (angle, sway, segment) = (b + BEAM_ANGLES + 2 * i, b + BEAM_SWAYS + 2 * i, b + BEAM_SEGMENTS + 4 * i);
+        if (along.wrapping_add(AIM_SHORT) as i32) < cpu.read32(seeker + SEEKER_REACH) as i32 {
+            if cpu.read8(b + NUMBER) != 0 {
+                let w = width(cpu);
+                let r = nested!(cpu, 0x0604_5d90, math::random(cpu, w));
+                let a = (r as u16).wrapping_add(cpu.read16(f + 0x18));
+                cpu.write16(angle, a);
+            } else {
+                let (a, aim, w) = (cpu.read16(angle) as i16 as i32 as u32, cpu.read16(f + 0x18) as i16 as i32 as u32, width(cpu));
+                let a = nested!(cpu, 0x0604_6214, super::camera::angle_within(cpu, a, aim, w));
+                cpu.write16(angle, a as u16);
+                let (s, aim, w) = (cpu.read16(sway) as i16 as i32 as u32, cpu.read16(f + 0x18) as i16 as i32 as u32, width(cpu));
+                let s = nested!(cpu, 0x0604_6214, super::camera::angle_within(cpu, s, aim, w));
+                cpu.write16(sway, s as u16);
+                if cpu.read16(angle) == s as u16 {
+                    let w = width(cpu);
+                    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, w));
+                    let aim = (r as u16).wrapping_add(cpu.read16(f + 0x18));
+                    cpu.write16(f + 0x18, aim);
+                    cpu.write16(sway, aim);
+                }
+                let (a, s) = (cpu.read16(angle) as i16 as i32 as u32, cpu.read16(sway) as i16 as i32 as u32);
+                let d = nested!(cpu, 0x0604_6194, super::camera::angle_diff(cpu, a, s));
+                let d = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, d, SWAY_MOST));
+                let a = (d as u16).wrapping_add(cpu.read16(angle));
+                cpu.write16(angle, a);
+            }
+            cpu.write32(segment, 0x1_0000);
+        } else {
+            cpu.write16(angle, aim as u16);
+            let target = cpu.read32(f + F_TARGET);
+            let dx = cpu.read32(target + POSITION).wrapping_sub(cpu.read32(f + F_X));
+            let dy = cpu.read32(target + POSITION + 4).wrapping_sub(cpu.read32(f + F_Y));
+            let len = nested!(cpu, 0x0604_5e60, super::aim::length(cpu, dx, dy));
+            let scale = nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, len, SEGMENT));
+            cpu.write32(f + 0x10, scale);
+            cpu.write32(segment, scale);
+        }
+        cpu.write32(f, 0);
+        cpu.write32(f + 4, SEGMENT_STEP);
+        let a = cpu.read16(angle);
+        cpu.write16(f + 0x18, a);
+        cpu.call(SL_TURN, &[f]);
+        x = x.wrapping_add(cpu.read32(f));
+        cpu.write32(f + F_X, x);
+        y = y.wrapping_add(cpu.read32(f + 4));
+        cpu.write32(f + F_Y, y);
+        along = along.wrapping_add(SEGMENT);
+        cpu.write32(f + F_ALONG, along);
+        i += 1;
+        cpu.write32(f + F_SEGMENT, i);
+    }
+    cpu.write32(f + F_SEGMENT, b + 4 * i);
+    cpu.write32(b + BEAM_SEGMENTS + 4 * i, 0);
+}
+
+fn pixels(v: u32) -> u16 {
+    (v as i32 / 0x1_0000) as u16
+}
+
+/// The beam's hit boxes (in the actor: one each segment past the drawn-in part, hitting
+/// everything again each frame), or none.
+pub fn beam_boxes(cpu: &mut Cpu, b: u32) {
+    let f = cpu.stack();
+    let mut drawn_in = cpu.read32(b + BEAM_DRAWN_IN) as i32;
+    cpu.write32(f + 0x14, 0);
+    cpu.write32(f + 0x50, 0);
+    cpu.write32(f + 0x40, BEAM_SEGMENTS);
+    let (mut x, mut y) = (0u32, 0u32);
+    let (mut count, mut last) = (0, 0);
+    for i in 0..SEGMENTS {
+        let segment = cpu.read32(b + BEAM_SEGMENTS + 4 * i);
+        if segment == 0 {
+            break;
+        }
+        cpu.write32(f, 0);
+        cpu.write32(f + 4, SEGMENT_STEP);
+        let a = cpu.read16(b + BEAM_ANGLES + 2 * i);
+        cpu.write16(f + 0x18, a);
+        cpu.write32(f + 0x10, segment);
+        cpu.write32(f + 0x48, y);
+        cpu.write32(f + 0x4c, x);
+        cpu.call(SL_TURN, &[f]);
+        let (dx, dy) = (cpu.read32(f), cpu.read32(f + 4));
+        if drawn_in == 0 {
+            let at = b + BEAM_BOXES_AT + 8 * count;
+            last = at;
+            let attr = cpu.read8(BEAM_BOX) & !LAST_BOX;
+            cpu.write8(at, attr);
+            for k in [1, 6, 7] {
+                let v = cpu.read8(BEAM_BOX + k);
+                cpu.write8(at + k, v);
+            }
+            let (ox, oy) = if cpu.read32(GAME_FRAMES) & 1 != 0 { ((dx as i32 / 2) as u32, (dy as i32 / 2) as u32) } else { (dx, dy) };
+            cpu.write16(at + 2, pixels(ox.wrapping_add(x)));
+            cpu.write16(at + 4, pixels(oy.wrapping_add(y)));
+            count += 1;
+            cpu.write32(f + 0x50, count);
+        } else {
+            drawn_in = (drawn_in - SEGMENT as i32).max(0);
+        }
+        x = x.wrapping_add(dx);
+        y = y.wrapping_add(dy);
+    }
+    if count == 0 {
+        cpu.write32(b + BOXES, 0);
+    } else {
+        hit_set(cpu, b, u32::MAX);
+        cpu.write32(b + BOXES, b + BEAM_BOXES_AT);
+        let attr = cpu.read8(last) | LAST_BOX;
+        cpu.write8(last, attr);
+    }
+}
+
+/// The beam's own draw (sprite `s`): each segment past the drawn-in part a sprite (kind 3, frames
+/// 10-12 at random, flipped at random, its width by the beam's), the one partly drawn in shortened
+/// from its base; then the head while it holds.
+pub fn beam_draw(cpu: &mut Cpu, s: u32) {
+    let b = s.wrapping_sub(SPRITE);
+    let f = cpu.stack();
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, f));
+    for k in 0..3 {
+        let v = cpu.read32(b + POSITION + 4 * k);
+        cpu.write32(f + 4 + 4 * k, v);
+    }
+    cpu.write8(f + 0x1e, A_KIND);
+    let colour = cpu.read16(b + OWN_COLOUR);
+    cpu.write16(f + 0x18, colour);
+    cpu.write8(f + 0x23, 0);
+    let width = cpu.read16(b + BEAM_WIDTH) as i16 as i32 as u32;
+    let width = nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, width, BEAM_WIDEST));
+    cpu.write32(f + 0x10, width);
+    let t = f + 0x2c;
+    cpu.write32(t + 0x10, 0x1_0000);
+    cpu.write32(t + 0x0c, 0x1_0000);
+    cpu.write32(t + 0x14, 0);
+    let mut drawn_in = cpu.read32(b + BEAM_DRAWN_IN) as i32;
+    for i in 0..SEGMENTS {
+        let segment = cpu.read32(b + BEAM_SEGMENTS + 4 * i);
+        if segment == 0 {
+            break;
+        }
+        let a = cpu.read16(b + BEAM_ANGLES + 2 * i);
+        cpu.write16(f + 0x20, a);
+        cpu.write16(t + 0x18, a);
+        cpu.write32(f + 0x14, segment);
+        cpu.write32(t + 0x10, segment);
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 3)) as i32;
+        cpu.write8(f + 0x1f, r.wrapping_abs().wrapping_add(10) as u8);
+        if drawn_in == 0 {
+            let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0));
+            let flags = cpu.read32(f) | r & MIRRORED;
+            cpu.write32(f, flags);
+            nested!(cpu, 0x0604_0960, sprites::draw(cpu, f));
+        } else if drawn_in < SEGMENT as i32 {
+            for (k, field) in [(0x1c, 4), (0x20, 8), (0x24, 0x14)] {
+                let v = cpu.read32(f + field);
+                cpu.write32(t + k, v);
+            }
+            cpu.write32(t, 0);
+            cpu.write32(t + 4, (drawn_in as u32).wrapping_neg());
+            cpu.call(SL_TURN, &[t]);
+            for k in 0..2 {
+                let p = cpu.read32(f + 4 + 4 * k).wrapping_add(cpu.read32(t + 4 * k));
+                cpu.write32(f + 4 + 4 * k, p);
+            }
+            let sy = nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, SEGMENT.wrapping_sub(drawn_in as u32), SEGMENT));
+            cpu.write32(f + 0x14, sy);
+            nested!(cpu, 0x0604_0960, sprites::draw(cpu, f));
+            for (k, field) in [(0x1c, 4), (0x20, 8), (0x24, 0x14)] {
+                let v = cpu.read32(t + k);
+                cpu.write32(f + field, v);
+            }
+            drawn_in = 0;
+        } else {
+            drawn_in -= SEGMENT as i32;
+        }
+        cpu.write32(t, 0);
+        cpu.write32(t + 4, SEGMENT_STEP);
+        cpu.call(SL_TURN, &[t]);
+        for k in 0..2 {
+            let p = cpu.read32(f + 4 + 4 * k).wrapping_add(cpu.read32(t + 4 * k));
+            cpu.write32(f + 4 + 4 * k, p);
+        }
+    }
+    if cpu.read8(b + BEAM_PHASE) == HELD {
+        nested!(cpu, 0x0604_6558, effects::link_step(cpu, f, b + BEAM_HEAD));
+        cpu.write8(f + 0x23, 4);
+        let w = cpu.read32(f + 0x10);
+        cpu.write32(f + 0x14, w);
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0));
+        cpu.write16(f + 0x20, r as u16);
+        nested!(cpu, 0x0604_0960, sprites::draw(cpu, f));
+    }
 }
