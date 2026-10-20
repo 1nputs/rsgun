@@ -13,17 +13,17 @@ const SIZE: u32 = 0x00; // char
 const AREA: u32 = 0x01; // char
 const POST: u32 = 0x02; // unsigned char
 const MODE: u32 = 0x03; // char
-const EXEC: u32 = 0x04; // void (*)()
+pub const EXEC: u32 = 0x04; // void (*)()
 const BEFORE: u32 = 0x08; // Base_obj *
-const NEXT: u32 = 0x0c; // Base_obj *
+pub const NEXT: u32 = 0x0c; // Base_obj *
 
 /// The pool and its blocks.
 const POOL: u32 = 0x0600_ee10;
 const BLOCK: u32 = 0x80;
 const BLOCKS: u32 = 0x400;
 /// The lists, `OBJ_INF[5]` (dma.c's types): each its first and last object (top_adr, end_adr).
-const OBJ_INF: u32 = 0x0600_ede0;
-const AREAS: u32 = 5;
+pub const OBJ_INF: u32 = 0x0600_ede0;
+pub const AREAS: u32 = 5;
 /// Each list's range of the pool's blocks (first, end), as shorts.
 const AREA_BLOCKS: u32 = 0x0600_8b60;
 

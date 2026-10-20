@@ -36,3 +36,36 @@ pub fn fixed_div(cpu: &mut Cpu, a: u32, b: u32) -> u32 {
     cpu.write32(DVDNTL, a << 16);
     cpu.read32(DVDNTL)
 }
+
+/// The random numbers: the seed, and a copy of it made as it is set (not known why).
+const RANDOM: u32 = 0x0607_3c74;
+const RANDOM_COPY: u32 = 0x060f_ff3c;
+
+/// The random numbers from `seed` (a demo sets 0, so it plays the same each time).
+pub fn random_seed(cpu: &mut Cpu, seed: u32) {
+    cpu.write32(RANDOM, seed);
+    cpu.write32(RANDOM_COPY, seed);
+}
+
+/// The next random number: the seed times 5 plus 0x3573; below `n` (its remainder) unless `n` is 0.
+pub fn random(cpu: &mut Cpu, n: u32) -> u32 {
+    let r = cpu.read32(RANDOM).wrapping_mul(5).wrapping_add(0x3573);
+    cpu.write32(RANDOM, r);
+    if n == 0 {
+        return r;
+    }
+    remainder(cpu, r, n)
+}
+
+/// The difficulty (the first setting, backup.rs: 0-4, the demos' 2 the middle).
+const DIFFICULTY: u32 = 0x0600_ed84;
+const MIDDLE: i32 = 2;
+
+/// `x` scaled by the difficulty: (difficulty - 2) * x / 2; with `x` 0, the difficulty itself.
+pub fn by_difficulty(cpu: &mut Cpu, x: u32) -> u32 {
+    let d = cpu.read8(DIFFICULTY) as i8 as i32;
+    if x == 0 {
+        return d as u32;
+    }
+    ((d - MIDDLE).wrapping_mul(x as i32) / 2) as u32
+}

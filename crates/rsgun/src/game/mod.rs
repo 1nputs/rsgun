@@ -8,15 +8,24 @@
 //! A rewrite takes a [`Cpu`]: the bus the game's memory and hardware are on, and the registers it
 //! needs to call code not rewritten yet ([`Cpu::call`]) and to wait ([`Cpu::wait`]).
 
+mod backup;
+mod clib;
+mod director;
 mod dma;
 mod files;
 mod globals;
+mod hits;
+mod hud;
 mod main_loop;
 mod math;
 mod objects;
 mod pads;
 mod palette;
+mod screen;
+mod sound;
+mod states;
 mod system;
+mod text;
 mod vblank;
 
 use stv::native::{Contract, Natives};
@@ -59,6 +68,26 @@ impl Cpu<'_> {
         stv::native::call(self.sh2, self.bus, f);
         self.sh2.pr = pr;
         self.sh2.r[0]
+    }
+
+    /// `call` with arguments past the fourth on the stack (the fifth at the stack pointer, as the
+    /// SH-2 code pushes them just before the call).
+    pub fn call_with_stack(&mut self, f: u32, args: &[u32], stack_args: &[u32]) -> u32 {
+        let sp = self.sh2.r[15];
+        let top = sp.wrapping_sub(4 * stack_args.len() as u32);
+        for (i, &a) in stack_args.iter().enumerate().rev() {
+            self.bus.write32(top + 4 * i as u32, a);
+        }
+        self.sh2.r[15] = top;
+        let r = self.call(f, args);
+        self.sh2.r[15] = sp;
+        r
+    }
+
+    /// The stack the function's callees get: the bottom of its SH-2 function's frame (`frame N`),
+    /// where a struct it hands a callee by address goes.
+    pub fn stack(&self) -> u32 {
+        self.sh2.r[15]
     }
 
     /// One pass of a loop waiting for the hardware at `at` (the SH-2 code's loop, for the machine's
@@ -138,9 +167,121 @@ pub fn register(n: &mut Natives) {
         0x0600_438c => vblank::run_callbacks[] -> () frame 24,
         0x0600_43d4 => vblank::add_callback[f] -> u32,
         0x0600_4408 => vblank::remove_callback[f] -> u32,
+        0x0600_5f10 => files::read_file[name, dst] -> u32,
+        0x0600_5e9c => files::file_size[name] -> u32,
+        0x0600_5edc => files::load_size[load] -> u32,
+        0x0600_603c => files::start_load[load, dst] -> u32,
+        0x0600_6074 => files::load_done[load] -> u32,
+        0x0600_60b0 => files::free_load[load] -> (),
+        0x0600_475c => sound::command_done[slot] -> u32,
+        0x0600_4718 => sound::send_to[slot, command, len] -> u32,
+        0x0600_47bc => sound::send[command, len] -> u32,
+        0x0600_4780 => sound::driver_idle[] -> u32,
+        0x0600_4804 => sound::set_flags[bits] -> (),
+        0x0600_48b8 => sound::total_volume[volume] -> (),
+        0x0600_48ec => sound::mixer[bank, mixer] -> (),
+        0x0600_4928 => sound::mixer_param[which, level, pan] -> (),
+        0x0600_4974 => sound::sound_setup[pan1, pan0] -> (),
+        0x0600_49cc => sound::sound_setup_default[] -> (),
+        0x0600_4b88 => sound::start_seq[control, song, priority] -> (),
+        0x0600_4bc4 => sound::seq_volume[control, volume, rate] -> (),
+        0x0600_4c00 => sound::stop_seq[control] -> (),
+        0x0600_4a64 => sound::map_area[n] -> u32,
+        0x0600_4adc => sound::copy_to_area[n, src, size] -> (),
+        0x0600_4b18 => sound::load_sound_file[n, buffer] -> u32,
+        0x0600_49e8 => sound::sound_load[] -> () frame 36,
+        0x0600_4ddc => sound::stop_effects[] -> () frame 32,
+        0x0600_4e98 => sound::request_music[music] -> (),
+        0x0600_4f0c => sound::music_fade_out[frames] -> (),
+        0x0600_4f3c => sound::se_control[se] -> u32 frame 36,
+        0x0600_50d4 => sound::se_set[se] -> u32 frame 24,
+        0x0600_52e0 => sound::se_stop[se, control] -> u32 frame 20,
+        0x0600_53dc => sound::sound_exec[m] -> () frame 28,
+        0x0600_5598 => sound::sound_manager_set[] -> u32 frame 16,
+        0x0600_817c => clib::memset[dst, c, n] -> u32,
+        0x0600_81d0 => clib::memcpy[dst, src, n] -> u32,
+        0x0600_79a8 => sound::seq_status[buf, control] -> (),
+        0x0600_46d8 => sound::load_sound_data[n, dst] -> u32,
+        0x0600_8058 => system::set_scu_mask[mask, bits] -> (),
+        0x0600_69d8 => system::shift_left[x, bits] -> u32,
+        0x0600_6364 => backup::backup_byte[i] -> u32,
+        0x0600_637c => backup::backup_long[i] -> u32 frame 8,
+        0x0600_63a4 => backup::set_backup_byte[i, v] -> (),
+        0x0600_63bc => backup::set_backup_long[i, v] -> u32 frame 8,
+        0x0600_63e4 => backup::load_backup[] -> u32 frame 40,
+        0x0600_66ec => backup::format_backup[why] -> () frame 24,
+        0x0600_65fc => backup::save_scores[] -> u32 frame 32,
+        0x0604_2db8 => director::game_set[] -> u32 frame 16,
+        0x0604_2b14 => director::game_exec[game] -> () frame 80,
+        0x0604_0c64 => director::mode_done[] -> (),
+        0x0604_0cb4 => director::director_flags[] -> u32,
+        0x0604_02c4 => states::load_mode_file[mode] -> u32 frame 12,
+        0x0604_12e8 => states::state_reset[game] -> () frame 20,
+        0x0604_13b0 => states::state_load_mode[game] -> () frame 16,
+        0x0604_17a4 => states::state_run_mode[game] -> () frame 16,
+        0x0604_1578 => states::state_screen[game] -> () frame 16,
+        0x0604_1848 => states::state_title[game] -> () frame 32,
+        0x0604_1df0 => states::state_stage[game] -> () frame 132,
+        0x0604_2734 => states::state_stage_end[game] -> () frame 36,
+        0x0604_1010 => states::clear_mode[game] -> () frame 24,
+        0x0605_e6dc => screen::set_fade_offset[r, g, b] -> (),
+        0x0605_e8dc => screen::fade_new[r, g, b, speed] -> u32,
+        0x0605_e93c => screen::fade_to[r, g, b, speed] -> (),
+        0x0605_e9d8 => screen::stop_fades[] -> (),
+        0x0605_e73c => screen::fade_exec[fade] -> () frame 28,
+        0x0605_e1b0 => screen::screen_set[] -> () frame 16,
+        0x0605_e49c => screen::screen_exec[s] -> () frame 16,
+        0x0605_e2dc => screen::screen_fields[] -> (),
+        0x0605_ea98 => screen::screen_vblank[] -> () frame 32,
+        0x0605_e6c0 => screen::offsets_clear[] -> () frame 8,
+        0x0605_fdc0 => screen::take_plane_shared[] -> (),
+        0x0605_fde8 => screen::request_clear_text_plane[] -> (),
+        0x0605_fdfc => screen::clear_text_plane[] -> (),
+        0x0605_ef44 => screen::clear_scroll_word[] -> (),
+        0x0605_edf8 => screen::copy_words[src, dst, bytes] -> (),
+        0x0605_ed84 => screen::long_copies_on[] -> u32,
+        0x0605_ef20 => screen::offset_list[delta, list, n] -> (),
+        0x0605_e24c => screen::screen_off[] -> () frame 8,
+        0x0604_0f24 => system::coin_settings_shown[] -> u32,
+        0x0606_0ff8 => text::char_index[c] -> u32,
+        0x0606_10e4 => text::put_char[c, at, attr] -> u32,
+        0x0606_11b8 => text::put_string[s, at, attr] -> (),
+        0x0606_0c58 => text::put_number[n, at] -> u32,
+        0x0606_111c => text::put_large_char[c, at, attr] -> u32,
+        0x0606_1204 => text::put_large_string[s, at, attr] -> (),
+        0x0606_0894 => text::set_mode[mode] -> (),
+        0x0606_0b34 => text::hide_line[p] -> (),
+        0x0606_0b78 => text::show_message[p, message] -> (),
+        0x0606_0a48 => text::show_buffers[p] -> (),
+        0x0606_0c08 => text::credits_shown[] -> u32,
+        0x0606_0c2c => text::credits_hidden[] -> u32,
+        0x0606_0fc8 => text::credits_set[] -> u32,
+        0x0606_06dc => text::clear_line[p] -> (),
+        0x0606_0790 => text::clear_credit_line[p] -> (),
+        0x0606_07c4 => text::send_line[src, dst, tiles] -> (),
+        0x0606_0824 => text::clear_hidden_lines[] -> (),
+        0x0606_08bc => text::send_lines[] -> (),
+        0x0604_0fc0 => system::coins[slot] -> u32,
+        0x0606_0cd8 => text::credit_text[d, p, credits, coins] -> (),
+        0x0606_0dac => text::draw_credits[d, p, at] -> (),
+        0x0606_0e7c => text::credits_exec[d] -> (),
+        0x0604_3874 => hits::in_hit_set[of, obj] -> u32 frame 12,
+        0x0604_3d38 => hits::hits_exec[hits] -> () frame 228,
+        0x0604_5d78 => math::random_seed[seed] -> (),
+        0x0604_5d90 => math::random[n] -> u32 frame 8,
+        0x0604_5dcc => math::by_difficulty[x] -> u32,
+        0x0606_14b0 => text::typewriter_set[s, at, flags, blink] -> u32 frame 28,
+        0x0606_131c => text::typewriter_exec[obj] -> () frame 16,
+        0x0606_1504 => text::message_exec[obj] -> () frame 12,
+        0x0606_12bc => text::stop_text_objects[] -> () frame 8,
+        0x0605_fe34 => hud::put_digits[n, digits, at, p] -> (),
+        0x0606_0388 => hud::status_line[p, line] -> () frame 24,
+        0x0606_0550 => hud::gauge[p] -> () frame 20,
+        0x0606_0354 => hud::status_reset[p] -> (),
+        0x0606_0a0c => hud::draw_status[p] -> () frame 8,
         0x0600_4378 => system::count_vblank[] -> (),
-        0x0600_475c => system::sound_command_done[slot] -> u32,
         0x0604_0f44 => system::coin_byte3[slot] -> u32,
+        0x0604_0f5c => system::use_credit[slot] -> u32 frame 8,
         0x0604_0f74 => system::credits[slot] -> u32,
         0x0604_0fac => system::coin_settings_low[] -> u32,
         0x0603_3a6a => system::purge_cache[] -> (),

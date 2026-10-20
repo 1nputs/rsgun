@@ -29,8 +29,17 @@ const LOAD_ADR: u32 = 4;
 const LOADED: u32 = 8;
 const TRANS_SIZE: u32 = 12;
 
-/// Set with the loads emptied, at the game's start (what it is, is not known yet).
-const LOAD_SETTING: u32 = 0x0603_2e40;
+/// The rate the next load started goes at (bytes a frame; back to the default once a load takes
+/// it).
+const NEXT_RATE: u32 = 0x0603_2e40;
+const DEFAULT_RATE: u32 = 0x600;
+/// Files below this cart address are in its 8-bit ROM: a byte in each 16-bit word, the odd one.
+const WIDE_ROM: u32 = 0x2220_0000;
+
+/// A size rounded up to whole 32-bit words.
+fn words(size: u32) -> u32 {
+    if size & 3 != 0 { (size & !3) + 4 } else { size }
+}
 
 /// The file named `name` (its index in the table), or 0.
 pub fn file_no(cpu: &mut Cpu, name: u32) -> u32 {
@@ -106,6 +115,80 @@ pub fn clear_loads(cpu: &mut Cpu) {
 /// At the game's start: frees every load.
 pub fn init_loads(cpu: &mut Cpu) -> u32 {
     clear_loads(cpu);
-    cpu.write32(LOAD_SETTING, 0x600);
+    cpu.write32(NEXT_RATE, DEFAULT_RATE);
     1
+}
+
+/// Reads the file named `name` into `dst` at once: its size (in whole words), or 0 if there is
+/// no such file.
+pub fn read_file(cpu: &mut Cpu, name: u32, dst: u32) -> u32 {
+    let file = file_no(cpu, name);
+    if file == 0 {
+        return 0;
+    }
+    let entry = FILE_INF + FILE * file;
+    let narrow = (cpu.read32(entry + ROM_ADR) as i32) < WIDE_ROM as i32;
+    let mut i = 0;
+    while (i as i32) < cpu.read32(entry + FILE_SIZE) as i32 {
+        let rom = cpu.read32(entry + ROM_ADR);
+        let b = if narrow { cpu.read8(rom.wrapping_add(2 * i + 1)) } else { cpu.read8(rom.wrapping_add(i)) };
+        cpu.write8(dst.wrapping_add(i), b);
+        i += 1;
+    }
+    words(i)
+}
+
+/// The size of the file named `name` (in whole words), or 0.
+pub fn file_size(cpu: &mut Cpu, name: u32) -> u32 {
+    match file_no(cpu, name) {
+        0 => 0,
+        file => {
+            let size = cpu.read32(FILE_INF + FILE * file + FILE_SIZE);
+            words(size)
+        }
+    }
+}
+
+/// The size of `load`'s file (in whole words), or 0 for none.
+pub fn load_size(cpu: &mut Cpu, load: u32) -> u32 {
+    if load == 0 {
+        return 0;
+    }
+    let file = cpu.read32(load + FILE_NO);
+    let size = cpu.read32(FILE_INF + FILE * file + FILE_SIZE);
+    words(size)
+}
+
+/// Starts `load` into `dst` at the rate set for the next load (then the rate goes back to the
+/// default): its file's size, or 0 for no load.
+pub fn start_load(cpu: &mut Cpu, load: u32, dst: u32) -> u32 {
+    let rate = cpu.read32(NEXT_RATE);
+    cpu.write32(NEXT_RATE, DEFAULT_RATE);
+    if load == 0 {
+        return 0;
+    }
+    cpu.write32(load + LOAD_ADR, dst);
+    cpu.write32(load + LOADED, 0);
+    cpu.write32(load + TRANS_SIZE, rate);
+    load_size(cpu, load)
+}
+
+/// Whether `load` has its whole file (then it is freed): 1, or 0 while it goes on.
+pub fn load_done(cpu: &mut Cpu, load: u32) -> u32 {
+    if load == 0 {
+        return 1;
+    }
+    let file = cpu.read32(load + FILE_NO);
+    if cpu.read32(load + LOADED) != cpu.read32(FILE_INF + FILE * file + FILE_SIZE) {
+        return 0;
+    }
+    free_load(cpu, load);
+    1
+}
+
+/// Frees `load`.
+pub fn free_load(cpu: &mut Cpu, load: u32) {
+    if load != 0 {
+        cpu.write32(load + FILE_NO, 0);
+    }
 }

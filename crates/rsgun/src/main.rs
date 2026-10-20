@@ -9,7 +9,7 @@
 //!
 //! `--rom`: the images tools/rom/mkcart.py makes (default build/rom). `--save`: where the EEPROM,
 //! the backup RAM and the boot state (boot.rs) are kept (default $XDG_DATA_HOME/rsgun or
-//! ~/.local/share/rsgun). A run starts from the boot state, where the BIOS hands over to the game,
+//! ~/.local/share/rsgun; a headless run writes them back only when it is given). A run starts from the boot state, where the BIOS hands over to the game,
 //! unless `--cold` (or `--evidence`, `--compare`) has it go through the BIOS's boot from power on.
 //! `--script`: an input script (controls.rs) played instead of the keyboard and pads, its frames
 //! counted from power on. `--headless`: no window; runs to frame N and writes the last picture
@@ -60,6 +60,8 @@ const COIN_FRAMES: u32 = 4;
 struct Options {
     rom: PathBuf,
     save: PathBuf,
+    /// `--save` was given: a headless run writes its saves there too.
+    save_given: bool,
     script: Option<PathBuf>,
     scale: u32,
     fullscreen: bool,
@@ -93,6 +95,7 @@ fn parse_args() -> Result<Options, String> {
     let mut o = Options {
         rom: PathBuf::from("build/rom"),
         save: default_save_dir(),
+        save_given: false,
         script: None,
         scale: 3,
         fullscreen: false,
@@ -119,7 +122,10 @@ fn parse_args() -> Result<Options, String> {
         let mut value = || it.next().cloned().ok_or_else(|| format!("{a} needs a value"));
         match a.as_str() {
             "--rom" => o.rom = PathBuf::from(value()?),
-            "--save" => o.save = PathBuf::from(value()?),
+            "--save" => {
+                o.save = PathBuf::from(value()?);
+                o.save_given = true;
+            }
             "--script" => o.script = Some(PathBuf::from(value()?)),
             "--scale" => o.scale = value()?.parse().map_err(|_| "--scale: a number")?,
             "--fullscreen" => o.fullscreen = true,
@@ -247,6 +253,9 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
         if o.wav.is_some() {
             sound.extend_from_slice(&samples);
         }
+    }
+    if o.save_given {
+        save(&m, &o.save)?;
     }
     if let Some(p) = &o.save_state {
         let data = m.save_state()?;

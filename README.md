@@ -65,7 +65,8 @@ game runs a frame a refresh; otherwise by the clock at 59.94.
 | `tools/port/check_native.sh` | play1 and the attract mode natively and on the SH-2 code (CPUs 16 times as fast, so neither slows down): the same last pictures |
 | `tools/ghidra/project.py` | the Ghidra project of the port's functions with the leftover dma.c's types, and Ghidra's C for each in `build/ghidra/c` |
 | `tools/port/calls.py ADDR` | a function's callers and callees, from the evidence |
-| `tools/port/check.sh` | translates the game's functions to Rust (`tools/port/sh2rust.py`, into `build/port`) and checks every call the port has against the SH-2 code, over play1 and the attract mode |
+| `tools/port/check.sh` | translates the game's functions to Rust (`tools/port/sh2rust.py`, into `build/port`; from play1's and the attract mode's evidence, and the marathon's when it is there) and checks every call the port has against the SH-2 code, over play1, the attract mode and a boot from play1's backup RAM |
+| `tools/port/check_marathon.sh [JOBS]` | the same check over the whole game: the marathon's script (`tools/port/marathon.py`) from each of its save states, 10000 frames each, several at once |
 | `target/release/stv-check state --frames N --at F,F` | save states: a machine made from the state at each frame F must stay equal to the one it was saved from |
 | `tools/trace/check_spin.sh` | a machine that plays the CPUs' wait loops beside one that executes everything: equal after every frame |
 | `tools/scsp/probes.py` | crafted one-voice SCSP logs run on the oracle's SCSP (`tools/scsp/build.sh` builds it) and on ours: every sample must match |

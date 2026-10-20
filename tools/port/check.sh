@@ -1,7 +1,9 @@
 #!/bin/sh
 # The port's check: translates the game's functions (tools/port/sh2rust.py) and runs the game in
 # compare mode (rsgun --compare: the SH-2 code runs, each call the port has is checked against it)
-# through play1's input script and through the attract mode. Fails on any divergence.
+# through play1's input script, through the attract mode, and through a boot from the saves play1
+# left (the backup RAM it wrote: the game reads its scores back). Fails on any divergence.
+# tools/port/check_marathon.sh does the same over the whole game.
 #
 #     tools/port/check.sh [PLAY_FRAMES [ATTRACT_FRAMES]]
 #
@@ -9,13 +11,21 @@
 #     rsgun --headless --script tools/oracle/play1.txt --frames 4000 --evidence out/evidence/play1.txt \
 #         --dump 3000 --dump-dir out/evidence/dumps
 #     rsgun --headless --frames 7200 --evidence out/evidence/attract.txt
+# and, when they are there, the marathon's (tools/port/marathon.py; hours):
+#     rsgun --headless --script out/evidence/marathon-input.txt --frames 150000 --evidence out/evidence/marathon.txt
+#     rsgun --headless --script out/evidence/marathon-input.txt --load-state out/evidence/marathon-140000.state \
+#         --frames 210000 --evidence out/evidence/marathon-end.txt
 # Output: out/port/ (the reports).
 set -e
 cd "$(dirname "$0")/../.."
 PLAY=${1:-4000}
 ATTRACT=${2:-7200}
-python3 -I tools/port/sh2rust.py --image out/evidence/dumps/f003000/wram-h.bin \
-    --evidence out/evidence/play1.txt,out/evidence/attract.txt --out build/port/generated.rs
+EVIDENCE=out/evidence/play1.txt,out/evidence/attract.txt
+for e in marathon marathon-end; do
+    if [ -f "out/evidence/$e.txt" ]; then EVIDENCE="$EVIDENCE,out/evidence/$e.txt"; fi
+done
+python3 -I tools/port/sh2rust.py --image out/evidence/dumps/f003000/wram-h.bin --evidence "$EVIDENCE" \
+    --out build/port/generated.rs
 cargo build --release -q -p rsgun
 rm -rf out/port
 mkdir -p out/port
@@ -24,9 +34,11 @@ mkdir -p out/port
 attract=$!
 ./target/release/rsgun --headless --save out/port/save-play1 --script tools/oracle/play1.txt --frames "$PLAY" \
     --compare out/port/play1.txt > out/port/play1.log 2>&1
+./target/release/rsgun --headless --save out/port/save-play1 --frames 1300 --compare out/port/backup.txt \
+    > out/port/backup.log 2>&1
 wait $attract
 fail=0
-for r in play1 attract; do
+for r in play1 attract backup; do
     echo "$r: $(head -1 out/port/$r.txt)"
     grep -q ", 0 diverging;" out/port/$r.txt || fail=1
 done

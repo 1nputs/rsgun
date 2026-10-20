@@ -27,9 +27,7 @@ const DIGITAL: [u8; 3] = [0x02, 0xE2, 0xE1];
 /// How far into a port the game looks.
 const LOOKED_AT: u32 = 6;
 
-/// A word of the BIOS's: unless its bits 12-15 are 1, the pads' bit 9 is cleared (what the
-/// setting is, is not known yet).
-const BIOS_SETTING: u32 = 0x0600_0248;
+/// Cleared unless the BIOS's setting is 1 (globals::BIOS_SETTING).
 const BUTTON_9: u16 = 1 << 9;
 
 fn pad(n: u32) -> u32 {
@@ -88,7 +86,7 @@ pub fn pad_read(cpu: &mut Cpu) {
             }
         }
     }
-    if (cpu.read32(BIOS_SETTING) >> 12) & 0xF != 1 {
+    if !super::globals::bios_setting_is_1(cpu) {
         for n in 0..PADS {
             let held = cpu.read16(pad(n) + DATA);
             cpu.write16(pad(n) + DATA, held & !BUTTON_9);

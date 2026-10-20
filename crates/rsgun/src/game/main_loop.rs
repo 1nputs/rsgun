@@ -3,7 +3,7 @@
 //! queued copies, and SGL's frame sync (which waits for the VBlank).
 
 use super::globals::{ELAPSED, GAME_END, GAME_FLAGS, GAME_FRAMES, HELD, LAST_VBLANKS, LOOPS, VBLANKS};
-use super::{dma, files, objects, pads, palette, vblank, Cpu};
+use super::{dma, files, objects, pads, palette, sound, vblank, Cpu};
 
 /// SGL's: the display off and on (VDP2's TVMD, the next VBlank), slSynch (the frame's end: waits
 /// for the VBlank, then the slave draws), the matrix stack back to one unit matrix.
@@ -20,8 +20,7 @@ const SL_060670FC: u32 = 0x0606_70fc;
 const SL_0606713C: u32 = 0x0606_713c;
 /// The game's: its state at the start (the object lists among it), not yet rewritten.
 const INIT_GAME: u32 = 0x0604_016c;
-/// Cleared at the start (not known yet); and a word whose bit 31 lasts one game frame.
-const START_CLEARED: u32 = 0x0600_edd8;
+/// A word whose bit 31 lasts one game frame.
 const ONE_FRAME: u32 = 0x0607_405c;
 
 /// Runs the game until something sets GAME_END: what it was set to.
@@ -34,7 +33,7 @@ pub fn main_loop(cpu: &mut Cpu) -> u32 {
     vblank::init_vblank(cpu);
     dma::dma_control_init(cpu);
     cpu.call(INIT_GAME, &[]);
-    cpu.write32(START_CLEARED, 0);
+    cpu.write32(sound::SE_LOCK, 0);
     cpu.call(SL_TV_ON, &[]);
     cpu.write32(GAME_END, 0);
     loop {
