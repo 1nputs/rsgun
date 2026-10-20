@@ -1,0 +1,90 @@
+diff -ru a/src/ss/scsp.h b/src/ss/scsp.h
+--- a/src/ss/scsp.h
++++ b/src/ss/scsp.h
+@@ -22,6 +22,7 @@
+ class SS_SCSP
+ {
+  public:
++ uint16* OracleRAM(void) { return RAM; }
+ 
+  SS_SCSP() MDFN_COLD;
+  ~SS_SCSP() MDFN_COLD;
+diff -ru a/src/ss/sound.cpp b/src/ss/sound.cpp
+--- a/src/ss/sound.cpp
++++ b/src/ss/sound.cpp
+@@ -221,6 +221,11 @@
+  SCSP.Reset(false);
+ }
+ 
++uint16* SOUND_OracleRAM(void)
++{
++ return SCSP.OracleRAM();
++}
++
+ void SOUND_Kill(void)
+ {
+  if(resampler)
+diff -ru a/src/ss/sound.h b/src/ss/sound.h
+--- a/src/ss/sound.h
++++ b/src/ss/sound.h
+@@ -29,6 +29,7 @@
+ void SOUND_SetMIDIOutput(void (*p)(uint8)) MDFN_COLD;
+ void SOUND_Reset(bool powering_up) MDFN_COLD;
+ void SOUND_Kill(void) MDFN_COLD;
++uint16* SOUND_OracleRAM(void) MDFN_COLD;
+ 
+ void SOUND_Set68KActive(bool active);
+ void SOUND_Reset68K(void);
+diff -ru a/src/ss/ss.cpp b/src/ss/ss.cpp
+--- a/src/ss/ss.cpp
++++ b/src/ss/ss.cpp
+@@ -854,6 +854,8 @@
+  return SS_EVENT_DISABLED_TS;
+ }
+ 
++#include "oracle.inc"
++
+ static void Emulate(EmulateSpecStruct* espec_arg)
+ {
+  int32 end_ts;
+@@ -921,6 +923,7 @@
+  //
+  //
+  SMPC_UpdateOutput();
++ Oracle_EndFrame(espec);
+  //
+  //
+  //
+@@ -1658,6 +1661,7 @@
+ 
+ static MDFN_COLD void Load(GameFile* gf)
+ {
++ Oracle_Init();
+  const std::string dbg_cdpath = MDFN_GetSettingS("ss.dbg_exe_cdpath");
+  //
+  const bool region_autodetect = MDFN_GetSettingB("ss.region_autodetect");
+diff -ru a/src/ss/vdp2.cpp b/src/ss/vdp2.cpp
+--- a/src/ss/vdp2.cpp
++++ b/src/ss/vdp2.cpp
+@@ -909,6 +909,9 @@
+  VDP2REND_SetGetVideoParams(gi, caspect, sls, sle, show_h_overscan, dohblend);
+ }
+ 
++uint16* OracleVRAM(void) { return VRAM; }
++uint16* OracleCRAM(void) { return CRAM; }
++
+ void Kill(void)
+ {
+  VDP2REND_Kill();
+diff -ru a/src/ss/vdp2.h b/src/ss/vdp2.h
+--- a/src/ss/vdp2.h
++++ b/src/ss/vdp2.h
+@@ -34,6 +34,8 @@
+ void Init(const bool IsPAL, const uint64 affinity) MDFN_COLD;
+ void SetGetVideoParams(MDFNGI* gi, const bool caspect, const int sls, const int sle, const bool show_h_overscan, const bool dohblend) MDFN_COLD;
+ void Kill(void) MDFN_COLD;
++uint16* OracleVRAM(void) MDFN_COLD;
++uint16* OracleCRAM(void) MDFN_COLD;
+ void StateAction(StateMem* sm, const unsigned load, const bool data_only) MDFN_COLD;
+ 
+ void Reset(bool powering_up) MDFN_COLD;
