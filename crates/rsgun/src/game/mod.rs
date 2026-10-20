@@ -416,6 +416,7 @@ pub fn register(n: &mut Natives) {
         0x0604_d95c => actors::trail_init[actor, a, b, boxes] -> (),
         0x0604_da00 => actors::trail_record[actor, angle] -> (),
         0x0605_75e4 => explosions::shrink_exec[o] -> (),
+        0x0605_88d4 => explosions::explosion_exec[x] -> (),
         0x0605_80bc => explosions::twin_exec[o] -> (),
         0x0605_8278 => explosions::twin_set[p] -> (),
         0x0605_8444 => explosions::ember_exec[o] -> (),

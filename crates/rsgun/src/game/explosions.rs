@@ -418,3 +418,171 @@ pub fn debris_set(cpu: &mut Cpu, p: u32, spread: u32) {
     }
     cpu.call(SL_POP_MATRIX, &[]);
 }
+
+/// An explosion: what it follows (+0x3c, an object; dropped once that ends), its power (grows by
+/// 0x100 a frame to 0xc000, then falls back), its state (a word: growing, burning down, fading;
+/// also the word its orbiting sparks watch).
+const FOLLOWS: u32 = 0x3c;
+const POWER: u32 = 0x40;
+const STATE: u32 = 0x58;
+const GROWING: u16 = 0;
+const BURNING: u16 = 0x10;
+const BURNT_OUT: u16 = 0x20;
+const FADED: u16 = 0x400;
+const POWER_STEP: u32 = 0x100;
+const POWER_MOST: i32 = 0xc000;
+/// The flash at its height: the screen's colour offset to grey, faded back to none over 300
+/// frames; the sound effects (the big one, and one of four at random every 16 steps of power).
+const FLASH: u32 = 80;
+const FLASH_FADE: u32 = 300;
+const SE_BIG: u32 = 19;
+const SE_SMALL: u32 = 0x0607_31c6;
+/// Makers of other pieces (not rewritten yet).
+const BIG_PIECE_SET: u32 = 0x0605_8e1c;
+const SMALL_PIECE_SET: u32 = 0x0605_7da4;
+/// The explosion's own flags bit (an attribute, at random) and colours.
+const COLOUR_ALT: u16 = 0x10;
+
+/// The explosion's description of its pieces (in its frame): their position, scales, angle (a
+/// word), a word at +0x20 (the orbiter's colours' index in its low byte), the orbiter's radius and
+/// the radius's speed, a word at +0x2c (an ember's growth as a long; the orbiter's kind in its low
+/// byte), the orbiter's angle offset, turn and a word (its lift in the low byte), the orbiter's
+/// scales' speeds, what an ember circles.
+const D_SCALES: u32 = 0x0c;
+const D_ANGLE: u32 = 0x18;
+const D_20: u32 = 0x20;
+const D_RADIUS: u32 = 0x24;
+const D_2C: u32 = 0x2c;
+const D_ANGLE_OFFSET: u32 = 0x2e;
+const D_TURN: u32 = 0x30;
+const D_32: u32 = 0x32;
+const D_SCALE_SPEED: u32 = 0x34;
+const D_AROUND: u32 = 0x3c;
+const ORBIT_SET: u32 = 0x0605_9554;
+
+/// An explosion's behaviour: ended once the screen is handed over; it follows what it follows (or
+/// stays). Growing, its power goes up and it throws two pieces of debris a frame (and an ember
+/// every other), a small piece and sound every 16th; at full power it flashes the screen, throws
+/// a big piece with the big sound, and burns down, its power falling while it throws twin sparks
+/// on even frames; burnt out, it fades for 64 frames and ends. Each frame (but the last) it also
+/// makes a spark orbiting it and takes a random size, flip, frame and colour.
+pub fn explosion_exec(cpu: &mut Cpu, x: u32) {
+    if handed_over(cpu) {
+        end(cpu, x);
+        return;
+    }
+    let follows = cpu.read32(x + FOLLOWS);
+    if follows != 0 && cpu.read8(follows + OBJ_MODE) as i8 >= ENDING as i8 {
+        cpu.write32(x + FOLLOWS, 0);
+    }
+    let d = cpu.stack();
+    if cpu.read32(x + FOLLOWS) != 0 {
+        for k in 0..3 {
+            let v = cpu.read32(follows + POSITION + 4 * k);
+            cpu.write32(d + 4 * k, v);
+        }
+        for k in 0..3 {
+            let v = cpu.read32(d + 4 * k);
+            cpu.write32(x + POSITION + 4 * k, v);
+        }
+    } else {
+        for k in 0..3 {
+            let v = cpu.read32(x + POSITION + 4 * k);
+            cpu.write32(d + 4 * k, v);
+        }
+    }
+    match cpu.read16(x + STATE) {
+        GROWING => {
+            let power = cpu.read32(x + POWER).wrapping_add(POWER_STEP);
+            cpu.write32(x + POWER, power);
+            nested!(cpu, 0x0605_86e4, debris_set(cpu, d, power));
+            let power = cpu.read32(x + POWER);
+            nested!(cpu, 0x0605_86e4, debris_set(cpu, d, power));
+            cpu.write32(d + D_AROUND, x);
+            let power = cpu.read32(x + POWER);
+            if power & POWER_STEP == 0 {
+                cpu.write32(d + D_2C, power);
+                nested!(cpu, 0x0605_8520, ember_set(cpu, d));
+            }
+            let power = cpu.read32(x + POWER);
+            if power as i32 > POWER_MOST {
+                cpu.write16(x + STATE, BURNING);
+                nested!(cpu, 0x0605_e9d8, super::screen::stop_fades(cpu));
+                nested!(cpu, 0x0605_e6dc, super::screen::set_fade_offset(cpu, FLASH, FLASH, FLASH));
+                nested!(cpu, 0x0605_e93c, super::screen::fade_to(cpu, 0, 0, 0, FLASH_FADE));
+                cpu.write16(d + D_20, 0);
+                cpu.write32(d + D_2C, 0x1800);
+                cpu.write32(d + D_TURN, -80i32 as u32);
+                cpu.write32(d + D_SCALE_SPEED, 0x20);
+                cpu.call(BIG_PIECE_SET, &[d]);
+                nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_BIG));
+            } else if power & 0xf00 == 0 {
+                cpu.write16(d + D_20, 0);
+                let power = cpu.read32(x + POWER);
+                cpu.write32(d + D_SCALES + 4, power.wrapping_mul(6));
+                let r = random(cpu, 0x10000);
+                cpu.write16(d + D_ANGLE, r as u16);
+                cpu.call(SMALL_PIECE_SET, &[d]);
+                let r = random(cpu, 0x10000) & 3;
+                let se = cpu.read16(SE_SMALL + 4 * r) as i16 as i32 as u32;
+                nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, se));
+            }
+        }
+        BURNING => {
+            if cpu.read32(GAME_FRAMES) & 1 == 0 {
+                nested!(cpu, 0x0605_8278, twin_set(cpu, d));
+            }
+            let power = cpu.read32(x + POWER).wrapping_sub(POWER_STEP);
+            cpu.write32(x + POWER, power);
+            if (power as i32) < 0 {
+                cpu.write16(x + STATE, BURNT_OUT);
+            }
+        }
+        _ => {
+            let state = cpu.read16(x + STATE).wrapping_add(0x10);
+            cpu.write16(x + STATE, state);
+            if state > FADED {
+                cpu.write16(x + STATE, 1);
+                end(cpu, x);
+                return;
+            }
+        }
+    }
+    // the orbiting spark (orbits.rs: kind 0, colours 4), and the explosion's own look
+    cpu.write16(d + D_2C, 0);
+    cpu.write16(d + D_20, 4);
+    let r = random(cpu, 0x10000);
+    cpu.write32(d + D_SCALES, (r & 0x1fff) + 0x4000);
+    let power = cpu.read32(x + POWER);
+    let height = power.wrapping_mul(8);
+    cpu.write32(d + D_SCALES + 4, height);
+    cpu.write32(d + D_SCALE_SPEED, 0);
+    cpu.write32(d + D_SCALE_SPEED + 4, shifted((height as i32).wrapping_neg(), 6));
+    cpu.write16(d + D_ANGLE, 0);
+    let r = random(cpu, 0x10000);
+    cpu.write16(d + D_ANGLE_OFFSET, r as u16);
+    let r = random(cpu, 0x100);
+    cpu.write16(d + D_TURN, r as u16);
+    cpu.write16(d + D_32, 0);
+    let power = cpu.read32(x + POWER);
+    let radius = power.wrapping_mul(0x80);
+    cpu.write32(d + D_RADIUS, radius);
+    cpu.write32(d + D_RADIUS + 4, shifted((radius as i32).wrapping_neg(), 6));
+    let (watched, centre, angle) = (x + STATE, x + POSITION, x + ANGLE);
+    cpu.nested_with_stack(&ORBIT_SET_PROLOGUE, ORBIT_SET, &[angle], |cpu| super::orbits::orbit_set(cpu, d, watched, 1, centre, angle));
+    let flags = cpu.read32(x + FLAGS) & !ATTR_100;
+    cpu.write32(x + FLAGS, flags);
+    let r = random(cpu, 0x10000);
+    let flags = cpu.read32(x + FLAGS) | (r & ATTR_100);
+    cpu.write32(x + FLAGS, flags);
+    let r = random(cpu, 0x2000);
+    let size = cpu.read32(x + POWER).wrapping_sub(r).wrapping_mul(2);
+    cpu.write32(x + SCALES, size);
+    cpu.write32(x + SCALES + 4, size);
+    let r = random(cpu, 0x10000);
+    cpu.write8(x + FRAME, (r & 1) as u8);
+    let r = random(cpu, 0x10000);
+    let base = cpu.read16(CHAR_BASE);
+    cpu.write16(x + COLOUR, if r & 7 != 0 { base } else { base + COLOUR_ALT });
+}
+static ORBIT_SET_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
