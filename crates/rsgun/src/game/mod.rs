@@ -21,6 +21,7 @@ mod effects;
 mod explosions;
 mod files;
 mod globals;
+mod ground;
 mod hits;
 mod hud;
 mod main_loop;
@@ -517,6 +518,8 @@ pub fn register(n: &mut Natives) {
         0x0605_5b5c => bullets::rocket_set[shot] -> u32,
         0x0605_5d84 => bullets::rocket_set_plain[shot] -> u32,
         0x0605_6260 => bg::ground_still[] -> u32,
+        0x0605_a000 => ground::route_step[o, script] -> u32,
+        0x0605_a460 => ground::route_move[o] -> (),
         0x0605_3bfc => bullets::bullet_frame[b] -> (),
         0x0605_3ccc => bullets::bullet_move[b] -> (),
         0x0605_3cfc => bullets::bullet_swirl[b] -> (),
