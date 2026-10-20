@@ -519,6 +519,7 @@ pub fn register(n: &mut Natives) {
         0x0605_5d84 => bullets::rocket_set_plain[shot] -> u32,
         0x0605_6260 => bg::ground_still[] -> u32,
         0x0605_a000 => ground::route_step[o, script] -> u32,
+        0x0605_a340 => ground::aim_step[o, script, keep] -> u32,
         0x0605_a460 => ground::route_move[o] -> (),
         0x0605_3bfc => bullets::bullet_frame[b] -> (),
         0x0605_3ccc => bullets::bullet_move[b] -> (),

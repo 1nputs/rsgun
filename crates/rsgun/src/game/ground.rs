@@ -181,3 +181,70 @@ pub fn route_move(cpu: &mut Cpu, o: u32) {
     let flags = if (h as i32).wrapping_abs() > LOW { flags | NO_HITS } else { flags & !NO_HITS };
     cpu.write32(o + FLAGS, flags);
 }
+
+/// A gun's aim script (bytes): the first aim (its high byte); then steps: flag bytes (odd: their
+/// low 4 bits returned as the step starts; with 0x40 the next byte jumps back that far and one
+/// more), the frames the step lasts and the aim it turns to over them (its high byte). 0x81 ends
+/// it.
+const AIM: u32 = 0x8a;
+const AIM_TURN: u32 = 0x98;
+const AIM_FRAMES_LEFT: u32 = 0x9a;
+const AIM_AT: u32 = 0x9c;
+const JUMP_BACK: u8 = 0x40;
+
+/// One frame of the actor's aim `script`: a new step taken when the last is over (its aim set
+/// from the script's unless `keep`), else the aim turned by the step's turn. The new step's last
+/// flag byte's low 4 bits, else 0.
+pub fn aim_step(cpu: &mut Cpu, o: u32, script: u32, keep: u32) -> u32 {
+    let keep = keep as u8;
+    let at = cpu.read16(o + AIM_AT) as i16 as i32 as u32;
+    if cpu.read8(script.wrapping_add(at)) == END {
+        return 0;
+    }
+    let mut flags = 0;
+    if cpu.read16(o + AIM_FRAMES_LEFT) != 0 {
+        let a = cpu.read16(o + AIM).wrapping_add(cpu.read16(o + AIM_TURN));
+        cpu.write16(o + AIM, a);
+    } else {
+        let next = if at == 0 {
+            let a = (cpu.read8(script) as u16) << 8;
+            cpu.write16(o + AIM, a);
+            cpu.read16(o + AIM_AT).wrapping_add(1)
+        } else {
+            if keep == 0 {
+                let a = (cpu.read8(script.wrapping_add(at + 1)) as u16) << 8;
+                cpu.write16(o + AIM, a);
+            }
+            cpu.read16(o + AIM_AT).wrapping_add(2)
+        };
+        cpu.write16(o + AIM_AT, next);
+        let byte = |cpu: &mut Cpu| {
+            let at = cpu.read16(o + AIM_AT) as i16 as i32 as u32;
+            cpu.read8(script.wrapping_add(at))
+        };
+        if byte(cpu) != END {
+            while byte(cpu) & FLAG_BYTE != 0 {
+                let b = byte(cpu);
+                let at = cpu.read16(o + AIM_AT).wrapping_add(1);
+                cpu.write16(o + AIM_AT, at);
+                if b & JUMP_BACK != 0 {
+                    let back = byte(cpu) as u16 + 1;
+                    cpu.write16(o + AIM_AT, at.wrapping_sub(back));
+                }
+                flags = (b & 0xf) as u32;
+            }
+            let p = script.wrapping_add(cpu.read16(o + AIM_AT) as i16 as i32 as u32);
+            let frames = cpu.read8(p) as u16;
+            cpu.write16(o + AIM_FRAMES_LEFT, frames);
+            let to = (cpu.read8(p + 1) as u32) << 8;
+            let from = cpu.read16(o + AIM) as u32;
+            let d = nested!(cpu, 0x0605_6580, aim::angle_between(cpu, from, to)) as i16 as i32 as u32;
+            let frames = cpu.read16(o + AIM_FRAMES_LEFT) as i16 as i32 as u32;
+            let turn = nested!(cpu, 0x0600_6a78, math::quotient(cpu, d, frames));
+            cpu.write16(o + AIM_TURN, turn as u16);
+        }
+    }
+    let n = cpu.read16(o + AIM_FRAMES_LEFT).wrapping_sub(1);
+    cpu.write16(o + AIM_FRAMES_LEFT, n);
+    flags
+}
