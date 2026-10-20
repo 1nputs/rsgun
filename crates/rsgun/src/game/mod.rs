@@ -34,6 +34,7 @@ mod play;
 mod palette;
 mod parts;
 mod screen;
+mod shots;
 mod sound;
 mod sprites;
 mod states;
@@ -448,6 +449,10 @@ pub fn register(n: &mut Natives) {
         0x0605_8520 => explosions::ember_set[d] -> (),
         0x0605_8638 => explosions::debris_exec[o] -> (),
         0x0605_86e4 => explosions::debris_set[p, spread] -> (),
+        0x0604_8278 => shots::shot_spark[s] -> (),
+        0x0604_8318 => shots::shot_a_exec[s] -> (),
+        0x0604_8480 => shots::shot_a_side_exec[s] -> (),
+        0x0604_860c => shots::shot_a_set[p] -> u32,
         0x0604_7f60 => player::player_exec[p] -> (),
         0x0604_7b0c => player::control[p] -> (),
         0x0604_77ec => player::weapons_frame[p] -> (),
