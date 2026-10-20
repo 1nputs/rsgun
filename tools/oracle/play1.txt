@@ -1,0 +1,12 @@
+# Insert a coin, start, sit through the Trial Ride tutorial firing each weapon, into stage 1
+1500 coin
+1504
+1600 start
+1604
+1800 a
+2000 a up
+2200 a left
+2400 b
+2600 c right
+2800 abc
+3000 a down

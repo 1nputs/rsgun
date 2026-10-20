@@ -8,6 +8,10 @@
  *   STV_ORACLE_EXIT   exit after this frame (after its dump and trace, if any)
  *   STV_ORACLE_TRACE  F:N[,F:N...]  trace both SH-2s through frames F to F+N-1 (windows in order; a
  *                     window from frame 1 starts at power on)
+ *   STV_ORACLE_SOUND  N  log the SCSP from power on through frame N to DIR/sound/ (below)
+ *   STV_ORACLE_INPUT  FILE  the I/O chip's input ports from a script: lines "F P" from frame F on (the
+ *                     F-th Emulate() call, counting from 0), P sixteen hex digits, ports A-H
+ *                     (active low); port D stays as the oracle has it
  *   STV_ORACLE_HASHES FILE  write a line per frame: the frame number, then 64-bit FNV-1a hashes (hex) of
  *                     the big-endian bytes of work RAM-L, work RAM-H, VDP1 VRAM, VDP2 VRAM, VDP2 CRAM,
  *                     VDP2's registers (as written, 0x200 bytes) and sound RAM, then both SH-2s' PCs
@@ -51,9 +55,17 @@
  * (before an interrupt's acknowledge), a = the PC saved, v = Mednafen's exception number (0xFF a
  * reset, with a = the new PC); 'I' an interrupt's level (size) and the vector taken (a).
  * The file begins with one header record: 'H', size 3 (the version), a = 0x53545654 ("STVT"), v = 0.
+ *
+ * The sound log, DIR/sound/: samples.bin, each sample the SCSP makes (44.1 kHz), as two big-endian
+ * 16-bit words, left and right, before Mednafen scales its output; writes.bin, 16-byte big-endian
+ * records: u32 samples made before it; u8 tag; u8 size; u16 0; u32 a; u32 v
+ *   'W' a write into the SCSP from either CPU or a DMA: a = the SCSP's address (RAM from 0, the
+ *       registers from 0x100000), v = the value (size 1 or 2)
+ *   'F' the end of a frame: a = the frame number
  */
 
 #include <sys/stat.h>
+#include <array>
 
 namespace VDP1	// (declared only inside inlines in vdp1.h, or in vdp1_common.h)
 {
@@ -78,6 +90,9 @@ static struct
  FILE* hashes_fp;
  FILE* trace_fp[3];
  std::vector<uint8> trace_buf[3];
+ std::vector<std::pair<uint64, std::array<uint8, 8>>> input;	// from frame, the ports
+ uint64 sound_end;	// the frame the sound log ends after (0: none)
+ FILE* sound_fp[2];	// writes, samples
 } Oracle;
 
 static INLINE bool Oracle_Tracing(void)
@@ -128,6 +143,44 @@ static void Oracle_SoundHook(uint8 tag, uint8 size, uint32 a, uint32 v)
  Oracle_Record(2, tag, size, a, v);
 }
 
+static void Oracle_SoundRecord(uint64 samples, uint8 tag, uint8 size, uint32 a, uint32 v)
+{
+ const uint8 rec[16] = { (uint8)(samples >> 24), (uint8)(samples >> 16), (uint8)(samples >> 8), (uint8)samples,
+			 tag, size, 0, 0, (uint8)(a >> 24), (uint8)(a >> 16), (uint8)(a >> 8), (uint8)a,
+			 (uint8)(v >> 24), (uint8)(v >> 16), (uint8)(v >> 8), (uint8)v };
+
+ fwrite(rec, 1, sizeof(rec), Oracle.sound_fp[0]);
+}
+
+static void Oracle_SoundWrite(uint64 samples, unsigned size, uint32 a, uint32 v)
+{
+ Oracle_SoundRecord(samples, 'W', size, a, size == 1 ? (uint8)v : (uint16)v);
+}
+
+static void Oracle_SoundSample(const int16* lr)
+{
+ const uint8 s[4] = { (uint8)((uint16)lr[0] >> 8), (uint8)lr[0], (uint8)((uint16)lr[1] >> 8), (uint8)lr[1] };
+
+ fwrite(s, 1, sizeof(s), Oracle.sound_fp[1]);
+}
+
+static void Oracle_Input(uint8* data_in)
+{
+ const std::array<uint8, 8>* ports = nullptr;
+
+ for(const auto& l : Oracle.input)
+ {
+  if(l.first > Oracle.frame)
+   break;
+  ports = &l.second;
+ }
+ for(unsigned i = 0; i < 8; i++)
+ {
+  if(i != 3)
+   data_in[i] = ports ? (*ports)[i] : 0xFF;
+ }
+}
+
 static void Oracle_Init(void)
 {
  const char* dir = getenv("STV_ORACLE_DIR");
@@ -163,6 +216,28 @@ static void Oracle_Init(void)
  }
  if(const char* e = getenv("STV_ORACLE_EXIT"))
   Oracle.exit_frame = strtoull(e, nullptr, 10);
+ Oracle.input.clear();
+ if(const char* in = getenv("STV_ORACLE_INPUT"))
+ {
+  if(FILE* fp = (*in ? fopen(in, "r") : nullptr))
+  {
+   unsigned long long f, p;
+
+   while(fscanf(fp, "%llu %llx", &f, &p) == 2)
+   {
+    std::array<uint8, 8> ports;
+
+    for(unsigned i = 0; i < 8; i++)
+     ports[i] = (uint8)(p >> (56 - 8 * i));
+    Oracle.input.push_back({ f, ports });
+   }
+   fclose(fp);
+   STVIO_OracleInput = Oracle_Input;
+  }
+ }
+ Oracle.sound_end = 0;
+ if(const char* s = getenv("STV_ORACLE_SOUND"))
+  Oracle.sound_end = strtoull(s, nullptr, 10);
  if(const char* t = getenv("STV_ORACLE_TRACE"))
  {
   for(const char* p = t; *p;)
@@ -180,6 +255,16 @@ static void Oracle_Init(void)
   }
  }
  mkdir(Oracle.dir.c_str(), 0755);
+ if(Oracle.sound_end)
+ {
+  const std::string d = Oracle.dir + "/sound";
+
+  mkdir(d.c_str(), 0755);
+  Oracle.sound_fp[0] = fopen((d + "/writes.bin").c_str(), "wb");
+  Oracle.sound_fp[1] = fopen((d + "/samples.bin").c_str(), "wb");
+  SOUND_OracleWrite = Oracle_SoundWrite;
+  SOUND_OracleSample = Oracle_SoundSample;
+ }
 }
 
 static void Oracle_WriteWords(const std::string& path, const uint16* words, size_t count)
@@ -433,6 +518,18 @@ static void Oracle_EndFrame(const EmulateSpecStruct* es)
  Oracle.frame++;
  if(Oracle.hashes_fp)
   Oracle_WriteHashes();
+ if(Oracle.sound_end)
+ {
+  Oracle_SoundRecord(SOUND_OracleSamples, 'F', 0, (uint32)Oracle.frame, 0);
+  if(Oracle.frame >= Oracle.sound_end)
+  {
+   SOUND_OracleWrite = nullptr;
+   SOUND_OracleSample = nullptr;
+   fclose(Oracle.sound_fp[0]);
+   fclose(Oracle.sound_fp[1]);
+   Oracle.sound_end = 0;
+  }
+ }
  if(Oracle.tracing)
  {
   for(unsigned c = 0; c < 3; c++)

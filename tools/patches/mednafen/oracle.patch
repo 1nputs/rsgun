@@ -28,6 +28,19 @@
  
   SS_SCSP() MDFN_COLD;
   ~SS_SCSP() MDFN_COLD;
+--- a/src/ss/scsp.inc
++++ b/src/ss/scsp.inc
+@@ -350,6 +350,10 @@
+ template<typename T, bool IsWrite>
+ INLINE void SS_SCSP::RW(uint32 A, T& DBV)
+ {
++#ifdef SS_SCSP_ORACLE
++ if(IsWrite && MDFN_UNLIKELY(SOUND_OracleWrite))
++  SOUND_OracleWrite(SOUND_OracleSamples, sizeof(T), A, DBV);
++#endif
+  if(A < 0x100000)
+  {
+   if(MDFN_UNLIKELY(A >= 0x80000))
 --- a/src/ss/sh7095.inc
 +++ b/src/ss/sh7095.inc
 @@ -2709,7 +2709,7 @@
@@ -83,7 +96,21 @@
  	 else
 --- a/src/ss/sound.cpp
 +++ b/src/ss/sound.cpp
-@@ -221,6 +221,20 @@
+@@ -74,6 +74,13 @@
+  #endif
+ }
+ 
++// stv-recomp oracle (oracle.inc): every write into the SCSP, with the samples it has made before it,
++// and each sample it makes (before the output scaling)
++void (*SOUND_OracleWrite)(uint64 samples, unsigned size, uint32 A, uint32 V) = nullptr;
++void (*SOUND_OracleSample)(const int16* lr) = nullptr;
++uint64 SOUND_OracleSamples = 0;
++#define SS_SCSP_ORACLE 1
++
+ #include "scsp.inc"
+ 
+ //
+@@ -221,6 +228,20 @@
   SCSP.Reset(false);
  }
  
@@ -104,7 +131,17 @@
  void SOUND_Kill(void)
  {
   if(resampler)
-@@ -449,6 +463,8 @@
+@@ -261,6 +282,9 @@
+  //
+  int16* const bp = IBuffer[IBufferCount];
+  SCSP.RunSample(bp, MIDI_Out);
++ if(MDFN_UNLIKELY(SOUND_OracleSample))
++  SOUND_OracleSample(bp);
++ SOUND_OracleSamples++;
+  //bp[0] = rand();
+  //bp[1] = rand();
+  bp[0] = (bp[0] * 27 + 16) >> 5;
+@@ -449,6 +473,8 @@
    RunSCSP();
  
   SCSP.RW<T, false>(A & 0x1FFFFF, ret);
@@ -113,7 +150,7 @@
  
   SoundCPU.timestamp += 2;
  
-@@ -518,6 +534,8 @@
+@@ -518,6 +544,8 @@
  
   SoundCPU.timestamp += 2;
  
@@ -122,7 +159,7 @@
   SCSP.RW<T, true>(A & 0x1FFFFF, V);
   SoundCPU.timestamp += 2;
  }
-@@ -561,11 +579,15 @@
+@@ -561,11 +589,15 @@
    RunSCSP();
  
   SCSP.RW<uint8, false>(A & 0x1FFFFF, tmp);
@@ -140,12 +177,15 @@
   SoundCPU.timestamp += 2;
 --- a/src/ss/sound.h
 +++ b/src/ss/sound.h
-@@ -29,6 +29,8 @@
+@@ -29,6 +29,11 @@
  void SOUND_SetMIDIOutput(void (*p)(uint8)) MDFN_COLD;
  void SOUND_Reset(bool powering_up) MDFN_COLD;
  void SOUND_Kill(void) MDFN_COLD;
 +uint16* SOUND_OracleRAM(void) MDFN_COLD;
 +void SOUND_OracleRegs(uint32* out) MDFN_COLD;
++extern void (*SOUND_OracleWrite)(uint64 samples, unsigned size, uint32 A, uint32 V);
++extern void (*SOUND_OracleSample)(const int16* lr);
++extern uint64 SOUND_OracleSamples;
  
  void SOUND_Set68KActive(bool active);
  void SOUND_Reset68K(void);
@@ -193,7 +233,27 @@
   const bool region_autodetect = MDFN_GetSettingB("ss.region_autodetect");
 --- a/src/ss/stvio.cpp
 +++ b/src/ss/stvio.cpp
-@@ -333,6 +333,12 @@
+@@ -85,6 +85,9 @@
+  *DPtr[12] &= ~0x01; // Zero SS reset button bit to SMPC.
+ }
+ 
++// stv-recomp oracle (oracle.inc): an input script's ports, over the inputs
++void (*STVIO_OracleInput)(uint8* data_in) = nullptr;
++
+ void STVIO_UpdateInput(int32 elapsed_time)
+ {
+  memset(DataIn, 0xFF, sizeof(DataIn));
+@@ -189,6 +192,9 @@
+ 
+  // ?
+  DataIn[0x3] = 0x00;
++
++ if(MDFN_UNLIKELY(STVIO_OracleInput))
++  STVIO_OracleInput(DataIn);
+ }
+ 
+ void STVIO_Reset(bool powering_up)
+@@ -333,6 +339,12 @@
    eep.PokeMem(addr, MDFN_de16msb(tmp + (addr << 1)));
  }
  
@@ -208,11 +268,12 @@
   ControlScheme = sgi->control;
 --- a/src/ss/stvio.h
 +++ b/src/ss/stvio.h
-@@ -29,6 +29,7 @@
+@@ -29,6 +29,8 @@
  {
  
  void STVIO_Init(const STVGameInfo* sgi) MDFN_COLD;
 +void STVIO_OracleEEPROM(uint16* out) MDFN_COLD;
++extern void (*STVIO_OracleInput)(uint8* data_in);
  void STVIO_Reset(bool powering_up) MDFN_COLD;
  void STVIO_StateAction(StateMem* sm, const unsigned load, const bool data_only) MDFN_COLD;
  
