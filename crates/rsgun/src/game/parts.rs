@@ -91,3 +91,61 @@ pub fn part_exec(cpu: &mut Cpu, part: u32) {
         cpu.write32(part + FLAGS, f | NO_HITS);
     }
 }
+
+/// A boss's body (the actor its parts belong to): the boss's state word (as its parts'), its
+/// points (x, y, z each: the parts' places) and its parts (8 bytes each: a word at +6 picks the
+/// depth they show within), their count (a byte).
+const BODY_POINTS: u32 = 0x70;
+const BODY_PARTS: u32 = 0x74;
+const BODY_COUNT: u32 = 0x78;
+const PART_DEPTH_AT: u32 = 6;
+const PART: u32 = 8;
+const POINT: u32 = 12;
+/// The depths parts show within, by their word (bytes, whole units).
+const SHOW_DEPTHS: u32 = 0x0607_2fa4;
+/// The state word's bit that holds the body still.
+const HELD_STILL: u16 = 0x20;
+
+/// A boss body's behaviour: no hits unless a part shows (within its depth of the screen's); the
+/// body at the middle of the showing parts' points. Ended when its state says so; held when it
+/// says to stop.
+pub fn body_exec(cpu: &mut Cpu, body: u32) {
+    let flags = cpu.read32(body + FLAGS) | NO_HITS;
+    cpu.write32(body + FLAGS, flags);
+    let state_at = cpu.read32(body + BOSS_STATE);
+    let state = cpu.read16(state_at);
+    if state & (STOPPED & !HELD_STILL) != 0 {
+        if state & ENDS != 0 {
+            cpu.write8(body + OBJ_MODE, ENDING);
+        }
+        return;
+    }
+    if state & HELD_STILL != 0 {
+        return;
+    }
+    let (mut left, mut right) = (0x3fff_0000i32, 0xc001_0000u32 as i32);
+    let (mut top, mut bottom) = (left, right);
+    let mut point = cpu.read32(body + BODY_POINTS);
+    let mut part = cpu.read32(body + BODY_PARTS);
+    let mut i: u32 = 0;
+    while (i as i32) < cpu.read8(body + BODY_COUNT) as i8 as i32 * 3 {
+        let which = cpu.read16(part + PART_DEPTH_AT) as i16 as i32 as u32;
+        let reach = (cpu.read8(SHOW_DEPTHS.wrapping_add(which)) as i32) << 16;
+        let depth = cpu.read32(point + 8).wrapping_sub(Z_BASE) as i32;
+        if depth <= reach && depth > -reach {
+            let x = cpu.read32(point) as i32;
+            left = left.min(x);
+            right = right.max(x);
+            let y = cpu.read32(point + 4) as i32;
+            top = top.min(y);
+            bottom = bottom.max(y);
+            let flags = cpu.read32(body + FLAGS) & !NO_HITS;
+            cpu.write32(body + FLAGS, flags);
+        }
+        point += POINT;
+        part += PART;
+        i = (i + 3) & 0xffff;
+    }
+    cpu.write32(body + POSITION, (left.wrapping_add(right) / 2) as u32);
+    cpu.write32(body + POSITION + 4, (top.wrapping_add(bottom) / 2) as u32);
+}

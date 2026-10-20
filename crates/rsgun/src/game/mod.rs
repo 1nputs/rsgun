@@ -38,6 +38,7 @@ mod sprites;
 mod states;
 mod system;
 mod text;
+mod timeline;
 mod vblank;
 
 use stv::native::{Contract, Natives};
@@ -446,6 +447,11 @@ pub fn register(n: &mut Natives) {
         0x0605_8520 => explosions::ember_set[d] -> (),
         0x0605_8638 => explosions::debris_exec[o] -> (),
         0x0605_86e4 => explosions::debris_set[p, spread] -> (),
+        0x0605_72ec => timeline::timeline_exec[t] -> (),
+        0x0605_7210 => timeline::timeline_run[t] -> (),
+        0x0605_6b14 => parts::body_exec[body] -> (),
+        0x0605_6a58 => aim::nearer_player[p] -> u32,
+        0x0605_6ad4 => aim::angle_to_target[obj, delay] -> u32,
         0x0605_9418 => orbits::orbit_place[o] -> u32,
         0x0605_94cc => orbits::orbit_exec[o] -> (),
         0x0605_9554 => orbits::orbit_set[d, watched, mask, centre; angle_from] -> (),

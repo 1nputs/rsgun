@@ -275,3 +275,43 @@ pub fn turn_toward(cpu: &mut Cpu, angle: u32, speed: u32, from: u32, to: u32, mo
     let a = nested!(cpu, APPROACH, super::actors::approach(cpu, a, s, left));
     cpu.write16(angle, a as u16);
 }
+
+/// The numbered objects: the two players first.
+const PLAYER_1: u32 = 0x0607_40f0;
+const PLAYER_2: u32 = 0x0607_40f4;
+/// The director (what is aimed at with no player in).
+const DIRECTOR: u32 = 0x0607_46e0;
+
+/// The player nearer the point `p` (x at +4, y at +8; the second on a tie), the only one in, or
+/// with neither the director.
+pub fn nearer_player(cpu: &mut Cpu, p: u32) -> u32 {
+    let (p1, p2) = (cpu.read32(PLAYER_1), cpu.read32(PLAYER_2));
+    if p1 != 0 && p2 != 0 {
+        let d1 = player_distance(cpu, p1, p);
+        let d2 = player_distance(cpu, p2, p);
+        return if d1 as i32 >= d2 as i32 { p2 } else { p1 };
+    }
+    if p1 != 0 {
+        p1
+    } else if p2 != 0 {
+        p2
+    } else {
+        cpu.read32(DIRECTOR)
+    }
+}
+
+fn player_distance(cpu: &mut Cpu, player: u32, p: u32) -> u32 {
+    let dx = cpu.read32(player + X).wrapping_sub(cpu.read32(p + 4));
+    let dy = cpu.read32(player + X + 4).wrapping_sub(cpu.read32(p + 8));
+    nested!(cpu, 0x0604_5e60, length(cpu, dx, dy))
+}
+
+/// The angle (16-bit, 0 straight up) from `obj` to where its target is (target's, with `delay`).
+pub fn angle_to_target(cpu: &mut Cpu, obj: u32, delay: u32) -> u32 {
+    let at = cpu.stack();
+    nested!(cpu, 0x0604_0ccc, target(cpu, obj, delay, at));
+    let dx = cpu.read32(at).wrapping_sub(cpu.read32(obj + X));
+    let dy = cpu.read32(at + 4).wrapping_sub(cpu.read32(obj + X + 4));
+    let a = cpu.call(SL_ATAN, &[dx, dy]);
+    (a as u16).wrapping_add(0x4000) as u32
+}
