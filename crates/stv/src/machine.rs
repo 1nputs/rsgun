@@ -605,14 +605,15 @@ impl Machine {
             self.sys.vdp2.vblank = true;
             self.sys.scu.raise(scu::VBLANK_IN);
             self.sys.scu.trigger(scu::FACTOR_VBLANK_IN);
-            if self.sys.vdp1.frame_change() {
-                self.sys.vdp1_draw();
-            }
         }
         if line == LINES - 1 {
             self.sys.vdp2.vblank = self.sys.vdp2.tvmd() & 0x8000 == 0;
             self.sys.scu.raise(scu::VBLANK_OUT);
             self.sys.scu.trigger(scu::FACTOR_VBLANK_OUT);
+            // VDP1's frame change comes with VBlank-OUT (as the oracle has it)
+            if self.sys.vdp1.frame_change() {
+                self.sys.vdp1_draw();
+            }
         }
         self.sys.scu.line(line == LINES - 1);
         self.sys.run_scu_dma();

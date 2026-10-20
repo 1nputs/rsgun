@@ -216,12 +216,43 @@
  void STVIO_Reset(bool powering_up) MDFN_COLD;
  void STVIO_StateAction(StateMem* sm, const unsigned load, const bool data_only) MDFN_COLD;
  
+--- a/src/ss/vdp1.cpp
++++ b/src/ss/vdp1.cpp
+@@ -73,6 +73,8 @@
+ uint16* FBDrawWhichPtr;
+ static bool FBDrawWhich;
+ 
++unsigned OracleDisplayFB(void) { return !FBDrawWhich; }	// stv-recomp oracle
++
+ static bool DrawingActive;
+ static uint32 CurCommandAddr;
+ static int32 RetCommandAddr;
+--- a/src/ss/vdp1.h
++++ b/src/ss/vdp1.h
+@@ -32,6 +32,7 @@
+ 
+ void Init(void) MDFN_COLD;
+ void Kill(void) MDFN_COLD;
++unsigned OracleDisplayFB(void) MDFN_COLD;	// stv-recomp oracle
+ void StateAction(StateMem* sm, const unsigned load, const bool data_only) MDFN_COLD;
+ 
+ void Reset(bool powering_up) MDFN_COLD;
 --- a/src/ss/vdp2.cpp
 +++ b/src/ss/vdp2.cpp
-@@ -909,6 +909,10 @@
+@@ -369,6 +369,8 @@
+  {
+   Out_VB = false;
+   Window[0].YEndMet = Window[1].YEndMet = false;
++  if(MDFN_UNLIKELY(OracleVBlankOutHook))
++   OracleVBlankOutHook();
+  }
+ 
+ #if 1
+@@ -909,6 +911,11 @@
   VDP2REND_SetGetVideoParams(gi, caspect, sls, sle, show_h_overscan, dohblend);
  }
  
++void (*OracleVBlankOutHook)(void) = nullptr;
 +uint16* OracleVRAM(void) { return VRAM; }
 +uint16* OracleCRAM(void) { return CRAM; }
 +uint16* OracleRegs(void) { return RawRegs; }
@@ -231,13 +262,14 @@
   VDP2REND_Kill();
 --- a/src/ss/vdp2.h
 +++ b/src/ss/vdp2.h
-@@ -34,6 +34,9 @@
+@@ -34,6 +34,10 @@
  void Init(const bool IsPAL, const uint64 affinity) MDFN_COLD;
  void SetGetVideoParams(MDFNGI* gi, const bool caspect, const int sls, const int sle, const bool show_h_overscan, const bool dohblend) MDFN_COLD;
  void Kill(void) MDFN_COLD;
 +uint16* OracleVRAM(void) MDFN_COLD;
 +uint16* OracleCRAM(void) MDFN_COLD;
 +uint16* OracleRegs(void) MDFN_COLD;
++MDFN_HIDE extern void (*OracleVBlankOutHook)(void);	// stv-recomp oracle: at VBlank-OUT
  void StateAction(StateMem* sm, const unsigned load, const bool data_only) MDFN_COLD;
  
  void Reset(bool powering_up) MDFN_COLD;

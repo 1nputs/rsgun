@@ -23,6 +23,11 @@
  *                              R0-R15, PC, PR, SR, GBR, VBR, MACH, MACL; then the sound CPU (68000):
  *                              19 words, D0-D7, A0-A7, PC, SR, the inactive stack pointer
  *   screen.ppm                 the frame as displayed (DisplayRect, the widest line's width)
+ *   display/                   the state the frame was displayed from, taken at its VBlank-OUT (before
+ *                              display line 0): vdp2-regs.bin (VDP2's 0x200 bytes of registers as
+ *                              written), vdp2-vram.bin, vdp2-cram.bin, vdp1-fb.bin (the framebuffer VDP1
+ *                              has just drawn, which the frame change at this VBlank-OUT puts on display:
+ *                              256 KB), vdp1-regs.bin (TVMR, FBCR: two bytes)
  *
  * A trace from frame F is DIR/tFFFFFF/: start/ (a dump taken before frame F, the state the trace
  * starts from) and m.trace, s.trace, k.trace (the master's, the slave's and the sound CPU's records,
@@ -47,7 +52,13 @@
 
 #include <sys/stat.h>
 
-namespace VDP1 { MDFN_HIDE extern uint16 VRAM[0x40000]; }	// (declared only inside an inline in vdp1.h)
+namespace VDP1	// (declared only inside inlines in vdp1.h, or in vdp1_common.h)
+{
+ MDFN_HIDE extern uint16 VRAM[0x40000];
+ MDFN_HIDE extern uint16 FB[2][0x20000];
+ MDFN_HIDE extern uint8 TVMR;
+ MDFN_HIDE extern uint8 FBCR;
+}
 
 static struct
 {
@@ -339,8 +350,38 @@ static void Oracle_WriteHashes(void)
 	CPU[0].PC, CPU[1].PC);
 }
 
+// At VBlank-OUT of a frame to be dumped: the state its picture is drawn from.
+static void Oracle_VBlankOut(void)
+{
+ const std::string d = Oracle_FrameDir('f', Oracle.frame + 1);
+ const std::string dd = d + "/display";
+
+ VDP2::OracleVBlankOutHook = nullptr;
+ mkdir(d.c_str(), 0755);
+ mkdir(dd.c_str(), 0755);
+ Oracle_WriteWords(dd + "/vdp2-regs.bin", VDP2::OracleRegs(), 0x100);
+ Oracle_WriteWords(dd + "/vdp2-vram.bin", VDP2::OracleVRAM(), 0x40000);
+ Oracle_WriteWords(dd + "/vdp2-cram.bin", VDP2::OracleCRAM(), 0x800);
+ // the framebuffer VDP1 has just drawn: the frame change at this VBlank-OUT puts it on display
+ Oracle_WriteWords(dd + "/vdp1-fb.bin", VDP1::FB[!VDP1::OracleDisplayFB()], 0x20000);
+ if(FILE* fp = fopen((dd + "/vdp1-regs.bin").c_str(), "wb"))
+ {
+  fputc(VDP1::TVMR, fp);
+  fputc(VDP1::FBCR, fp);
+  fclose(fp);
+ }
+}
+
 static void Oracle_BeginFrame(const EmulateSpecStruct* es)
 {
+ if(Oracle.on)
+ {
+  for(uint64 f : Oracle.dumps)
+  {
+   if(f == Oracle.frame + 1)
+    VDP2::OracleVBlankOutHook = Oracle_VBlankOut;
+  }
+ }
  if(Oracle.on && Oracle.frame == 0 && !Oracle.tracing && Oracle.trace_next < Oracle.traces.size() && Oracle.traces[Oracle.trace_next].first == 1)
  {	// a window from power on
   Oracle.trace_end = Oracle.traces[Oracle.trace_next].second;

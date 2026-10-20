@@ -123,7 +123,7 @@ impl Vdp1 {
         self.edsr |= 0x02;
     }
 
-    /// The frame change at the vertical blank: the framebuffers swap, the end-of-draw status moves
+    /// The frame change (at VBlank-OUT): the framebuffers swap, the end-of-draw status moves
     /// to "before", and a draw starts in automatic mode. Returns true when a draw started.
     pub fn frame_change(&mut self) -> bool {
         let one_cycle = self.fbcr & 2 == 0;

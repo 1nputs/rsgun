@@ -575,9 +575,82 @@ fn boot(oracle: &Path, frames: u64, rom: &Path, dumps: &[u64], dump_dir: &Path) 
     Ok(first_diff.iter().all(|d| d.is_none()))
 }
 
+/// Reads a binary PPM (P6).
+fn read_ppm(path: &Path) -> Result<(usize, usize, Vec<u8>), String> {
+    let d = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut fields = Vec::new();
+    let mut i = 0;
+    while fields.len() < 4 {
+        while d[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let start = i;
+        while !d[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        fields.push(String::from_utf8_lossy(&d[start..i]).to_string());
+    }
+    let (w, h): (usize, usize) = (fields[1].parse().map_err(|_| "ppm width")?, fields[2].parse().map_err(|_| "ppm height")?);
+    Ok((w, h, d[i + 1..i + 1 + w * h * 3].to_vec()))
+}
+
+fn write_ppm(path: &Path, w: usize, h: usize, rgb: &[u8]) -> Result<(), String> {
+    let mut d = format!("P6\n{w} {h}\n255\n").into_bytes();
+    d.extend_from_slice(rgb);
+    fs::write(path, d).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Composes the oracle's own display state of a frame (DIR/display) with VDP2's renderer and compares
+/// the picture with the oracle's (DIR/screen.ppm), every bit. Writes DIR/ours.ppm and
+/// DIR/diff.ppm (differing pixels in red).
+fn vdp2(dir: &Path) -> Result<bool, String> {
+    let rd = |n: &str| fs::read(dir.join("display").join(n)).map_err(|e| format!("{n}: {e}"));
+    let (regs, vram, cram, fb, v1) = (rd("vdp2-regs.bin")?, rd("vdp2-vram.bin")?, rd("vdp2-cram.bin")?, rd("vdp1-fb.bin")?, rd("vdp1-regs.bin")?);
+    let frame = stv::vdp2render::Vdp2Frame { regs: &regs, vram: &vram, cram: &cram, fb: &fb, tvmr: v1[0] };
+    let (w, h) = (frame.width(), frame.height());
+    let ours = frame.render();
+    let (sw, sh, shot) = read_ppm(&dir.join("screen.ppm"))?;
+    write_ppm(&dir.join("ours.ppm"), w, h, &ours)?;
+    if sw != w {
+        println!("{}: width {w}, the oracle's picture {sw}: not compared", dir.display());
+        return Ok(false);
+    }
+    let top = (sh.saturating_sub(h)) / 2;
+    // an interlaced picture holds the current field's lines; the others are the last frame's
+    let regs_txt = fs::read_to_string(dir.join("regs.txt")).unwrap_or_default();
+    let field = regs_txt.split_whitespace().find_map(|f| f.strip_prefix("field=")).and_then(|v| v.parse::<usize>().ok());
+    let interlaced = regs_txt.contains("interlaced=1");
+    let mut diff = vec![0u8; w * h * 3];
+    let mut bad = 0usize;
+    let mut first = Vec::new();
+    for y in 0..h.min(sh) {
+        if interlaced && field.is_some_and(|f| y % 2 != f) {
+            continue;
+        }
+        for x in 0..w {
+            let o = (y * w + x) * 3;
+            let s = ((y + top) * sw + x) * 3;
+            let a = [ours[o], ours[o + 1], ours[o + 2]];
+            let b = [shot[s], shot[s + 1], shot[s + 2]];
+            if a != b {
+                bad += 1;
+                diff[o] = 255;
+                if first.len() < 8 {
+                    first.push(format!("({x},{y}) ours {a:?} oracle {b:?}"));
+                }
+            } else {
+                diff[o..o + 3].copy_from_slice(&[b[0] / 4, b[1] / 4, b[2] / 4]);
+            }
+        }
+    }
+    write_ppm(&dir.join("diff.ppm"), w, h, &diff)?;
+    println!("{}: {w}x{h}, {bad} of {} pixels differ{}", dir.display(), w * h, if first.is_empty() { String::new() } else { format!(": {}", first.join(", ")) });
+    Ok(bad == 0)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: stv-check trace DIR [--cpu m|s|k] [--rom DIR]\n       stv-check boot ORACLE.hashes [--frames N] [--rom DIR] [--dump F,F --dump-dir DIR]";
+    let usage = "usage: stv-check trace DIR [--cpu m|s|k] [--rom DIR]\n       stv-check boot ORACLE.hashes [--frames N] [--rom DIR] [--dump F,F --dump-dir DIR]\n       stv-check vdp2 DUMP_DIR";
     let Some(cmd) = args.first() else {
         eprintln!("{usage}");
         return ExitCode::from(2);
@@ -602,6 +675,7 @@ fn main() -> ExitCode {
     let result = match (cmd.as_str(), dir) {
         ("trace", Some(d)) => trace(&d, &cpus, &rom),
         ("boot", Some(d)) => boot(&d, frames, &rom, &dumps, &dump_dir),
+        ("vdp2", Some(d)) => vdp2(&d),
         _ => Err(usage.into()),
     };
     match result {
