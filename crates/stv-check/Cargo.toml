@@ -1,0 +1,12 @@
+[package]
+name = "stv-check"
+description = "Checks the runtime against the oracle's records (development tool)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+stv = { path = "../stv" }
+
+[lints]
+workspace = true

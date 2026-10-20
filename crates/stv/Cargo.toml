@@ -1,0 +1,9 @@
+[package]
+name = "stv"
+description = "The Sega ST-V as a library: the hardware a port runs on (no game knowledge)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true

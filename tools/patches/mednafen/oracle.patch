@@ -1,4 +1,23 @@
-diff -ru a/src/ss/scsp.h b/src/ss/scsp.h
+--- a/src/ss/debug.inc
++++ b/src/ss/debug.inc
+@@ -456,6 +456,8 @@
+ {
+  const uint32 PC = CPU[which].GetRegister(SH7095::GSREG_PC_ID, NULL, 0);
+ 
++ Oracle_Step(which, PC, CPU[which].Pipe_ID);
++
+  if(which != DBG.ActiveCPU)
+  {
+   DBG.CurPC[which] = PC;
+@@ -517,7 +519,7 @@
+ 
+ static MDFN_COLD bool DBG_NeedCPUHooks(void)
+ {
+- return DBG.BTEnabled || DBG.CPUHook || DBG.BreakPointsPC.size() || DBG.BreakPointsRead.size() || DBG.BreakPointsWrite.size();
++ return Oracle_Tracing() || DBG.BTEnabled || DBG.CPUHook || DBG.BreakPointsPC.size() || DBG.BreakPointsRead.size() || DBG.BreakPointsWrite.size();
+ }
+ 
+ // TODO: Standard peek functions
 --- a/src/ss/scsp.h
 +++ b/src/ss/scsp.h
 @@ -22,6 +22,7 @@
@@ -9,7 +28,59 @@ diff -ru a/src/ss/scsp.h b/src/ss/scsp.h
  
   SS_SCSP() MDFN_COLD;
   ~SS_SCSP() MDFN_COLD;
-diff -ru a/src/ss/sound.cpp b/src/ss/sound.cpp
+--- a/src/ss/sh7095.inc
++++ b/src/ss/sh7095.inc
+@@ -2709,7 +2709,7 @@
+ 	retval = OnChipRegRead(T, unmasked_A);									\
+ 	goto MemReturn;												\
+  }														\
+- MemReturn: outval_ = retval;											\
++ MemReturn: outval_ = retval; if(IsInstr <= 0) Oracle_Mem(this - CPU, 'R', sizeof(T), unmasked_A, retval);										\
+ }
+ 
+ #define MemWrite(T, region, CacheEnabled, A_, V_, A, unmasked_A, V)		\
+@@ -2717,6 +2717,7 @@
+  A = (A_);									\
+  unmasked_A = A;								\
+  V = (V_);									\
++ Oracle_Mem(this - CPU, 'W', sizeof(T), A, V);				\
+ 										\
+  if(MDFN_UNLIKELY(A & (sizeof(T) - 1)))						\
+  {										\
+@@ -3329,6 +3330,7 @@
+ /* Reset/Poweron exception handling. */
+ #define Exception_ResPow(exnum, vecnum, new_PC)				\
+ {									\
++ Oracle_Exception(this - CPU, (exnum), (vecnum), 0);			\
+  timestamp += 2;							\
+  timestamp = std::max<sscpu_timestamp_t>(MA_until, timestamp);		\
+ 									\
+@@ -3343,6 +3345,7 @@
+ 
+ #define Exception(exnum, vecnum, new_PC)				\
+ {									\
++ Oracle_Exception(this - CPU, (exnum), (vecnum), PC);			\
+  timestamp += 2;							\
+  timestamp = std::max<sscpu_timestamp_t>(MA_until, timestamp);		\
+ 									\
+--- a/src/ss/sh7095_ops.inc
++++ b/src/ss/sh7095_ops.inc
+@@ -1179,6 +1179,7 @@
+ 
+ 	SH7095_BusLock++;
+ 	tmp = ExtBusRead(uint8, false, opexec_ea);	// FIXME: Address error on invalid address(>= 0x40000000 ?).
++	Oracle_Mem(this - CPU, 'R', 1, opexec_ea, tmp);
+ 	timestamp = SH7095_mem_timestamp;
+ 
+ 	SetT(!tmp);
+@@ -1962,6 +1963,7 @@
+ 	  //
+ 	  SR &= ~(0xF << 4);
+ 	  SR |= opexec_ipr << 4;
++	  Oracle_IntLevel(this - CPU, opexec_ipr);
+ 	  RecalcPendingIntPEX();
+ 	 }
+ 	 else
 --- a/src/ss/sound.cpp
 +++ b/src/ss/sound.cpp
 @@ -221,6 +221,11 @@
@@ -24,7 +95,6 @@ diff -ru a/src/ss/sound.cpp b/src/ss/sound.cpp
  void SOUND_Kill(void)
  {
   if(resampler)
-diff -ru a/src/ss/sound.h b/src/ss/sound.h
 --- a/src/ss/sound.h
 +++ b/src/ss/sound.h
 @@ -29,6 +29,7 @@
@@ -35,19 +105,17 @@ diff -ru a/src/ss/sound.h b/src/ss/sound.h
  
  void SOUND_Set68KActive(bool active);
  void SOUND_Reset68K(void);
-diff -ru a/src/ss/ss.cpp b/src/ss/ss.cpp
 --- a/src/ss/ss.cpp
 +++ b/src/ss/ss.cpp
-@@ -854,6 +854,8 @@
-  return SS_EVENT_DISABLED_TS;
- }
+@@ -139,6 +139,7 @@
+ static uint32 SH7095_DB;
+ #include "scu.inc"
  
 +#include "oracle.inc"
-+
- static void Emulate(EmulateSpecStruct* espec_arg)
- {
-  int32 end_ts;
-@@ -921,6 +923,7 @@
+ #include "debug.inc"
+ 
+ static sha256_digest BIOS_SHA256;	// SHA-256 hash of the currently-loaded BIOS; used for save state sanity checks.
+@@ -921,6 +922,7 @@
   //
   //
   SMPC_UpdateOutput();
@@ -55,7 +123,7 @@ diff -ru a/src/ss/ss.cpp b/src/ss/ss.cpp
   //
   //
   //
-@@ -1658,6 +1661,7 @@
+@@ -1658,6 +1660,7 @@
  
  static MDFN_COLD void Load(GameFile* gf)
  {
@@ -63,7 +131,6 @@ diff -ru a/src/ss/ss.cpp b/src/ss/ss.cpp
   const std::string dbg_cdpath = MDFN_GetSettingS("ss.dbg_exe_cdpath");
   //
   const bool region_autodetect = MDFN_GetSettingB("ss.region_autodetect");
-diff -ru a/src/ss/vdp2.cpp b/src/ss/vdp2.cpp
 --- a/src/ss/vdp2.cpp
 +++ b/src/ss/vdp2.cpp
 @@ -909,6 +909,9 @@
@@ -76,7 +143,6 @@ diff -ru a/src/ss/vdp2.cpp b/src/ss/vdp2.cpp
  void Kill(void)
  {
   VDP2REND_Kill();
-diff -ru a/src/ss/vdp2.h b/src/ss/vdp2.h
 --- a/src/ss/vdp2.h
 +++ b/src/ss/vdp2.h
 @@ -34,6 +34,8 @@

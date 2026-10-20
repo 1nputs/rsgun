@@ -1,8 +1,8 @@
 """Run the game on the oracle (Mednafen with tools/patches/mednafen), dumping state at chosen frames.
 
-    .venv/bin/python tools/oracle/run.py --frames N [--dump F,F,...] [--out DIR] [--window]
+    .venv/bin/python tools/oracle/run.py --frames N [--dump F,F,...] [--trace F:N] [--out DIR] [--window]
 
-Each dump is DIR/fFFFFFF/ (work RAM, VDP1/VDP2 memory, sound RAM, both SH-2s' registers, the screen as
+Each dump is DIR/fFFFFFF/, each trace DIR/tFFFFFF/ (work RAM, VDP1/VDP2 memory, sound RAM, both SH-2s' registers, the screen as
 PPM and PNG); see tools/patches/mednafen/oracle.inc. Mednafen keeps its settings and the ST-V BIOS chips in
 out/mednafen-home (made on first use from the user's stvbios.zip). Headless by default: no window, no
 sound, no frame skipping, unthrottled.
@@ -49,6 +49,7 @@ def main() -> None:
     ap.add_argument("--frames", type=int, required=True, help="exit after this many frames")
     ap.add_argument("--dump", default="", help="frames to dump at, comma separated (default: the last)")
     ap.add_argument("--out", default=str(ROOT / "out/oracle"), help="dump directory")
+    ap.add_argument("--trace", default="", help="F:N[,F:N...]: trace both SH-2s through frames F to F+N-1 (to DIR/tFFFFFF)")
     ap.add_argument("--window", action="store_true", help="show a window, at normal speed, with sound")
     ap.add_argument("extra", nargs="*", help="more Mednafen arguments")
     a = ap.parse_args()
@@ -58,7 +59,8 @@ def main() -> None:
     out = pathlib.Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, MEDNAFEN_HOME=str(HOME), STV_ORACLE_DIR=str(out),
-               STV_ORACLE_DUMP=a.dump or str(a.frames), STV_ORACLE_EXIT=str(a.frames))
+               STV_ORACLE_DUMP=a.dump or str(a.frames), STV_ORACLE_EXIT=str(a.frames),
+               STV_ORACLE_TRACE=a.trace)
     args = [str(MEDNAFEN), "-video.fs", "0", "-video.frameskip", "0"]
     if not a.window:
         env.update(SDL_VIDEODRIVER="dummy", SDL_AUDIODRIVER="dummy")
@@ -71,7 +73,7 @@ def main() -> None:
         ppm_to_png(ppm)
     if rc != 0:
         sys.exit(f"mednafen exited with {rc}; see {log}")
-    print(f"dumps in {out}: {', '.join(p.name for p in sorted(out.glob('f*')))}")
+    print(f"in {out}: {', '.join(p.name for p in sorted(out.glob('[ft]0*')))}")
 
 
 if __name__ == "__main__":
