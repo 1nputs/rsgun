@@ -648,9 +648,54 @@ fn vdp2(dir: &Path) -> Result<bool, String> {
     Ok(bad == 0)
 }
 
+/// A framebuffer pixel as a colour to look at: RGB pixels as they are, palette pixels as grey.
+fn fb_rgb(v: u16) -> [u8; 3] {
+    if v & 0x8000 != 0 {
+        [((v & 0x1F) << 3) as u8, (((v >> 5) & 0x1F) << 3) as u8, (((v >> 10) & 0x1F) << 3) as u8]
+    } else if v == 0 {
+        [0, 0, 0]
+    } else {
+        let g = 64 + (v & 0xFF) as u8 / 2;
+        [g, g, g]
+    }
+}
+
+/// Runs the oracle's VDP1 draw (DIR/draw: its VRAM and framebuffer at the draw's start) and compares
+/// every pixel of the framebuffer with the oracle's at its end. Writes DIR/draw/vdp1.ppm: the oracle's,
+/// ours, and the differences in red.
+fn vdp1(dir: &Path) -> Result<bool, String> {
+    let rd = |n: &str| fs::read(dir.join("draw").join(n)).map_err(|e| format!("{n}: {e}"));
+    let (vram, mut fb, after, regs) = (rd("vdp1-vram.bin")?, rd("fb-before.bin")?, rd("fb-after.bin")?, rd("vdp1-regs.bin")?);
+    let tvmr = u16::from_be_bytes([regs[0], regs[1]]);
+    stv::vdp1render::Vdp1Draw::new(&vram, &mut fb, tvmr).run();
+    let (w, h) = (512usize, 256usize);
+    let mut img = vec![0u8; w * 3 * h * 3];
+    let mut bad = 0;
+    let mut first = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let a = (y * w + x) * 2;
+            let (o, m) = (u16::from_be_bytes([after[a], after[a + 1]]), u16::from_be_bytes([fb[a], fb[a + 1]]));
+            let row = (y * w * 3 + x) * 3;
+            img[row..row + 3].copy_from_slice(&fb_rgb(o));
+            img[row + w * 3..row + w * 3 + 3].copy_from_slice(&fb_rgb(m));
+            if o != m {
+                bad += 1;
+                img[row + w * 6..row + w * 6 + 3].copy_from_slice(&[255, 0, 0]);
+                if first.len() < 6 {
+                    first.push(format!("({x},{y}) ours {m:04x} oracle {o:04x}"));
+                }
+            }
+        }
+    }
+    write_ppm(&dir.join("draw/vdp1.ppm"), w * 3, h, &img)?;
+    println!("{}: {bad} of {} framebuffer pixels differ{}", dir.display(), w * h, if first.is_empty() { String::new() } else { format!(": {}", first.join(", ")) });
+    Ok(bad == 0)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: stv-check trace DIR [--cpu m|s|k] [--rom DIR]\n       stv-check boot ORACLE.hashes [--frames N] [--rom DIR] [--dump F,F --dump-dir DIR]\n       stv-check vdp2 DUMP_DIR";
+    let usage = "usage: stv-check trace DIR [--cpu m|s|k] [--rom DIR]\n       stv-check boot ORACLE.hashes [--frames N] [--rom DIR] [--dump F,F --dump-dir DIR]\n       stv-check vdp2 DUMP_DIR\n       stv-check vdp1 DUMP_DIR";
     let Some(cmd) = args.first() else {
         eprintln!("{usage}");
         return ExitCode::from(2);
@@ -676,6 +721,7 @@ fn main() -> ExitCode {
         ("trace", Some(d)) => trace(&d, &cpus, &rom),
         ("boot", Some(d)) => boot(&d, frames, &rom, &dumps, &dump_dir),
         ("vdp2", Some(d)) => vdp2(&d),
+        ("vdp1", Some(d)) => vdp1(&d),
         _ => Err(usage.into()),
     };
     match result {

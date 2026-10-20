@@ -218,22 +218,51 @@
  
 --- a/src/ss/vdp1.cpp
 +++ b/src/ss/vdp1.cpp
-@@ -73,6 +73,8 @@
+@@ -73,6 +73,9 @@
  uint16* FBDrawWhichPtr;
  static bool FBDrawWhich;
  
 +unsigned OracleDisplayFB(void) { return !FBDrawWhich; }	// stv-recomp oracle
++void (*OracleDrawHook)(bool end) = nullptr;	// stv-recomp oracle: at a draw's start and end
 +
  static bool DrawingActive;
  static uint32 CurCommandAddr;
  static int32 RetCommandAddr;
+@@ -95,6 +98,7 @@
+ static uint16 EWDR;	// Erase/Write Data
+ static uint16 EWLR;	// Erase/Write Upper Left Coordinate
+ static uint16 EWRR;	// Erase/Write Lower Right Coordinate
++void OracleRegs(uint16* out) { out[0] = TVMR; out[1] = FBCR; out[2] = PTMR; out[3] = EWDR; out[4] = EWLR; out[5] = EWRR; }	// stv-recomp oracle
+ 
+ static struct
+ {
+@@ -793,6 +797,8 @@
+     VRAMUsageEnd();
+ 
+     EDSR |= 0x2;	// TODO: Does EDSR reflect IRQ out status?
++    if(MDFN_UNLIKELY(OracleDrawHook))
++     OracleDrawHook(true);
+ 
+     SCU_SetInt(SCU_INT_VDP1, true);
+     SCU_SetInt(SCU_INT_VDP1, false);
+@@ -886,6 +892,8 @@
+  CurCommandAddr = 0;
+  RetCommandAddr = -1;
+  DrawingActive = true;
++ if(MDFN_UNLIKELY(OracleDrawHook))
++  OracleDrawHook(false);
+  CommandPhase = 0;
+  VRAMUsageStart();
+ 
 --- a/src/ss/vdp1.h
 +++ b/src/ss/vdp1.h
-@@ -32,6 +32,7 @@
+@@ -32,6 +32,9 @@
  
  void Init(void) MDFN_COLD;
  void Kill(void) MDFN_COLD;
 +unsigned OracleDisplayFB(void) MDFN_COLD;	// stv-recomp oracle
++MDFN_HIDE extern void (*OracleDrawHook)(bool end);	// stv-recomp oracle
++void OracleRegs(uint16* out) MDFN_COLD;	// stv-recomp oracle
  void StateAction(StateMem* sm, const unsigned load, const bool data_only) MDFN_COLD;
  
  void Reset(bool powering_up) MDFN_COLD;

@@ -28,6 +28,9 @@
  *                              written), vdp2-vram.bin, vdp2-cram.bin, vdp1-fb.bin (the framebuffer VDP1
  *                              has just drawn, which the frame change at this VBlank-OUT puts on display:
  *                              256 KB), vdp1-regs.bin (TVMR, FBCR: two bytes)
+ *   draw/                      the first VDP1 draw that starts in the frame: vdp1-vram.bin and fb-before.bin
+ *                              at its start (the framebuffer it draws into), fb-after.bin at its end,
+ *                              vdp1-regs.bin (TVMR, FBCR, PTMR, EWDR, EWLR, EWRR: six words)
  *
  * A trace from frame F is DIR/tFFFFFF/: start/ (a dump taken before frame F, the state the trace
  * starts from) and m.trace, s.trace, k.trace (the master's, the slave's and the sound CPU's records,
@@ -350,6 +353,30 @@ static void Oracle_WriteHashes(void)
 	CPU[0].PC, CPU[1].PC);
 }
 
+// A VDP1 draw starting or ending in a frame to be dumped.
+static void Oracle_Draw(bool end)
+{
+ const std::string d = Oracle_FrameDir('f', Oracle.frame + 1);
+ const std::string dd = d + "/draw";
+
+ if(!end)
+ {
+  uint16 regs[6];
+
+  mkdir(d.c_str(), 0755);
+  mkdir(dd.c_str(), 0755);
+  Oracle_WriteWords(dd + "/vdp1-vram.bin", VDP1::VRAM, 0x40000);
+  Oracle_WriteWords(dd + "/fb-before.bin", VDP1::FB[!VDP1::OracleDisplayFB()], 0x20000);
+  VDP1::OracleRegs(regs);
+  Oracle_WriteWords(dd + "/vdp1-regs.bin", regs, 6);
+ }
+ else
+ {
+  Oracle_WriteWords(dd + "/fb-after.bin", VDP1::FB[!VDP1::OracleDisplayFB()], 0x20000);
+  VDP1::OracleDrawHook = nullptr;
+ }
+}
+
 // At VBlank-OUT of a frame to be dumped: the state its picture is drawn from.
 static void Oracle_VBlankOut(void)
 {
@@ -379,7 +406,10 @@ static void Oracle_BeginFrame(const EmulateSpecStruct* es)
   for(uint64 f : Oracle.dumps)
   {
    if(f == Oracle.frame + 1)
+   {
     VDP2::OracleVBlankOutHook = Oracle_VBlankOut;
+    VDP1::OracleDrawHook = Oracle_Draw;
+   }
   }
  }
  if(Oracle.on && Oracle.frame == 0 && !Oracle.tracing && Oracle.trace_next < Oracle.traces.size() && Oracle.traces[Oracle.trace_next].first == 1)

@@ -9,5 +9,6 @@ pub mod scsp;
 pub mod scu;
 pub mod sh2;
 pub mod smpc;
+pub mod vdp1render;
 pub mod vdp2render;
 pub mod video;
