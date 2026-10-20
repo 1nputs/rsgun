@@ -18,6 +18,7 @@ mod clib;
 mod director;
 mod dma;
 mod effects;
+mod explosions;
 mod files;
 mod globals;
 mod hits;
@@ -414,6 +415,13 @@ pub fn register(n: &mut Natives) {
         0x0604_d8d8 => actors::move_by_angle[actor, speed, angle] -> (),
         0x0604_d95c => actors::trail_init[actor, a, b, boxes] -> (),
         0x0604_da00 => actors::trail_record[actor, angle] -> (),
+        0x0605_75e4 => explosions::shrink_exec[o] -> (),
+        0x0605_80bc => explosions::twin_exec[o] -> (),
+        0x0605_8278 => explosions::twin_set[p] -> (),
+        0x0605_8444 => explosions::ember_exec[o] -> (),
+        0x0605_8520 => explosions::ember_set[d] -> (),
+        0x0605_8638 => explosions::debris_exec[o] -> (),
+        0x0605_86e4 => explosions::debris_set[p, spread] -> (),
         0x0605_9418 => orbits::orbit_place[o] -> u32,
         0x0605_94cc => orbits::orbit_exec[o] -> (),
         0x0605_9554 => orbits::orbit_set[d, watched, mask, centre; angle_from] -> (),
