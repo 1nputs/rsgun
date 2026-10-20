@@ -57,6 +57,7 @@ at 59.94.
 | `tools/trace/check_spin.sh` | a machine that plays the CPUs' wait loops beside one that executes everything: equal after every frame |
 | `tools/scsp/probes.py` | crafted one-voice SCSP logs run on the oracle's SCSP (`tools/scsp/build.sh` builds it) and on ours: every sample must match |
 | `target/release/stv-check scsp LOG` | replays a sound log (`run.py --sound N`) through the SCSP against the oracle's samples |
+| `tools/vdp1/probes.py` | crafted VDP1 command lists drawn by the oracle's VDP1 (`tools/vdp1/build.sh` builds it) and by ours: every pixel must match |
 | `tools/trace/check_vdp2.sh` | VDP2's composition of the oracle's own state, pixel for pixel against its pictures |
 | `tools/trace/check_all.sh` | records 19 trace windows from power on to attract play and replays each through the SH-2 core (`stv-check trace`); fails on any difference |
 | `tools/oracle/run.py --frames N --dump F,... --trace F:N,...` | runs the game on the oracle headless; dumps RAM, VDP memory, registers and the screen at frames F; traces both SH-2s through windows of frames |
