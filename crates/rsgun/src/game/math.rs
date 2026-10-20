@@ -83,3 +83,22 @@ pub fn clamp(_cpu: &mut Cpu, x: u32, limit: u32) -> u32 {
     }
 }
 
+
+/// SGL's slMulFX and slSin.
+const SL_MUL_FX: u32 = 0x0606_e26c;
+const SL_SIN: u32 = 0x0606_9a0c;
+const ONE: u32 = 0x10000;
+
+/// `a` to `b` by `t` (16.16, 0 to 1), in a line: a(1 - t) + bt.
+pub fn lerp(cpu: &mut Cpu, a: u32, b: u32, t: u32) -> u32 {
+    let from = cpu.call(SL_MUL_FX, &[a, ONE.wrapping_sub(t)]);
+    from.wrapping_add(cpu.call(SL_MUL_FX, &[b, t]))
+}
+
+/// lerp eased in and out: by (1 - cos(half a turn by `t`)) / 2.
+pub fn ease(cpu: &mut Cpu, a: u32, b: u32, t: u32) -> u32 {
+    let angle = ((t as i32 >> 1) - 0x4000) as i16 as i32 as u32;
+    let s = (cpu.call(SL_SIN, &[angle]).wrapping_add(ONE) as i32 >> 1) as u32;
+    let from = cpu.call(SL_MUL_FX, &[a, ONE.wrapping_sub(s)]);
+    from.wrapping_add(cpu.call(SL_MUL_FX, &[b, s]))
+}

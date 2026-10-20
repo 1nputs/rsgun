@@ -11,6 +11,7 @@
 mod actors;
 mod aim;
 mod backup;
+mod bg;
 mod camera;
 mod clib;
 mod director;
@@ -79,6 +80,7 @@ impl Cpu<'_> {
 
     /// `call` with arguments past the fourth on the stack (the fifth at the stack pointer, as the
     /// SH-2 code pushes them just before the call).
+    #[allow(dead_code)]
     pub fn call_with_stack(&mut self, f: u32, args: &[u32], stack_args: &[u32]) -> u32 {
         let sp = self.sh2.r[15];
         let top = sp.wrapping_sub(4 * stack_args.len() as u32);
@@ -364,7 +366,39 @@ pub fn register(n: &mut Natives) {
         0x0605_fdc0 => screen::take_plane_shared[] -> (),
         0x0605_fde8 => screen::request_clear_text_plane[] -> (),
         0x0605_fdfc => screen::clear_text_plane[] -> (),
-        0x0605_ef44 => screen::clear_scroll_word[] -> (),
+        0x0605_ef44 => bg::map_hit_off[] -> (),
+        0x0605_ef58 => bg::map_hit_on[x, map] -> (),
+        0x0605_ef74 => bg::map_hit_by[f] -> (),
+        0x0605_ef90 => bg::map_hit[x, y] -> u32,
+        0x0605_f28c => bg::map_point[x, y, scroll, map] -> u32,
+        0x0605_f14c => bg::map_clear[map] -> (),
+        0x0605_f170 => bg::map_stream[plane, map] -> u32,
+        0x0605_efd4 => bg::plane_a_speed[dx, dy] -> (),
+        0x0605_eff8 => bg::plane_b_speed[dx, dy] -> (),
+        0x0605_f01c => bg::plane_speed[plane, dx, dy] -> (),
+        0x0605_f028 => bg::plane_step[plane] -> (),
+        0x0605_f040 => bg::plane_a_frame[] -> (),
+        0x0605_f08c => bg::plane_b_frame[] -> (),
+        0x0605_f0d8 => bg::plane_corner[plane, out] -> (),
+        0x0605_f3a4 => bg::mover_move[dx, dy, dz] -> (),
+        0x0605_f3ec => bg::move_by[s, dx, dy, dz] -> (),
+        0x0605_f40c => bg::view_toward[target] -> (),
+        0x0605_f468 => bg::view_matrix[] -> (),
+        0x0605_f4d0 => bg::view_matrix_moved_first[] -> (),
+        0x0605_f530 => bg::rotation_matrix[o] -> (),
+        0x0605_f5b0 => bg::view_along[path] -> (),
+        0x0605_f648 => bg::view_along_eased[path] -> (),
+        0x0605_f6e0 => bg::draw_models_near[table] -> (),
+        0x0605_f794 => bg::draw_models[n, list] -> (),
+        0x0605_f860 => bg::edge_line[angle] -> u32,
+        0x0605_f8c4 => bg::edge_window[table, y, angle] -> (),
+        0x0605_ecb4 => screen::queue_fill[src, dst, size] -> u32,
+        0x0605_ecf0 => screen::queue_copy[src, dst, size] -> u32,
+        0x0605_ed2c => screen::queue_long_copy[src, dst, size, piece] -> u32,
+        0x0605_ed94 => screen::queue_cells[src, dst, w, h; char_offset, add] -> u32,
+        0x0605_ee3c => screen::put_cells[src, dst, w, h; char_offset, add] -> (),
+        0x0605_ee94 => screen::put_long_cells[src, dst, w, h; char_offset, add] -> (),
+        0x0605_eee4 => screen::fill_cells[cell, dst, w, h] -> (),
         0x0605_edf8 => screen::copy_words[src, dst, bytes] -> (),
         0x0605_ed84 => screen::long_copies_on[] -> u32,
         0x0605_ef20 => screen::offset_list[delta, list, n] -> (),
@@ -402,6 +436,8 @@ pub fn register(n: &mut Natives) {
         0x0604_34e4 => hits::weapon_hit[shot, target] -> (),
         0x0604_3108 => hits::score_kill[p, weapon, target, points] -> (),
         0x0606_4f3c => math::clamp[x, limit] -> u32,
+        0x0606_2e7c => math::lerp[a, b, t] -> u32,
+        0x0606_2ebc => math::ease[a, b, t] -> u32,
         0x0604_39b0 => hits::sparks[a, b, a_box, b_box] -> (),
         0x0604_3c64 => hits::absorb[a, b] -> (),
         0x0604_5090 => hits::chain_reset[p] -> (),

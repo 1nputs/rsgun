@@ -44,12 +44,12 @@ const SL_MUL_FX: u32 = 0x0606_e26c;
 /// The screen's set up: VDP2's scroll screens (not rewritten yet), and the VBlank callback.
 const SCROLL_SETUP: u32 = 0x0605_ea18;
 const SCREEN_VBLANK: u32 = 0x0605_ea98;
-/// Cleared as the screen is set up: the VBlank's copy queue, its long copies, and another queue
-/// (the counts).
+/// Cleared as the screen is set up: the VBlank's copy queue, its long copies, and its cell
+/// writes (the counts).
 const QUEUE_COUNT: u32 = 0x0607_3c90;
 const LONG_COUNT: u32 = 0x0607_3c94;
 const LONG_ON: u32 = 0x0607_3c98;
-const SCROLL_COUNT: u32 = 0x0607_3c9c;
+const CELLS_COUNT: u32 = 0x0607_3c9c;
 
 fn screen(cpu: &mut Cpu) -> u32 {
     cpu.read32(SCREEN)
@@ -179,7 +179,7 @@ pub fn screen_set(cpu: &mut Cpu) {
     cpu.write8(s + SCREEN_OFF, 1);
     nested!(cpu, 0x0605_e2dc, screen_fields(cpu));
     nested!(cpu, 0x0605_e6c0, offsets_clear(cpu));
-    for count in [QUEUE_COUNT, LONG_COUNT, SCROLL_COUNT, LONG_ON] {
+    for count in [QUEUE_COUNT, LONG_COUNT, CELLS_COUNT, LONG_ON] {
         cpu.write32(count, 0);
     }
     nested!(cpu, 0x0600_43d4, vblank::add_callback(cpu, SCREEN_VBLANK));
@@ -240,7 +240,7 @@ pub fn screen_exec(cpu: &mut Cpu, s: u32) {
         cpu.write32(REQUEST, 0);
     }
     nested!(cpu, 0x0605_fdc0, take_plane_shared(cpu));
-    nested!(cpu, 0x0605_ef44, clear_scroll_word(cpu));
+    nested!(cpu, 0x0605_ef44, super::bg::map_hit_off(cpu));
     let at = screen(cpu);
     let index = cpu.read8(at + SCROLL_INDEX) as i8 as i32;
     let table = cpu.read32(SCROLL_TABLE);
@@ -271,8 +271,6 @@ const TEXT_ROWS: u32 = 28;
 const TEXT_ROW_SHOWN: u32 = 0x54;
 /// SGL's: VDP2's colour calculation settings (cleared with 0x73, 0).
 const SL_COLOR_CALC: u32 = 0x0606_e25c;
-/// A word cleared each frame before the scroll (not known yet).
-const SCROLL_WORD: u32 = 0x0607_47c8;
 
 /// The screen's fields to their start: no hook, the first scroll, the offsets zero, the text plane
 /// the text's own.
@@ -319,11 +317,6 @@ pub fn clear_text_plane(cpu: &mut Cpu) {
     }
 }
 
-/// Clears the word cleared each frame before the scroll.
-pub fn clear_scroll_word(cpu: &mut Cpu) {
-    cpu.write32(SCROLL_WORD, 0);
-}
-
 /// Copies `bytes` from `src` to `dst` by 32-bit words when both are aligned to them, else by
 /// 16-bit words (video memory takes no bytes).
 pub fn copy_words(cpu: &mut Cpu, src: u32, dst: u32, bytes: u32) {
@@ -364,11 +357,12 @@ const QUEUE_ENTRY: u32 = 16;
 const LONG: u32 = 0x0607_3da0;
 const LONG_DONE: u32 = 0x0607_3db0;
 const LONG_QUEUE: u32 = 0x0607_3db8;
-/// The scroll's work at the VBlank, queued by the frame (20 bytes each: two longs, three words, a
-/// long; for SCROLL_WORK, not rewritten yet).
-const SCROLL_QUEUE: u32 = 0x0607_3eb8;
-const SCROLL_ENTRY: u32 = 20;
-const SCROLL_WORK: u32 = 0x0605_ee3c;
+/// The cell writes for the VBlank (put_cells), queued by the frame (20 bytes each: source,
+/// destination, width, height and the character offset as words, the value added).
+const CELLS_QUEUE: u32 = 0x0607_3eb8;
+const CELLS_ENTRY: u32 = 20;
+/// Each queue's room.
+const QUEUE_ROOM: u32 = 16;
 /// Cleared at each VBlank (not known yet).
 const VBLANK_CLEARED: u32 = 0x0607_48c0;
 /// The game's flags (globals::GAME_FLAGS) bit 14, and a flag beside it (not known yet): the
@@ -419,16 +413,131 @@ pub fn screen_vblank(cpu: &mut Cpu) {
             cpu.call(SCROLL_VBLANK, &[0]);
         }
         let mut i = 0;
-        while (i as i32) < cpu.read32(SCROLL_COUNT) as i32 {
-            let e = SCROLL_QUEUE + SCROLL_ENTRY * i;
-            let args = [cpu.read32(e), cpu.read32(e + 4), cpu.read16(e + 8) as u32, cpu.read16(e + 10) as u32];
-            let stack = [cpu.read16(e + 12) as u32, cpu.read32(e + 16)];
-            cpu.call_with_stack(SCROLL_WORK, &args, &stack);
+        while (i as i32) < cpu.read32(CELLS_COUNT) as i32 {
+            let e = CELLS_QUEUE + CELLS_ENTRY * i;
+            let (src, dst, w, h) = (cpu.read32(e), cpu.read32(e + 4), cpu.read16(e + 8) as u32, cpu.read16(e + 10) as u32);
+            let (char_offset, add) = (cpu.read16(e + 12) as u32, cpu.read32(e + 16));
+            cpu.nested_with_stack(&PUT_CELLS_PROLOGUE, PUT_CELLS, &[char_offset, add], |cpu| put_cells(cpu, src, dst, w, h, char_offset, add));
             i += 1;
         }
-        cpu.write32(SCROLL_COUNT, 0);
+        cpu.write32(CELLS_COUNT, 0);
     }
     nested!(cpu, 0x0606_08bc, super::text::send_lines(cpu));
+}
+
+const PUT_CELLS: u32 = 0x0605_ee3c;
+static PUT_CELLS_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
+
+/// Queues a fill for the VBlank (slDMAXCopy, its source fixed): `size` bytes at `dst` with the
+/// word at `src`. -1 when the queue is full, else 0.
+pub fn queue_fill(cpu: &mut Cpu, src: u32, dst: u32, size: u32) -> u32 {
+    queue(cpu, 1, src, dst, size)
+}
+
+/// Queues a copy for the VBlank (slDMACopy). -1 when the queue is full, else 0.
+pub fn queue_copy(cpu: &mut Cpu, src: u32, dst: u32, size: u32) -> u32 {
+    queue(cpu, 0, src, dst, size)
+}
+
+fn queue(cpu: &mut Cpu, kind: u32, src: u32, dst: u32, size: u32) -> u32 {
+    let n = cpu.read32(QUEUE_COUNT);
+    if n == QUEUE_ROOM {
+        return u32::MAX;
+    }
+    let e = QUEUE + QUEUE_ENTRY * n;
+    cpu.write32(e, kind);
+    cpu.write32(e + 4, src);
+    cpu.write32(e + 8, dst);
+    cpu.write32(e + 12, size);
+    cpu.write32(QUEUE_COUNT, n.wrapping_add(1));
+    0
+}
+
+/// Starts a long copy (sent `piece` bytes a VBlank), or queues it behind the one under way
+/// (no limit): 0 when started, else the long copies queued.
+pub fn queue_long_copy(cpu: &mut Cpu, src: u32, dst: u32, size: u32, piece: u32) -> u32 {
+    if cpu.read32(LONG_ON) == 0 {
+        cpu.write32(LONG_ON, 1);
+        for (i, v) in [src, dst, size, piece].into_iter().enumerate() {
+            cpu.write32(LONG + 4 * i as u32, v);
+        }
+        cpu.write32(LONG_DONE, 0);
+        return 0;
+    }
+    let n = cpu.read32(LONG_COUNT);
+    let e = LONG_QUEUE + QUEUE_ENTRY * n;
+    for (i, v) in [src, dst, size, piece].into_iter().enumerate() {
+        cpu.write32(e + 4 * i as u32, v);
+    }
+    let n = n.wrapping_add(1);
+    cpu.write32(LONG_COUNT, n);
+    n
+}
+
+/// Queues put_cells for the VBlank. -1 when the queue is full, else 0.
+pub fn queue_cells(cpu: &mut Cpu, src: u32, dst: u32, w: u32, h: u32, char_offset: u32, add: u32) -> u32 {
+    let n = cpu.read32(CELLS_COUNT);
+    if n == QUEUE_ROOM {
+        return u32::MAX;
+    }
+    let e = CELLS_QUEUE + CELLS_ENTRY * n;
+    cpu.write32(e, src);
+    cpu.write32(e + 4, dst);
+    cpu.write16(e + 8, w as u16);
+    cpu.write16(e + 10, h as u16);
+    cpu.write16(e + 12, char_offset as u16);
+    cpu.write32(e + 16, add);
+    cpu.write32(CELLS_COUNT, n.wrapping_add(1));
+    0
+}
+
+/// A plane's row: 64 cells.
+const PLANE_ROW: u32 = 64;
+
+/// Writes `w` by `h` cells (16-bit words) from `src` into a plane at `dst`, each plus
+/// `char_offset` << 12 (its palette, as a rule) and `add`.
+pub fn put_cells(cpu: &mut Cpu, src: u32, dst: u32, w: u32, h: u32, char_offset: u32, add: u32) {
+    let (w, h) = (w & 0xffff, h & 0xffff);
+    let offset = (char_offset & 0xffff) << 12 & 0xffff;
+    let (mut src, mut dst) = (src, dst);
+    for _ in 0..h {
+        for _ in 0..w {
+            let v = cpu.read16(src) as u32;
+            cpu.write16(dst, v.wrapping_add(offset).wrapping_add(add) as u16);
+            src += 2;
+            dst += 2;
+        }
+        dst = dst.wrapping_add((PLANE_ROW - w).wrapping_mul(2));
+    }
+}
+
+/// put_cells for 32-bit cells, each plus `char_offset` << 16 and `add`.
+pub fn put_long_cells(cpu: &mut Cpu, src: u32, dst: u32, w: u32, h: u32, char_offset: u32, add: u32) {
+    let (w, h) = (w & 0xffff, h & 0xffff);
+    let offset = char_offset << 16;
+    let (mut src, mut dst) = (src, dst);
+    for _ in 0..h {
+        for _ in 0..w {
+            let v = cpu.read32(src);
+            cpu.write32(dst, v.wrapping_add(offset).wrapping_add(add));
+            src += 4;
+            dst += 4;
+        }
+        dst = dst.wrapping_add((PLANE_ROW - w).wrapping_mul(4));
+    }
+}
+
+/// Fills `w` by `h` cells of a plane at `dst` with `cell`.
+pub fn fill_cells(cpu: &mut Cpu, cell: u32, dst: u32, w: u32, h: u32) {
+    let (w, h) = (w & 0xffff, h & 0xffff);
+    let mut dst = dst;
+    for _ in 0..h {
+        for _ in 0..w {
+            cpu.write16(dst, cell as u16);
+            dst += 2;
+        }
+        dst = dst.wrapping_add((PLANE_ROW - w).wrapping_mul(2));
+    }
 }
 
 /// The long copy's next piece (the rest, when that is no more than a piece: then the next long
