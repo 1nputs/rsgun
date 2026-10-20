@@ -540,14 +540,61 @@ fn boot(oracle: &Path, frames: u64, rom: &Path, dumps: &[u64], dump_dir: &Path) 
     const NAMES: [&str; 7] = ["wram-l", "wram-h", "vdp1-vram", "vdp2-vram", "cram", "vdp2-regs", "sound-ram"];
     let mut first_diff: [Option<u64>; 7] = [None; 7];
     let mut equal_frames = 0u64;
-    for f in 1..=frames.min(lines.len() as u64) {
+    for f in 1..=frames {
+        if let Ok(spec) = std::env::var("STV_CHECK_COVERAGE")
+            && let Some((a, b)) = spec.split_once(':')
+            && let (Ok(a), Ok(b)) = (a.parse::<u64>(), b.parse::<u64>())
+        {
+            if f == a {
+                m.coverage = Some(Default::default());
+            }
+            if f == b + 1
+                && let Some(cov) = m.coverage.take()
+            {
+                let mut v: Vec<u32> = cov[0].iter().copied().collect();
+                v.sort();
+                let text: String = v.iter().map(|a| format!("{a:08x}\n")).collect();
+                fs::write(dump_dir.join("coverage-m.txt"), text).map_err(|e| e.to_string())?;
+            }
+        }
+        if let Ok(spec) = std::env::var("STV_CHECK_TRACE")
+            && let Some((a, n)) = spec.split_once(':')
+            && let (Ok(a), Ok(n)) = (a.parse::<u64>(), n.parse::<u64>())
+        {
+            if f == a {
+                let header = |b: &mut Vec<u8>| b.extend_from_slice(&[b'H', 3, 0, 0, 0x53, 0x54, 0x56, 0x54, 0, 0, 0, 0]);
+                let mut t: [Vec<u8>; 2] = Default::default();
+                header(&mut t[0]);
+                header(&mut t[1]);
+                m.sys.trace = Some(t);
+            }
+            if f == a + n
+                && let Some(t) = m.sys.trace.take()
+            {
+                let d = dump_dir.join(format!("t{a:06}"));
+                fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+                fs::write(d.join("m.trace"), &t[0]).map_err(|e| e.to_string())?;
+                fs::write(d.join("s.trace"), &t[1]).map_err(|e| e.to_string())?;
+            }
+        }
         m.run_frame();
+        if let Some(t) = &mut m.sys.trace {
+            for b in t.iter_mut() {
+                b.extend_from_slice(&[b'F', 0, 0, 0]);
+                b.extend_from_slice(&(f as u32).to_be_bytes());
+                b.extend_from_slice(&[0; 4]);
+            }
+        }
         if dumps.contains(&f) {
             let d = dump_dir.join(format!("f{f:06}"));
             m.dump(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+            let (w, h, rgb) = &m.picture;
+            if *w > 0 {
+                write_ppm(&d.join("screen.ppm"), *w, *h, rgb)?;
+            }
         }
         let ours = m.hashes();
-        let want = &lines[(f - 1) as usize];
+        let Some(want) = lines.get((f - 1) as usize) else { continue };
         let mut all = true;
         for (i, h) in ours.0.iter().enumerate() {
             if format!("{h:016x}") != want[i + 1] {

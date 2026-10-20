@@ -133,6 +133,15 @@ impl Vdp1 {
         self.change_requested = false;
         self.draw ^= 1;
         self.edsr = (self.edsr & 2) >> 1;
+        // the framebuffer now drawn into is erased with EWDR over the erase window
+        let (x0, y0) = ((((self.ewlr >> 9) & 0x3F) as usize) << 3, (self.ewlr & 0x1FF) as usize);
+        let (x1, y1) = ((((self.ewrr >> 9) & 0x7F) as usize) << 3, (self.ewrr & 0x1FF) as usize);
+        let fb = &mut self.fb[self.draw];
+        for y in y0..=y1.min(255) {
+            for x in x0..x1.min(512) {
+                fb[(y * 512 + x) * 2..(y * 512 + x) * 2 + 2].copy_from_slice(&self.ewdr.to_be_bytes());
+            }
+        }
         self.ptmr == 2
     }
 }

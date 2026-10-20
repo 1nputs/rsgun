@@ -74,6 +74,7 @@ static struct
  size_t trace_next;	// the next window to start
  uint64 trace_end;	// the frame the current window ends after
  bool tracing;
+ bool draw_started;	// a draw caught by the draw hook has started and not ended
  FILE* hashes_fp;
  FILE* trace_fp[3];
  std::vector<uint8> trace_buf[3];
@@ -359,6 +360,7 @@ static void Oracle_Draw(bool end)
  const std::string d = Oracle_FrameDir('f', Oracle.frame + 1);
  const std::string dd = d + "/draw";
 
+ Oracle.draw_started = !end;
  if(!end)
  {
   uint16 regs[6];
@@ -424,6 +426,10 @@ static void Oracle_EndFrame(const EmulateSpecStruct* es)
 {
  if(!Oracle.on)
   return;
+ // the frame's hooks are its own: a VBlank-OUT that did not come, a draw that did not start
+ VDP2::OracleVBlankOutHook = nullptr;
+ if(!Oracle.draw_started)
+  VDP1::OracleDrawHook = nullptr;
  Oracle.frame++;
  if(Oracle.hashes_fp)
   Oracle_WriteHashes();

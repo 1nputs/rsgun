@@ -23,6 +23,11 @@ pub struct Sys {
     pub backup: Vec<u8>,
     pub cart: Vec<u8>,
     pub prot: [u8; 16],
+    /// The cart's protection (the 315-5881's game-start check, as the oracle answers it): armed by
+    /// writing 1 to 0x04FFFFF0; each 16-bit read at 0x04FFFFFC then gives the next pair of a pattern
+    /// (byte i: i & 0xF0 for the first 256, i & 0x0F for the next).
+    prot_on: bool,
+    prot_counter: u8,
     pub io: [u8; 0x80],
     pub onchip: [OnChip; 2],
     /// Each CPU's cache data array, reachable at 0xC0000000 (4 KB).
@@ -53,6 +58,19 @@ pub struct Sys {
     slave_reset_pending: bool,
     /// Cycles of bus waiting the current instruction has added.
     wait: u32,
+    /// When on, each SH-2's records in the oracle's trace format (version 3; development).
+    pub trace: Option<[Vec<u8>; 2]>,
+}
+
+impl Sys {
+    fn record(&mut self, cpu: usize, tag: u8, size: u8, a: u32, v: u32) {
+        if let Some(t) = &mut self.trace {
+            let b = &mut t[cpu];
+            b.extend_from_slice(&[tag, size, 0, 0]);
+            b.extend_from_slice(&a.to_be_bytes());
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+    }
 }
 
 impl Sys {
@@ -125,7 +143,10 @@ impl Sys {
                 if p & 1 != 0 { self.io_read((p & 0x7F) as usize) } else { 0xFF }
             }
             0x0200_0000..=0x04FF_FFEF => self.cart.get((p - 0x0200_0000) as usize).copied().unwrap_or(0xFF),
-            0x04FF_FFF0..=0x04FF_FFFF => self.prot[(p & 0xF) as usize],
+            0x04FF_FFF0..=0x04FF_FFFF => {
+                let w = self.ext_read16(p & !1);
+                if p & 1 == 0 { (w >> 8) as u8 } else { w as u8 }
+            }
             0x05A0_0000..=0x05FF_FFFF => {
                 let w = self.ext_read16(p & !1);
                 if p & 1 == 0 { (w >> 8) as u8 } else { w as u8 }
@@ -151,6 +172,7 @@ impl Sys {
                 if p & 2 == 0 { (l >> 16) as u16 } else { l as u16 }
             }
             0x0600_0000..=0x07FF_FFFF => rd16(&self.wram_h, (p & 0xF_FFFF) as usize),
+            0x04FF_FFF0..=0x04FF_FFFF => self.prot_read(p),
             _ if (0x05A0_0000..0x0600_0000).contains(&p) => 0,
             _ => ((self.ext_read8(p) as u16) << 8) | self.ext_read8(p + 1) as u16,
         }
@@ -179,7 +201,13 @@ impl Sys {
             0x0020_0000..=0x002F_FFFF => self.wram_l[(p & 0xF_FFFF) as usize] = v,
             0x0040_0000..=0x004F_FFFF => self.io[(p & 0x7F) as usize] = v,
             0x0100_0000..=0x01FF_FFFF => self.signal(p),
-            0x04FF_FFF0..=0x04FF_FFFF => self.prot[(p & 0xF) as usize] = v,
+            0x04FF_FFF0..=0x04FF_FFFF => {
+                self.prot[(p & 0xF) as usize] = v;
+                if p == 0x04FF_FFF1 {
+                    self.prot_on = v & 1 != 0;
+                    self.prot_counter = 0;
+                }
+            }
             0x05A0_0000..=0x05AF_FFFF => self.scsp.write8(p & 0x7_FFFF, v),
             0x05B0_0000..=0x05BF_FFFF => self.scsp.write8(0x10_0000 | (p & 0xFFF), v),
             0x05C0_0000..=0x05C7_FFFF => self.vdp1.vram[(p & 0x7_FFFF) as usize] = v,
@@ -247,6 +275,17 @@ impl Sys {
         }
     }
 
+    fn prot_read(&mut self, p: u32) -> u16 {
+        if p >= 0x04FF_FFFC && self.prot_on {
+            let c = self.prot_counter;
+            self.prot_counter = c.wrapping_add(1);
+            let i = ((c & 0x7F) as u16) << 1;
+            let mask = if c & 0x80 == 0 { 0xF0F0 } else { 0x0F0F };
+            return ((i << 8) | (i + 1)) & mask;
+        }
+        ((self.prot[(p & 0xE) as usize] as u16) << 8) | self.prot[(p & 0xF | 1) as usize] as u16
+    }
+
     fn io_read(&mut self, r: usize) -> u8 {
         match r {
             0x07 => self.io[r], // the output port reads back
@@ -264,6 +303,10 @@ impl Sys {
     // ---- VDP1 ---------------------------------------------------------------------------------
 
     fn vdp1_draw(&mut self) {
+        let fb = self.vdp1.draw;
+        let tvmr = self.vdp1.tvmr;
+        let (vram, fbs) = (&self.vdp1.vram, &mut self.vdp1.fb);
+        crate::vdp1render::Vdp1Draw::new(vram, &mut fbs[fb], tvmr).run();
         self.vdp1.run_draw();
         self.scu.raise(scu::SPRITE_END);
         self.scu.trigger(scu::FACTOR_SPRITE_END);
@@ -494,21 +537,30 @@ struct CpuBus<'a> {
 
 impl Bus for CpuBus<'_> {
     fn read8(&mut self, a: u32) -> u8 {
-        self.sys.cpu_read8(self.cpu, a)
+        let v = self.sys.cpu_read8(self.cpu, a);
+        self.sys.record(self.cpu, b'R', 1, a, v as u32);
+        v
     }
     fn read16(&mut self, a: u32) -> u16 {
-        self.sys.cpu_read16(self.cpu, a)
+        let v = self.sys.cpu_read16(self.cpu, a);
+        self.sys.record(self.cpu, b'R', 2, a, v as u32);
+        v
     }
     fn read32(&mut self, a: u32) -> u32 {
-        self.sys.cpu_read32(self.cpu, a)
+        let v = self.sys.cpu_read32(self.cpu, a);
+        self.sys.record(self.cpu, b'R', 4, a, v);
+        v
     }
     fn write8(&mut self, a: u32, v: u8) {
+        self.sys.record(self.cpu, b'W', 1, a, v as u32);
         self.sys.cpu_write8(self.cpu, a, v)
     }
     fn write16(&mut self, a: u32, v: u16) {
+        self.sys.record(self.cpu, b'W', 2, a, v as u32);
         self.sys.cpu_write16(self.cpu, a, v)
     }
     fn write32(&mut self, a: u32, v: u32) {
+        self.sys.record(self.cpu, b'W', 4, a, v);
         self.sys.cpu_write32(self.cpu, a, v)
     }
     fn fetch16(&mut self, a: u32) -> u16 {
@@ -538,6 +590,10 @@ pub struct Machine {
     /// Cycles each CPU has run into the current line.
     time: [u32; 2],
     pub steps: [u64; 2],
+    /// The last frame's picture: width, height, RGB.
+    pub picture: (usize, usize, Vec<u8>),
+    /// When on, the addresses each SH-2 has executed (development).
+    pub coverage: Option<[std::collections::HashSet<u32>; 2]>,
 }
 
 impl Machine {
@@ -550,6 +606,8 @@ impl Machine {
             backup: vec![0; 0x1_0000],
             cart,
             prot: [0; 16],
+            prot_on: false,
+            prot_counter: 0,
             io: [0; 0x80],
             onchip: [OnChip::new(false), OnChip::new(true)],
             cache_data: [vec![0; 0x1000], vec![0; 0x1000]],
@@ -572,8 +630,9 @@ impl Machine {
             nmi_pending: [false; 2],
             slave_reset_pending: false,
             wait: 0,
+            trace: None,
         };
-        let mut m = Machine { cpu: [Sh2::default(), Sh2::default()], sys, time: [0; 2], steps: [0; 2] };
+        let mut m = Machine { cpu: [Sh2::default(), Sh2::default()], sys, time: [0; 2], steps: [0; 2], picture: (0, 0, Vec::new()), coverage: None };
         let mut bus = CpuBus { sys: &mut m.sys, cpu: 0 };
         m.cpu[0].reset(&mut bus, 0);
         m
@@ -602,6 +661,7 @@ impl Machine {
         let height = self.sys.vdp2.height();
         // the vertical events at the line's start
         if line == height {
+            self.compose();
             self.sys.vdp2.vblank = true;
             self.sys.scu.raise(scu::VBLANK_IN);
             self.sys.scu.trigger(scu::FACTOR_VBLANK_IN);
@@ -718,6 +778,8 @@ impl Machine {
                 let (level, source) = external.unwrap_or_default();
                 if level > cpu.level() {
                     let vector = self.sys.scu.acknowledge(source);
+                    let pc = cpu.pc;
+                    self.sys.record(c, b'X', vector as u8, pc, 9);
                     let mut bus = CpuBus { sys: &mut self.sys, cpu: c };
                     cpu.interrupt(&mut bus, vector, level);
                     return 4;
@@ -734,6 +796,11 @@ impl Machine {
             self.sys.onchip[c].clock_frt(8);
             return 8;
         }
+        if let Some(cov) = &mut self.coverage {
+            cov[c].insert(cpu.pc);
+        }
+        let pc = cpu.pc;
+        self.sys.record(c, b'P', 0, pc, 0);
         let mut bus = CpuBus { sys: &mut self.sys, cpu: c };
         cpu.step(&mut bus);
         self.steps[c] += 1;
@@ -757,7 +824,28 @@ impl Machine {
         ] {
             std::fs::write(dir.join(name), data)?;
         }
+        // the display state, as the oracle's display/ dumps have it
+        let d = dir.join("display");
+        std::fs::create_dir_all(&d)?;
+        std::fs::write(d.join("vdp2-regs.bin"), &s.vdp2.regs)?;
+        std::fs::write(d.join("vdp2-vram.bin"), &s.vdp2.vram)?;
+        std::fs::write(d.join("vdp2-cram.bin"), &s.vdp2.cram)?;
+        std::fs::write(d.join("vdp1-fb.bin"), &s.vdp1.fb[s.vdp1.draw ^ 1])?;
+        std::fs::write(d.join("vdp1-regs.bin"), [s.vdp1.tvmr as u8, s.vdp1.fbcr as u8])?;
         Ok(())
+    }
+
+    /// VDP2 composes the frame just displayed (at VBlank-IN, from the state then).
+    fn compose(&mut self) {
+        let s = &self.sys;
+        let frame = crate::vdp2render::Vdp2Frame {
+            regs: &s.vdp2.regs,
+            vram: &s.vdp2.vram,
+            cram: &s.vdp2.cram,
+            fb: &s.vdp1.fb[s.vdp1.draw ^ 1],
+            tvmr: s.vdp1.tvmr as u8,
+        };
+        self.picture = (frame.width(), frame.height(), frame.render());
     }
 
     pub fn hashes(&self) -> FrameHashes {
