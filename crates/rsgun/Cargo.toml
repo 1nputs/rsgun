@@ -1,0 +1,13 @@
+[package]
+name = "rsgun"
+description = "Radiant Silvergun on the ST-V runtime: the machine in a window, with the cabinet's controls"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+stv = { path = "../stv" }
+sdl2 = "0.37"
+
+[lints]
+workspace = true

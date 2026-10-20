@@ -1,12 +1,15 @@
 # rsgun
 
 Radiant Silvergun (Sega ST-V, 1998) reimplemented natively in Rust, verified against an emulator,
-the way `md-recomp` did NHL '94 and Gunstar Heroes for the Mega Drive. Early days: the runtime crate
-`stv` has its SH-2 core, checked against the oracle's traces; the rest of this repository is tooling
-(the oracle, Ghidra, the ROM tools). The plan and the living guide are in `../playbook/rsgun/`.
+the way `md-recomp` did NHL '94 and Gunstar Heroes for the Mega Drive. So far the runtime crate `stv`
+is a whole ST-V machine (two SH-2s, the 68000, SCU, SMPC, VDP1, VDP2, the SCSP's timers), checked
+against the oracle, that runs the game from power on through the real BIOS: `rsgun` plays it in a
+window. No sound yet, and no port code: the game's own SH-2 code still runs on the cores. The plan
+and the living guide are in `../playbook/rsgun/`.
 
 ```
-crates/stv          the ST-V as a library (no game knowledge): so far the SH-2 core
+crates/stv          the ST-V as a library (no game knowledge)
+crates/rsgun        the game in a window: controls, saves, input scripts
 crates/stv-check    checks the runtime against the oracle's records
 tools/              the oracle, traces, ROM and Ghidra tools (Python and shell)
 ```
@@ -24,11 +27,35 @@ tools/fetch_refs.sh                    # ref/: Mednafen with the oracle hooks, a
 
 Needs curl, unzip, a C++ compiler, SDL2 and ALSA development headers.
 
+## Playing
+
+```
+cargo run --release -p rsgun            # a window; the BIOS takes about 17 seconds (hold Tab to hurry it)
+```
+
+| Keys | | Pad | |
+|---|---|---|---|
+| arrows | move | d-pad, left stick | move |
+| Z, X, C | A (vulcan), B (homing), C (spread) | south, west, north | A, B, C |
+| A, S, D | A+B, A+C, B+C | shoulders, east | A+B, A+C; B+C |
+| space | A+B+C | right trigger | A+B+C |
+| 5, 6 | coin 1, 2 | back | coin |
+| 1, 2 | start 1, 2 | start | start |
+| F2, 9 | test, service | | |
+| P, Tab, F11, F12, Esc | pause, fast while held, full screen, screenshot, quit | | |
+
+The settings EEPROM and backup RAM are kept in `~/.local/share/rsgun/` (`--save DIR`). `--script FILE`
+plays an input script instead (`crates/rsgun/src/controls.rs`); `--headless --frames N --shot F.ppm`
+runs without a window. With a 59-61 Hz display the game runs a frame a refresh; otherwise by the clock
+at 59.94.
+
 ## Tools
 
 | Command | What it does |
 |---|---|
 | `cargo test` | the runtime's unit tests |
+| `tools/trace/check_spin.sh` | a machine that plays the CPUs' wait loops beside one that executes everything: equal after every frame |
+| `tools/trace/check_vdp2.sh` | VDP2's composition of the oracle's own state, pixel for pixel against its pictures |
 | `tools/trace/check_all.sh` | records 19 trace windows from power on to attract play and replays each through the SH-2 core (`stv-check trace`); fails on any difference |
 | `tools/oracle/run.py --frames N --dump F,... --trace F:N,...` | runs the game on the oracle headless; dumps RAM, VDP memory, registers and the screen at frames F; traces both SH-2s through windows of frames |
 | `target/release/stv-check trace DIR` | replays one trace through the SH-2 core |

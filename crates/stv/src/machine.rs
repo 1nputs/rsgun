@@ -29,7 +29,12 @@ pub struct Sys {
     /// (byte i: i & 0xF0 for the first 256, i & 0x0F for the next).
     prot_on: bool,
     prot_counter: u8,
+    /// The I/O chip's registers as written (port D, the outputs, reads back).
     pub io: [u8; 0x80],
+    /// The I/O chip's input ports A-H, active low, as the client sets them: A and B are players 1
+    /// and 2 (bit 7 left, 6 right, 5 up, 4 down, 0-2 buttons 1-3), C the cabinet (bit 0 coin 1,
+    /// 1 coin 2, 2 test, 3 service, 4 start 1, 5 start 2), E-G further players.
+    pub inputs: [u8; 8],
     pub onchip: [OnChip; 2],
     /// Each CPU's cache data array, reachable at 0xC0000000 (4 KB).
     pub cache_data: [Vec<u8>; 2],
@@ -291,8 +296,9 @@ impl Sys {
 
     fn io_read(&mut self, r: usize) -> u8 {
         match r {
-            0x07 => self.io[r], // the output port reads back
-            _ => 0xFF,          // inputs, active low: nothing pressed
+            0x07 => self.io[r], // port D, the outputs, reads back
+            0x01 | 0x03 | 0x05 | 0x09 | 0x0B | 0x0D | 0x0F => self.inputs[r >> 1],
+            _ => 0xFF,
         }
     }
 
@@ -664,6 +670,7 @@ impl Machine {
             prot_on: false,
             prot_counter: 0,
             io: [0; 0x80],
+            inputs: [0xFF; 8],
             onchip: [OnChip::new(false), OnChip::new(true)],
             cache_data: [vec![0; 0x1000], vec![0; 0x1000]],
             scu: Scu::default(),
