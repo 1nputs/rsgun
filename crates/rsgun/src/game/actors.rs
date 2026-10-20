@@ -473,7 +473,7 @@ pub fn actor_setup(cpu: &mut Cpu, actor: u32) {
     cpu.write16(actor + 0x6c, 0);
 }
 
-/// A player's object: its size, its behaviour (not rewritten yet), its boxes, its kind (2), the
+/// A player's object: its size, its behaviour (player.rs), its boxes, its kind (2), the
 /// kinds' table (the second kind's colour, a player 1 sixteen more), its gauge (hud.rs), a long at
 /// +0xa8 (not known yet), and each player's hit counts (seven longs, hits.rs).
 const PLAYER_SIZE: u32 = 0xac;

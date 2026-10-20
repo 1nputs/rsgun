@@ -29,6 +29,7 @@ mod models;
 mod objects;
 mod orbits;
 mod pads;
+mod player;
 mod play;
 mod palette;
 mod parts;
@@ -447,6 +448,10 @@ pub fn register(n: &mut Natives) {
         0x0605_8520 => explosions::ember_set[d] -> (),
         0x0605_8638 => explosions::debris_exec[o] -> (),
         0x0605_86e4 => explosions::debris_set[p, spread] -> (),
+        0x0604_7f60 => player::player_exec[p] -> (),
+        0x0604_7b0c => player::control[p] -> (),
+        0x0604_77ec => player::weapons_frame[p] -> (),
+        0x0604_75d4 => player::extend_check[p] -> (),
         0x0605_72ec => timeline::timeline_exec[t] -> (),
         0x0605_7210 => timeline::timeline_run[t] -> (),
         0x0605_6b14 => parts::body_exec[body] -> (),
