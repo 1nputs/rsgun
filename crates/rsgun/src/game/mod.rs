@@ -548,6 +548,7 @@ pub fn register(n: &mut Natives) {
         0x0605_ecf0 => screen::queue_copy[src, dst, size] -> u32,
         0x0605_ed2c => screen::queue_long_copy[src, dst, size, piece] -> u32,
         0x0605_ed94 => screen::queue_cells[src, dst, w, h; char_offset, add] -> u32,
+        0x0605_fcdc => screen::plane_picture[picture] -> (),
         0x0605_ee3c => screen::put_cells[src, dst, w, h; char_offset, add] -> (),
         0x0605_ee94 => screen::put_long_cells[src, dst, w, h; char_offset, add] -> (),
         0x0605_eee4 => screen::fill_cells[cell, dst, w, h] -> (),

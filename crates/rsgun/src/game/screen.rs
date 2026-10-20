@@ -365,12 +365,10 @@ const CELLS_ENTRY: u32 = 20;
 const QUEUE_ROOM: u32 = 16;
 /// Cleared at each VBlank (not known yet).
 const VBLANK_CLEARED: u32 = 0x0607_48c0;
-/// The game's flags (globals::GAME_FLAGS) bit 14, and a flag beside it (not known yet): the
-/// background's VBlank work (SCROLL_VBLANK, not rewritten yet) is told the text plane's shared flag,
-/// or 0.
+/// The game's flags (globals::GAME_FLAGS) bit 14: while it is clear the VBlank puts the picture
+/// the text plane is shared with into it (plane_picture); while set, it clears the last one shown.
 const FLAG_14: u32 = 0x4000;
-const SCROLL_FLAG: u32 = 0x0607_3c8c;
-const SCROLL_VBLANK: u32 = 0x0605_fcdc;
+const PLANE_PICTURE: u32 = 0x0605_fcdc;
 /// SGL's copies.
 const SL_DMA_COPY: u32 = 0x0603_3a10;
 const SL_DMAX_COPY: u32 = 0x0603_3aa0;
@@ -408,9 +406,9 @@ pub fn screen_vblank(cpu: &mut Cpu) {
         let flags = cpu.read32(GAME_FLAGS);
         if flags & FLAG_14 == 0 {
             let shared = cpu.read32(PLANE_SHARED);
-            cpu.call(SCROLL_VBLANK, &[shared]);
-        } else if cpu.read32(SCROLL_FLAG) != 0 {
-            cpu.call(SCROLL_VBLANK, &[0]);
+            nested!(cpu, PLANE_PICTURE, plane_picture(cpu, shared));
+        } else if cpu.read32(PICTURE_SHOWN) != 0 {
+            nested!(cpu, PLANE_PICTURE, plane_picture(cpu, 0));
         }
         let mut i = 0;
         while (i as i32) < cpu.read32(CELLS_COUNT) as i32 {
@@ -572,3 +570,45 @@ fn long_copy_piece(cpu: &mut Cpu) {
         cpu.write32(LONG_DONE, done.wrapping_add(piece));
     }
 }
+
+/// The pictures the text plane is shared with (their cells at PICTURES_AT's address, palette 7
+/// plus 0xa8, VDP2's colour offsets then on screens 7, or 6 for the first: as far as can be told):
+/// each its offset into the cells, where in the text plane, its size in cells, and whether the
+/// plane is cleared first. 0 clears it; -1 leaves it be.
+const PICTURE_SHOWN: u32 = 0x0607_3c8c;
+const PICTURES_AT: u32 = 0x0607_3ffc;
+const PICTURES: [(u32, bool, u32, u32, u32, u32); 4] = [
+    (6, false, 0, 0x25e7_e000, 44, 28),
+    (7, false, 0x9a0, 0x25e7_e000, 44, 28),
+    (7, true, 0x1340, 0x25e7_e618, 21, 4),
+    (7, true, 0x13e8, 0x25e7_e718, 18, 2),
+];
+const PICTURE_PALETTE: u32 = 7;
+const PICTURE_ADD: u32 = 0xa8;
+const SL_COLOR_OFFSET_USE: u32 = 0x0606_98dc;
+const QUEUE_CELLS: u32 = 0x0605_ed94;
+static QUEUE_CELLS_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
+
+/// Puts picture `picture` into the text plane (by put_cells at the VBlank: queued), or clears it.
+pub fn plane_picture(cpu: &mut Cpu, picture: u32) {
+    if picture == u32::MAX {
+        return;
+    }
+    cpu.write32(PICTURE_SHOWN, picture);
+    if picture > 4 {
+        return;
+    }
+    if picture == 0 {
+        cpu.call(SL_COLOR_OFFSET_USE, &[3, 7]);
+        nested!(cpu, 0x0605_fdfc, clear_text_plane(cpu));
+        return;
+    }
+    let (screens, clear, offset, dst, w, h) = PICTURES[picture as usize - 1];
+    cpu.call(SL_COLOR_OFFSET_USE, &[3, screens]);
+    if clear {
+        nested!(cpu, 0x0605_fdfc, clear_text_plane(cpu));
+    }
+    let src = cpu.read32(PICTURES_AT).wrapping_add(offset);
+    cpu.nested_with_stack(&QUEUE_CELLS_PROLOGUE, QUEUE_CELLS, &[PICTURE_PALETTE, PICTURE_ADD], |cpu| queue_cells(cpu, src, dst, w, h, PICTURE_PALETTE, PICTURE_ADD));
+}
+
