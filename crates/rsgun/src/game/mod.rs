@@ -45,6 +45,7 @@ mod shots;
 mod sgl;
 mod sound;
 mod sprites;
+mod start;
 mod states;
 mod system;
 mod text;
@@ -1153,6 +1154,23 @@ pub fn register(n: &mut Natives) {
         0x0603_4cb0 => sgl::synch_first[] -> u32,
         0x0603_50b0 => sgl::slave_main[] -> (),
         0x0603_6110 => sgl::slave_commands[] -> (),
+        0x0600_4000 => start::start[] -> (),
+        0x0600_7e50 => start::restart[f] -> (),
+        0x0600_4070 => start::top_level[] -> (),
+        0x0600_4288 => start::clear_state[] -> (),
+        0x0600_4304 => start::reset_counters[] -> (),
+        0x0600_4340 => start::run_game[] -> (),
+        0x0600_6978 => start::protection_read[buf] -> (),
+        0x0600_8100 => start::gcc_main[] -> (),
+        0x0600_80bc => start::global_constructors[] -> (),
+        0x0600_826c => clib::atexit[f] -> u32,
+        0x0600_6ba0 => sound::snd_wait[] -> (),
+        0x0600_6be4 => sound::snd_init[init] -> (),
+        0x0600_6d7c => sound::snd_change_map[map] -> u32,
+        0x0600_6e0c => sound::snd_command_82[v] -> u32,
+        0x0600_7cd4 => sound::snd_clear[at, n] -> (),
+        0x0600_7da0 => sound::snd_copy[dst, src, n] -> (),
+        0x0600_7db8 => sound::snd_next_slot[] -> u32,
         0x0606_9a0c => math::sl_sin[a] -> u32,
         0x0606_9a30 => math::sl_cos[a] -> u32,
         0x0606_e26c => math::sl_mul_fx[a, b] -> u32,

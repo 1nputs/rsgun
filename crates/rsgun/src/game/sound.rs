@@ -6,7 +6,7 @@
 //! leftover source's name), each effect played as a sequence on one of the driver's controls.
 
 use super::nested;
-use super::{dma, files, Cpu};
+use super::{clib, dma, files, Cpu};
 
 /// Sound RAM as the SH-2 sees it, and the command slots in it.
 const SOUND_RAM: u32 = 0x25a0_0000;
@@ -555,13 +555,6 @@ const SOUND_EXEC: u32 = 0x0600_53dc;
 const DRIVER_FILE: u32 = 0x0600_9300; // "SND_DRVR.BIN"
 const MAP_FILE: u32 = 0x0600_9310; // "SND_MAP.BIN"
 const DRIVER_BUFFER: u32 = 0x0020_0000;
-/// Sega's sound library: SND_Init (from a struct: the driver's address and size, the map's
-/// address and size), and two commands by the host interface (0x08 with its argument, then 0x82),
-/// not yet named.
-const SND_INIT: u32 = 0x0600_6be4;
-const SND_COMMAND_08: u32 = 0x0600_6d7c;
-const SND_COMMAND_82: u32 = 0x0600_6e0c;
-
 /// Loads the sound driver and its map from the cart and starts it: no stage's effects yet.
 pub fn sound_load(cpu: &mut Cpu) {
     let driver_size = nested!(cpu, 0x0600_5f10, files::read_file(cpu, DRIVER_FILE, DRIVER_BUFFER));
@@ -573,14 +566,191 @@ pub fn sound_load(cpu: &mut Cpu) {
     let map_size = nested!(cpu, 0x0600_5f10, files::read_file(cpu, MAP_FILE, map));
     cpu.write32(init + 8, map);
     cpu.write16(init + 12, map_size as u16);
-    cpu.call(SND_INIT, &[init]);
-    cpu.call(SND_COMMAND_08, &[0]);
-    cpu.call(SND_COMMAND_82, &[15]);
+    nested!(cpu, 0x0600_6be4, snd_init(cpu, init));
+    nested!(cpu, 0x0600_6d7c, snd_change_map(cpu, 0));
+    nested!(cpu, 0x0600_6e0c, snd_command_82(cpu, 15));
     cpu.write32(STAGE_SE_TABLE, 0);
 }
 
 /// The driver's status words, a word each control (its address, set by SND_Init).
 const STATUS_WORDS: u32 = 0x0600_cb68;
+
+/// Sega's sound library's state, which SND_Init takes from the driver's header (at sound RAM
+/// 0x400, each an offset from sound RAM's start): its area table (+0x400), the command slots
+/// (+0x404; the library puts its commands in the first seven) and the slot it is at, the map
+/// (+0x408), and from the slots' address the status words (+0x80) and four places more (+0x90,
+/// +0x94, +0xa0, +0xb0: not known yet); a place the header gives as two words at +0x412 (not
+/// known yet). While a command is being put, the library is busy.
+const SND_BUSY: u32 = 0x0600_cb58;
+const SND_AREAS: u32 = 0x0600_cb5c;
+const SND_SLOTS: u32 = 0x0600_cb60;
+const SND_MAP: u32 = 0x0600_cb64;
+const SND_SLOT: u32 = 0x0600_cb7c;
+const SND_HEADER_PLACE: u32 = 0x0603_3278;
+const SND_SLOT_PLACES: [(u32, u32); 5] = [(STATUS_WORDS, 0x80), (0x0600_cb74, 0xa0), (0x0600_cb78, 0xb0), (0x0600_cb6c, 0x90), (0x0600_cb70, 0x94)];
+const HEADER: u32 = 0x400;
+const SND_SLOTS_END: u32 = 7 * SLOT;
+/// The sound CPU held while the driver is copied in: the SMPC's PDR2 bit 4 (the BIOS keeps the
+/// port's byte); sound RAM's 4-Mbit mode (SCSP's MEM4MB); the room cleared for the driver.
+const BIOS_PDR2: u32 = 0x0600_065b;
+const PDR2: u32 = 0x2010_0077;
+const SOUND_HELD: u8 = 0x10;
+const SCSP_MEMORY_MODE: u32 = 0x25b0_0400;
+const MEM4MB: u16 = 0x0200;
+const DRIVER_ROOM: u32 = 0xb000;
+
+/// SND_Init (`init`: the driver's address, its size (a word at +4), the map's address, its size
+/// in words (a word at +12)): the sound CPU held, sound RAM 4 Mbit, the driver's room cleared
+/// and the driver copied to sound RAM's start (as many bytes as `init` says); the library's state
+/// from the driver's header; the map copied to the place the area table's third long gives (its
+/// size in bytes, rounded up past the next long); the sound CPU let go; the library not busy.
+pub fn snd_init(cpu: &mut Cpu, init: u32) {
+    let v = cpu.read8(BIOS_PDR2);
+    cpu.write8(BIOS_PDR2, v | SOUND_HELD);
+    let v = cpu.read8(BIOS_PDR2);
+    cpu.write8(PDR2, v);
+    cpu.write16(SCSP_MEMORY_MODE, MEM4MB);
+    nested!(cpu, 0x0600_7cd4, snd_clear(cpu, SOUND_RAM, DRIVER_ROOM));
+    let size = cpu.read16(init + 4) as u32;
+    let driver = cpu.read32(init);
+    nested!(cpu, 0x0600_7da0, snd_copy(cpu, SOUND_RAM, driver, size));
+    let areas = cpu.read32(SOUND_RAM + HEADER).wrapping_add(SOUND_RAM);
+    cpu.write32(SND_AREAS, areas);
+    let slots = cpu.read32(SOUND_RAM + HEADER + 4).wrapping_add(SOUND_RAM);
+    cpu.write32(SND_SLOTS, slots);
+    let high = cpu.read16(SOUND_RAM + HEADER + 0x12) as u32;
+    let low = cpu.read16(SOUND_RAM + HEADER + 0x14) as u32;
+    cpu.write32(SND_HEADER_PLACE, (high << 16 | low).wrapping_add(SOUND_RAM));
+    cpu.write32(SND_SLOT, slots);
+    let map = cpu.read32(SOUND_RAM + HEADER + 8).wrapping_add(SOUND_RAM);
+    cpu.write32(SND_MAP, map);
+    for (at, offset) in SND_SLOT_PLACES {
+        cpu.write32(at, slots + offset);
+    }
+    let n = 2 * cpu.read16(init + 12) as u32;
+    let n = n + 4 - (n & 3);
+    let areas = cpu.read32(SND_AREAS);
+    let dst = cpu.read32(areas + 8).wrapping_add(SOUND_RAM);
+    let src = cpu.read32(init + 8);
+    nested!(cpu, 0x0600_7da0, snd_copy(cpu, dst, src, n));
+    let v = cpu.read8(BIOS_PDR2);
+    cpu.write8(BIOS_PDR2, v & !SOUND_HELD);
+    let v = cpu.read8(BIOS_PDR2);
+    cpu.write8(PDR2, v);
+    cpu.write32(SND_BUSY, 0);
+}
+
+/// The library's memory clear and copy: memset to 0, memcpy.
+pub fn snd_clear(cpu: &mut Cpu, at: u32, n: u32) {
+    nested!(cpu, 0x0600_817c, clib::memset(cpu, at, 0, n));
+}
+
+pub fn snd_copy(cpu: &mut Cpu, dst: u32, src: u32, n: u32) {
+    nested!(cpu, 0x0600_81d0, clib::memcpy(cpu, dst, src, n));
+}
+
+/// The library's next free command slot (its first byte 0), from the one after the slot it is at
+/// when that one is taken, else from the first: 1, the library at it, or 0 when none is (the
+/// library past the last).
+pub fn snd_next_slot(cpu: &mut Cpu) -> u32 {
+    let at = cpu.read32(SND_SLOT);
+    if cpu.read8(at) != 0 {
+        if at >= cpu.read32(SND_SLOTS).wrapping_add(SND_SLOTS_END) {
+            return 0;
+        }
+        let next = cpu.read32(SND_SLOT).wrapping_add(SLOT);
+        cpu.write32(SND_SLOT, next);
+        if next >= cpu.read32(SND_SLOTS).wrapping_add(SND_SLOTS_END) {
+            return 0;
+        }
+    } else {
+        let first = cpu.read32(SND_SLOTS);
+        cpu.write32(SND_SLOT, first);
+        if first >= first.wrapping_add(SND_SLOTS_END) {
+            return 0;
+        }
+    }
+    let end = cpu.read32(SND_SLOTS).wrapping_add(SND_SLOTS_END);
+    loop {
+        let at = cpu.read32(SND_SLOT);
+        if cpu.read8(at) == 0 {
+            return 1;
+        }
+        let next = cpu.read32(SND_SLOT).wrapping_add(SLOT);
+        cpu.write32(SND_SLOT, next);
+        if next >= end {
+            return 0;
+        }
+    }
+}
+
+/// A command (`word`: its number in the high byte) and its argument byte put in the library's
+/// slot, the number last.
+fn snd_put(cpu: &mut Cpu, word: u16, arg: u8) {
+    let slot = cpu.read32(SND_SLOT);
+    cpu.write8(slot + 2, arg);
+    let slot = cpu.read32(SND_SLOT);
+    cpu.write16(slot, word);
+}
+
+/// The driver taken a command: when its flag (sound RAM 0x4e1) has bit 7, 0x80 written back at
+/// 0x4e0; else a wait until the command in the library's slot is gone (its first word 0).
+const SND_FLAG: u32 = 0x25a0_04e1;
+const SND_ACK: u32 = 0x25a0_04e0;
+
+pub fn snd_wait(cpu: &mut Cpu) {
+    if cpu.read8(SND_FLAG) & 0x80 != 0 {
+        cpu.write8(SND_ACK, 0x80);
+        return;
+    }
+    let slot = cpu.read32(SND_SLOT);
+    if cpu.read16(slot) == 0 {
+        return;
+    }
+    let slot = cpu.read32(SND_SLOT);
+    while cpu.read16(slot) != 0 {
+        cpu.wait(0x0600_6bca, 5);
+    }
+}
+
+/// SND_ChgMap: the driver's map `map` made current (command 0x08, put twice, each waited for): 0,
+/// or 1 when the library is busy or no slot is free.
+const CHANGE_MAP: u16 = 0x0800;
+
+pub fn snd_change_map(cpu: &mut Cpu, map: u32) -> u32 {
+    if cpu.read32(SND_BUSY) != 0 {
+        return 1;
+    }
+    cpu.write32(SND_BUSY, 1);
+    for _ in 0..2 {
+        if nested!(cpu, 0x0600_7db8, snd_next_slot(cpu)) as u8 == 0 {
+            cpu.write32(SND_BUSY, 0);
+            return 1;
+        }
+        snd_put(cpu, CHANGE_MAP, map as u8);
+        nested!(cpu, 0x0600_6ba0, snd_wait(cpu));
+    }
+    cpu.write32(SND_BUSY, 0);
+    0
+}
+
+/// Command 0x82 with `v` (not known yet; sound_load sends 15), not waited for: 0, or 1 when the
+/// library is busy or no slot is free.
+const COMMAND_82: u16 = 0x8200;
+
+pub fn snd_command_82(cpu: &mut Cpu, v: u32) -> u32 {
+    if cpu.read32(SND_BUSY) != 0 {
+        return 1;
+    }
+    cpu.write32(SND_BUSY, 1);
+    if nested!(cpu, 0x0600_7db8, snd_next_slot(cpu)) as u8 == 0 {
+        cpu.write32(SND_BUSY, 0);
+        return 1;
+    }
+    snd_put(cpu, COMMAND_82, v as u8);
+    cpu.write32(SND_BUSY, 0);
+    0
+}
 
 /// SND_GetSeqStat: control `control`'s status into `buf`: the status's high byte (0 when it plays
 /// nothing) as a word, then its low byte.

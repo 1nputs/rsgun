@@ -1,7 +1,7 @@
 //! The C library's memset and memcpy as the game links them (Hitachi's for the SH): over a dozen
 //! bytes they go by 32-bit words, and they write with the widths they choose, which matters when
 //! the memory is a video chip's. And GCC's shift helpers (lib1funcs), which keep their own
-//! convention: the value in and out in r4.
+//! convention: the value in and out in r4; and newlib's atexit.
 
 use super::Cpu;
 
@@ -128,4 +128,38 @@ pub fn divide(cpu: &mut Cpu, a: u32, b: u32) -> u32 {
     s.set_t(q < t);
     s.r[1] = q;
     q
+}
+
+/// atexit (newlib's): `f` added to the reentrancy struct's list of functions (its first block
+/// inside the struct, made current on the first call; a block of 32 that is full gets a new one
+/// from malloc ahead of it): 0, or -1 when malloc fails. Not seen run.
+const IMPURE_PTR: u32 = 0x0600_a990;
+const ATEXIT: u32 = 0x170;
+const ATEXIT0: u32 = 0x174;
+const ATEXIT_SIZE: u32 = 0x88;
+const ATEXIT_MAX: i32 = 31;
+const MALLOC: u32 = 0x0600_82e4;
+
+pub fn atexit(cpu: &mut Cpu, f: u32) -> u32 {
+    let reent = cpu.read32(IMPURE_PTR);
+    let mut block = cpu.read32(reent + ATEXIT);
+    if block == 0 {
+        block = reent + ATEXIT0;
+        cpu.write32(reent + ATEXIT, block);
+    }
+    if cpu.read32(block + 4) as i32 > ATEXIT_MAX {
+        block = cpu.call(MALLOC, &[ATEXIT_SIZE]);
+        if block == 0 {
+            return u32::MAX;
+        }
+        cpu.write32(block + 4, 0);
+        let reent = cpu.read32(IMPURE_PTR);
+        let head = cpu.read32(reent + ATEXIT);
+        cpu.write32(block, head);
+        cpu.write32(reent + ATEXIT, block);
+    }
+    let n = cpu.read32(block + 4);
+    cpu.write32(block + 4, n + 1);
+    cpu.write32(block + 8 + 4 * n, f);
+    0
 }
