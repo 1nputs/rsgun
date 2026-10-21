@@ -148,7 +148,8 @@ fn run(cpu: &mut Cpu, game: u32) {
         };
         cpu.write32(game + SPEED_SUM, sum.wrapping_add(add));
     }
-    if cpu.read32(GAME_FLAGS) & HELD == 0 {
+    let moved = cpu.read32(GAME_FLAGS) & HELD == 0;
+    if moved {
         // the history moves down a frame (the newest entry is the state's to fill)
         for i in (1..HISTORY_LEN).rev() {
             for w in 0..4 {
@@ -159,7 +160,11 @@ fn run(cpu: &mut Cpu, game: u32) {
     }
     let state = cpu.read8(game + STATE_INDEX) as i8 as i32;
     let f = cpu.read32(STATES.wrapping_add((4 * state) as u32));
-    cpu.call(f, &[game]);
+    // the SH-2 code holds the game in r8, and in r9 the history loop's pointer (the game at its
+    // end; the history held, the mode byte's address): the state's prologue pushes them (read
+    // later as an unset field)
+    let r9 = if moved { game } else { game + 3 };
+    cpu.holding(8, game, |cpu| cpu.holding(9, r9, |cpu| cpu.call(f, &[game])));
     // paused, a debug step
     let debug = cpu.read32(DEBUG_FLAGS);
     if debug & 8 != 0 && debug & 4 == 0 {

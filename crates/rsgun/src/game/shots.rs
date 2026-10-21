@@ -1418,7 +1418,9 @@ pub fn beam_exec(cpu: &mut Cpu, b: u32) {
         cpu.write8(b + BEAM_SOUNDS, sounds);
     }
     turn_segments(cpu, b, seeker);
-    nested!(cpu, 0x0604_9aa0, beam_boxes(cpu, b));
+    // the SH-2 code holds a pointer into its frame in r12 (beam_boxes pushes it; read later as
+    // an unset field)
+    cpu.holding(12, f + 0x18, |cpu| nested!(cpu, 0x0604_9aa0, beam_boxes(cpu, b)));
 }
 
 /// The segments turned toward the target, out to the beam's length.

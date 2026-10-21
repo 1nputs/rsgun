@@ -107,6 +107,17 @@ impl Cpu<'_> {
         self.sh2.r[15]
     }
 
+    /// Runs `f` with register `n` (r8-r13) holding `value`, as the SH-2 code holds it there
+    /// across a call: the callee's prologue pushes it, and the game reads the stack it leaves
+    /// (a struct field never set). Used where such a read was seen.
+    pub fn holding<R>(&mut self, n: usize, value: u32, f: impl FnOnce(&mut Cpu) -> R) -> R {
+        let kept = self.sh2.r[n];
+        self.sh2.r[n] = value;
+        let r = f(self);
+        self.sh2.r[n] = kept;
+        r
+    }
+
     /// `nested` for a callee that takes arguments past the fourth: `stack_args` pushed first (the
     /// fifth at the stack pointer), as the SH-2 code pushes them before the call.
     pub fn nested_with_stack<R>(&mut self, prologue: &std::sync::OnceLock<Prologue>, entry: u32, stack_args: &[u32], f: impl FnOnce(&mut Cpu) -> R) -> R {

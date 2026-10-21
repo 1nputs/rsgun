@@ -58,6 +58,8 @@ pub fn send_to(cpu: &mut Cpu, slot: u32, command: u32, len: u32) -> u32 {
     1
 }
 
+const SEND: u32 = 0x0600_47bc;
+
 /// Puts the command in the first sequence slot the driver has done: 1, or 0 if none.
 pub fn send(cpu: &mut Cpu, command: u32, len: u32) -> u32 {
     (1..SLOT_COUNT).any(|slot| nested!(cpu, 0x0600_4718, send_to(cpu, slot, command, len)) != 0) as u32
@@ -81,11 +83,14 @@ fn send_setting(cpu: &mut Cpu, len: u32, at: u32) {
     }
 }
 
-/// The command built at COMMAND, sent to a sequence slot (waiting for one).
+/// The command built at COMMAND, sent to a sequence slot (waiting for one). The SH-2 code calls
+/// send through r8, which send's prologue pushes (read later as an unset field, by 0x06063620).
 fn send_sequence(cpu: &mut Cpu, len: u32, at: u32) {
-    while nested!(cpu, 0x0600_47bc, send(cpu, COMMAND, len)) == 0 {
-        cpu.wait(at, WAIT_PASS);
-    }
+    cpu.holding(8, SEND, |cpu| {
+        while nested!(cpu, SEND, send(cpu, COMMAND, len)) == 0 {
+            cpu.wait(at, WAIT_PASS);
+        }
+    });
 }
 
 fn build(cpu: &mut Cpu, number: u8, params: &[u8]) {
