@@ -5749,3 +5749,3235 @@ pub fn slave_sprite(cpu: &mut Cpu) {
     cpu.leave(&[(0, entry + POLYGON_ENTRY), (1, xy), (3, size), (5, (control & 0xffff_fff0) + 1), (7, x)]);
 }
 
+/// 24: a turned sprite (the master's slPutSprite with a turn): begun as a sprite is (its texture's
+/// size scaled), then its four corners from its place turned by the command's sine and cosine
+/// words, in the order its flip bits pick (a jump table: the control word's bits set to match),
+/// each checked against the window's bounds (one off: the link undone); then, when the sprite
+/// crosses the screen's edge, its corners turned round to start from the nearest (the distorted
+/// sprite's clipping). SGL's code block by block (tools/port/asm2sm.py): it leaves r8-r14 as it
+/// used them.
+pub fn slave_turned_sprite(cpu: &mut Cpu) {
+    let Some((entry, control, width, height)) = slave_sprite_start(cpu, 28) else {
+        return;
+    };
+    cpu.leave(&[(2, width), (3, height), (5, control), (11, entry)]);
+    turned_sprite_rest(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn turned_sprite_rest(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x06037f7a;
+    loop {
+        match pc {
+            0x06037f7a => {
+                r7 = cpu.read32(r4.wrapping_add(24)); // 06037f7a mov.l @(24,r4),r7
+                pr = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06037f7c lds.l @r15+,pr
+                mac = r2 as i32 as i64 * r7 as i32 as i64; // 06037f7e dmuls.l r2,r7
+                r0 = cpu.read32(w.wrapping_add(140)); // 06037f80 mov.l @(140,gbr),r0
+                r8 = cpu.read32(r4.wrapping_add(28)); // 06037f82 mov.l @(28,r4),r8
+                r14 = r0; // 06037f84 mov r0,r14
+                r1 = (mac >> 32) as u32; // 06037f86 sts mach,r1
+                r6 = mac as u32; // 06037f88 sts macl,r6
+                mac = r3 as i32 as i64 * r7 as i32 as i64; // 06037f8a dmuls.l r3,r7
+                r14 <<= 16; // 06037f8c shll16 r14
+                r0 >>= 16; // 06037f8e shlr16 r0
+                r6 = (r1 << 16) | (r6 >> 16); // 06037f90 xtrct r1,r6
+                r1 = (mac >> 32) as u32; // 06037f92 sts mach,r1
+                r7 = mac as u32; // 06037f94 sts macl,r7
+                mac = r2 as i32 as i64 * r8 as i32 as i64; // 06037f96 dmuls.l r2,r8
+                r13 = r0.rotate_left(16); // 06037f98 swap.w r0,r13
+                r0 = cpu.read32(w.wrapping_add(156)); // 06037f9a mov.l @(156,gbr),r0
+                r7 = (r1 << 16) | (r7 >> 16); // 06037f9c xtrct r1,r7
+                r1 = (mac >> 32) as u32; // 06037f9e sts mach,r1
+                r2 = mac as u32; // 06037fa0 sts macl,r2
+                mac = r3 as i32 as i64 * r8 as i32 as i64; // 06037fa2 dmuls.l r3,r8
+                r12 = r0; // 06037fa4 mov r0,r12
+                r12 <<= 16; // 06037fa6 shll16 r12
+                r2 = (r1 << 16) | (r2 >> 16); // 06037fa8 xtrct r1,r2
+                r1 = (mac >> 32) as u32; // 06037faa sts mach,r1
+                r3 = mac as u32; // 06037fac sts macl,r3
+                r0 >>= 16; // 06037fae shlr16 r0
+                r10 = r0.rotate_left(16); // 06037fb0 swap.w r0,r10
+                r3 = (r1 << 16) | (r3 >> 16); // 06037fb2 xtrct r1,r3
+                r0 = (r5 & 0xffff_0000) | ((r5 & 0xff) << 8) | ((r5 >> 8) & 0xff); // 06037fb4 swap.b r5,r0
+                r0 &= 15; // 06037fb6 and #15,r0
+                r1 = r0; // 06037fb8 mov r0,r1
+                r1 <<= 2; // 06037fba shll2 r1
+                r0 = 0x06037fc8; // 06037fbc mova 0x6037fc8,r0
+                r1 = cpu.read32(r0.wrapping_add(r1)); // 06037fbe mov.l @(r0,r1),r1
+                r8 = cpu.read32(r4.wrapping_add(12)); // 06037fc0 mov.l @(12,r4),r8
+                let to = r1; // 06037fc2 jmp @r1
+                r9 = cpu.read32(r4.wrapping_add(16)); // 06037fc4 mov.l @(16,r4),r9
+                pc = to;
+            }
+            0x06038008 => {
+                r1 = 32i32 as u32; // 06038008 mov #32,r1
+                r5 ^= r1; // 0603800a xor r1,r5
+                cpu.write16(r11, r5 as u16); // 0603800c mov.w r5,@r11
+                r3 = r3.wrapping_neg(); // 0603800e neg r3,r3
+                r7 = r7.wrapping_neg(); // 06038010 neg r7,r7
+                pc = 0x06038012;
+            }
+            0x06038012 => {
+                r0 = r2; // 06038012 mov r2,r0
+                t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 06038014 shar r0
+                r8 = r8.wrapping_sub(r0); // 06038016 sub r0,r8
+                r0 = r8; // 06038018 mov r8,r0
+                r0 = r0.wrapping_add(r10); // 0603801a add r10,r0
+                t = r0 > r13; // 0603801c cmp/hi r13,r0
+                let take = t; // 0603801e bt/s 0x603807e
+                r4 = r4.wrapping_add(32i32 as u32); // 06038020 add #32,r4
+                pc = if take { 0x0603807e } else { 0x06038022 };
+            }
+            0x06038022 => {
+                r0 = r6; // 06038022 mov r6,r0
+                t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 06038024 shar r0
+                r9 = r9.wrapping_sub(r0); // 06038026 sub r0,r9
+                r0 = r9; // 06038028 mov r9,r0
+                r0 = r0.wrapping_add(r12); // 0603802a add r12,r0
+                t = r0 > r14; // 0603802c cmp/hi r14,r0
+                let take = t; // 0603802e bt/s 0x603807e
+                r1 = r8.rotate_left(16); // 06038030 swap.w r8,r1
+                pc = if take { 0x0603807e } else { 0x06038032 };
+            }
+            0x06038032 => {
+                r8 = r8.wrapping_add(r2); // 06038032 add r2,r8
+                r0 = r8; // 06038034 mov r8,r0
+                r0 = r0.wrapping_add(r10); // 06038036 add r10,r0
+                t = r0 > r13; // 06038038 cmp/hi r13,r0
+                let take = t; // 0603803a bt/s 0x603807e
+                r5 = r9; // 0603803c mov r9,r5
+                pc = if take { 0x0603807e } else { 0x0603803e };
+            }
+            0x0603803e => {
+                r9 = r9.wrapping_add(r6); // 0603803e add r6,r9
+                r0 = r9; // 06038040 mov r9,r0
+                r0 = r0.wrapping_add(r12); // 06038042 add r12,r0
+                t = r0 > r14; // 06038044 cmp/hi r14,r0
+                let take = t; // 06038046 bt/s 0x603807e
+                r0 = r8.rotate_left(16); // 06038048 swap.w r8,r0
+                pc = if take { 0x0603807e } else { 0x0603804a };
+            }
+            0x0603804a => {
+                r5 = (r1 << 16) | (r5 >> 16); // 0603804a xtrct r1,r5
+                r1 = r9; // 0603804c mov r9,r1
+                r1 = (r0 << 16) | (r1 >> 16); // 0603804e xtrct r0,r1
+                r8 = r8.wrapping_sub(r7); // 06038050 sub r7,r8
+                r0 = r8; // 06038052 mov r8,r0
+                r0 = r0.wrapping_add(r10); // 06038054 add r10,r0
+                t = r0 > r13; // 06038056 cmp/hi r13,r0
+                let take = t; // 06038058 bt/s 0x603807e
+                r9 = r9.wrapping_add(r3); // 0603805a add r3,r9
+                pc = if take { 0x0603807e } else { 0x0603805c };
+            }
+            0x0603805c => {
+                r0 = r9; // 0603805c mov r9,r0
+                r0 = r0.wrapping_add(r12); // 0603805e add r12,r0
+                t = r0 > r14; // 06038060 cmp/hi r14,r0
+                let take = t; // 06038062 bt/s 0x603807e
+                r3 = r8.rotate_left(16); // 06038064 swap.w r8,r3
+                pc = if take { 0x0603807e } else { 0x06038066 };
+            }
+            0x06038066 => {
+                r8 = r8.wrapping_sub(r2); // 06038066 sub r2,r8
+                r10 = r10.wrapping_add(r8); // 06038068 add r8,r10
+                t = r10 > r13; // 0603806a cmp/hi r13,r10
+                let take = t; // 0603806c bt/s 0x603807e
+                r7 = r9; // 0603806e mov r9,r7
+                pc = if take { 0x0603807e } else { 0x06038070 };
+            }
+            0x06038070 => {
+                r9 = r9.wrapping_sub(r6); // 06038070 sub r6,r9
+                r12 = r12.wrapping_add(r9); // 06038072 add r9,r12
+                t = r12 > r14; // 06038074 cmp/hi r14,r12
+                let take = t; // 06038076 bt/s 0x603807e
+                r7 = (r3 << 16) | (r7 >> 16); // 06038078 xtrct r3,r7
+                pc = if take { 0x0603807e } else { 0x0603807a };
+            }
+            0x0603807a => {
+                // 0603807a bra 0x6038210
+                r8 = r8.rotate_left(16); // 0603807c swap.w r8,r8
+                pc = 0x06038210;
+            }
+            0x0603807e => {
+                r0 = cpu.read16(r11.wrapping_add(30)) as i16 as i32 as u32; // 0603807e mov.w @(30,r11),r0
+                r1 = cpu.read32(r11.wrapping_add(32)); // 06038080 mov.l @(32,r11),r1
+                r2 = (r0 & 0xffff_0000) | ((r0 & 0xff) << 8) | ((r0 >> 8) & 0xff); // 06038082 swap.b r0,r2
+                r0 = cpu.read32(w.wrapping_add(56)); // 06038084 mov.l @(56,gbr),r0
+                r2 = r2 & 0xff; // 06038086 extu.b r2,r2
+                r2 <<= 2; // 06038088 shll2 r2
+                // 0603808a rts
+                cpu.write32(r0.wrapping_add(r2), r1); // 0603808c mov.l r1,@(r0,r2)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            0x0603808e => {
+                r1 = 32i32 as u32; // 0603808e mov #32,r1
+                r3 = r3.wrapping_neg(); // 06038090 neg r3,r3
+                // 06038092 bra 0x60380a4
+                r7 = r7.wrapping_neg(); // 06038094 neg r7,r7
+                pc = 0x060380a4;
+            }
+            0x06038096 => {
+                r1 = 48i32 as u32; // 06038096 mov #48,r1
+                r3 = r3.wrapping_neg(); // 06038098 neg r3,r3
+                // 0603809a bra 0x60380a0
+                r7 = r7.wrapping_neg(); // 0603809c neg r7,r7
+                pc = 0x060380a0;
+            }
+            0x0603809e => {
+                r1 = 16i32 as u32; // 0603809e mov #16,r1
+                pc = 0x060380a0;
+            }
+            0x060380a0 => {
+                r2 = r2.wrapping_neg(); // 060380a0 neg r2,r2
+                r6 = r6.wrapping_neg(); // 060380a2 neg r6,r6
+                pc = 0x060380a4;
+            }
+            0x060380a4 => {
+                r5 ^= r1; // 060380a4 xor r1,r5
+                cpu.write16(r11, r5 as u16); // 060380a6 mov.w r5,@r11
+                pc = 0x060380a8;
+            }
+            0x060380a8 => {
+                r0 = r8; // 060380a8 mov r8,r0
+                r0 = r0.wrapping_add(r10); // 060380aa add r10,r0
+                t = r0 > r13; // 060380ac cmp/hi r13,r0
+                let take = t; // 060380ae bt/s 0x603807e
+                r4 = r4.wrapping_add(32i32 as u32); // 060380b0 add #32,r4
+                pc = if take { 0x0603807e } else { 0x060380b2 };
+            }
+            0x060380b2 => {
+                r0 = r9; // 060380b2 mov r9,r0
+                r0 = r0.wrapping_add(r12); // 060380b4 add r12,r0
+                t = r0 > r14; // 060380b6 cmp/hi r14,r0
+                let take = t; // 060380b8 bt/s 0x603807e
+                r0 = r8.rotate_left(16); // 060380ba swap.w r8,r0
+                pc = if take { 0x0603807e } else { 0x060380bc };
+            }
+            0x060380bc => {
+                r5 = r9; // 060380bc mov r9,r5
+                r5 = (r0 << 16) | (r5 >> 16); // 060380be xtrct r0,r5
+                r8 = r8.wrapping_add(r2); // 060380c0 add r2,r8
+                r0 = r8; // 060380c2 mov r8,r0
+                r0 = r0.wrapping_add(r10); // 060380c4 add r10,r0
+                t = r0 > r13; // 060380c6 cmp/hi r13,r0
+                let take = t; // 060380c8 bt/s 0x603807e
+                r9 = r9.wrapping_add(r6); // 060380ca add r6,r9
+                pc = if take { 0x0603807e } else { 0x060380cc };
+            }
+            0x060380cc => {
+                r0 = r9; // 060380cc mov r9,r0
+                r0 = r0.wrapping_add(r12); // 060380ce add r12,r0
+                t = r0 > r14; // 060380d0 cmp/hi r14,r0
+                let take = t; // 060380d2 bt/s 0x603807e
+                r0 = r8.rotate_left(16); // 060380d4 swap.w r8,r0
+                pc = if take { 0x0603807e } else { 0x060380d6 };
+            }
+            0x060380d6 => {
+                r1 = r9; // 060380d6 mov r9,r1
+                r1 = (r0 << 16) | (r1 >> 16); // 060380d8 xtrct r0,r1
+                r8 = r8.wrapping_sub(r7); // 060380da sub r7,r8
+                r0 = r8; // 060380dc mov r8,r0
+                r0 = r0.wrapping_add(r10); // 060380de add r10,r0
+                t = r0 > r13; // 060380e0 cmp/hi r13,r0
+                let take = t; // 060380e2 bt/s 0x603807e
+                r9 = r9.wrapping_add(r3); // 060380e4 add r3,r9
+                pc = if take { 0x0603807e } else { 0x060380e6 };
+            }
+            0x060380e6 => {
+                r0 = r9; // 060380e6 mov r9,r0
+                r0 = r0.wrapping_add(r12); // 060380e8 add r12,r0
+                t = r0 > r14; // 060380ea cmp/hi r14,r0
+                let take = t; // 060380ec bt/s 0x603807e
+                r3 = r8.rotate_left(16); // 060380ee swap.w r8,r3
+                pc = if take { 0x0603807e } else { 0x060380f0 };
+            }
+            0x060380f0 => {
+                r8 = r8.wrapping_sub(r2); // 060380f0 sub r2,r8
+                r10 = r10.wrapping_add(r8); // 060380f2 add r8,r10
+                t = r10 > r13; // 060380f4 cmp/hi r13,r10
+                let take = t; // 060380f6 bt/s 0x603807e
+                r7 = r9; // 060380f8 mov r9,r7
+                pc = if take { 0x0603807e } else { 0x060380fa };
+            }
+            0x060380fa => {
+                r9 = r9.wrapping_sub(r6); // 060380fa sub r6,r9
+                r12 = r12.wrapping_add(r9); // 060380fc add r9,r12
+                t = r12 > r14; // 060380fe cmp/hi r14,r12
+                let take = t; // 06038100 bt/s 0x603807e
+                r7 = (r3 << 16) | (r7 >> 16); // 06038102 xtrct r3,r7
+                pc = if take { 0x0603807e } else { 0x06038104 };
+            }
+            0x06038104 => {
+                // 06038104 bra 0x6038210
+                r8 = r8.rotate_left(16); // 06038106 swap.w r8,r8
+                pc = 0x06038210;
+            }
+            0x06038108 => {
+                r1 = 16i32 as u32; // 06038108 mov #16,r1
+                r5 ^= r1; // 0603810a xor r1,r5
+                cpu.write16(r11, r5 as u16); // 0603810c mov.w r5,@r11
+                r2 = r2.wrapping_neg(); // 0603810e neg r2,r2
+                r6 = r6.wrapping_neg(); // 06038110 neg r6,r6
+                pc = 0x06038112;
+            }
+            0x06038112 => {
+                r0 = r7; // 06038112 mov r7,r0
+                t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 06038114 shar r0
+                r8 = r8.wrapping_add(r0); // 06038116 add r0,r8
+                r0 = r8; // 06038118 mov r8,r0
+                r0 = r0.wrapping_add(r10); // 0603811a add r10,r0
+                t = r0 > r13; // 0603811c cmp/hi r13,r0
+                let take = t; // 0603811e bt/s 0x603817e
+                r4 = r4.wrapping_add(32i32 as u32); // 06038120 add #32,r4
+                pc = if take { 0x0603817e } else { 0x06038122 };
+            }
+            0x06038122 => {
+                r0 = r3; // 06038122 mov r3,r0
+                t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 06038124 shar r0
+                r9 = r9.wrapping_sub(r0); // 06038126 sub r0,r9
+                r0 = r9; // 06038128 mov r9,r0
+                r0 = r0.wrapping_add(r12); // 0603812a add r12,r0
+                t = r0 > r14; // 0603812c cmp/hi r14,r0
+                let take = t; // 0603812e bt/s 0x603817e
+                r1 = r8.rotate_left(16); // 06038130 swap.w r8,r1
+                pc = if take { 0x0603817e } else { 0x06038132 };
+            }
+            0x06038132 => {
+                r8 = r8.wrapping_add(r2); // 06038132 add r2,r8
+                r0 = r8; // 06038134 mov r8,r0
+                r0 = r0.wrapping_add(r10); // 06038136 add r10,r0
+                t = r0 > r13; // 06038138 cmp/hi r13,r0
+                let take = t; // 0603813a bt/s 0x603817e
+                r5 = r9; // 0603813c mov r9,r5
+                pc = if take { 0x0603817e } else { 0x0603813e };
+            }
+            0x0603813e => {
+                r9 = r9.wrapping_add(r6); // 0603813e add r6,r9
+                r0 = r9; // 06038140 mov r9,r0
+                r0 = r0.wrapping_add(r12); // 06038142 add r12,r0
+                t = r0 > r14; // 06038144 cmp/hi r14,r0
+                let take = t; // 06038146 bt/s 0x603817e
+                r0 = r8.rotate_left(16); // 06038148 swap.w r8,r0
+                pc = if take { 0x0603817e } else { 0x0603814a };
+            }
+            0x0603814a => {
+                r5 = (r1 << 16) | (r5 >> 16); // 0603814a xtrct r1,r5
+                r1 = r9; // 0603814c mov r9,r1
+                r1 = (r0 << 16) | (r1 >> 16); // 0603814e xtrct r0,r1
+                r8 = r8.wrapping_sub(r7); // 06038150 sub r7,r8
+                r0 = r8; // 06038152 mov r8,r0
+                r0 = r0.wrapping_add(r10); // 06038154 add r10,r0
+                t = r0 > r13; // 06038156 cmp/hi r13,r0
+                let take = t; // 06038158 bt/s 0x603817e
+                r9 = r9.wrapping_add(r3); // 0603815a add r3,r9
+                pc = if take { 0x0603817e } else { 0x0603815c };
+            }
+            0x0603815c => {
+                r0 = r9; // 0603815c mov r9,r0
+                r0 = r0.wrapping_add(r12); // 0603815e add r12,r0
+                t = r0 > r14; // 06038160 cmp/hi r14,r0
+                let take = t; // 06038162 bt/s 0x603817e
+                r3 = r8.rotate_left(16); // 06038164 swap.w r8,r3
+                pc = if take { 0x0603817e } else { 0x06038166 };
+            }
+            0x06038166 => {
+                r8 = r8.wrapping_sub(r2); // 06038166 sub r2,r8
+                r10 = r10.wrapping_add(r8); // 06038168 add r8,r10
+                t = r10 > r13; // 0603816a cmp/hi r13,r10
+                let take = t; // 0603816c bt/s 0x603817e
+                r7 = r9; // 0603816e mov r9,r7
+                pc = if take { 0x0603817e } else { 0x06038170 };
+            }
+            0x06038170 => {
+                r9 = r9.wrapping_sub(r6); // 06038170 sub r6,r9
+                r12 = r12.wrapping_add(r9); // 06038172 add r9,r12
+                t = r12 > r14; // 06038174 cmp/hi r14,r12
+                let take = t; // 06038176 bt/s 0x603817e
+                r7 = (r3 << 16) | (r7 >> 16); // 06038178 xtrct r3,r7
+                pc = if take { 0x0603817e } else { 0x0603817a };
+            }
+            0x0603817a => {
+                // 0603817a bra 0x6038210
+                r8 = r8.rotate_left(16); // 0603817c swap.w r8,r8
+                pc = 0x06038210;
+            }
+            0x0603817e => {
+                r0 = cpu.read16(r11.wrapping_add(30)) as i16 as i32 as u32; // 0603817e mov.w @(30,r11),r0
+                r1 = cpu.read32(r11.wrapping_add(32)); // 06038180 mov.l @(32,r11),r1
+                r2 = (r0 & 0xffff_0000) | ((r0 & 0xff) << 8) | ((r0 >> 8) & 0xff); // 06038182 swap.b r0,r2
+                r0 = cpu.read32(w.wrapping_add(56)); // 06038184 mov.l @(56,gbr),r0
+                r2 = r2 & 0xff; // 06038186 extu.b r2,r2
+                r2 <<= 2; // 06038188 shll2 r2
+                // 0603818a rts
+                cpu.write32(r0.wrapping_add(r2), r1); // 0603818c mov.l r1,@(r0,r2)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            0x0603818e => {
+                r5 = (r5 & 0xffff_0000) | ((r5 & 0xff) << 8) | ((r5 >> 8) & 0xff); // 0603818e swap.b r5,r5
+                r0 = -16i32 as u32; // 06038190 mov #-16,r0
+                r0 &= r5; // 06038192 and r5,r0
+                r0 |= 10; // 06038194 or #10,r0
+                r0 = (r0 & 0xffff_0000) | ((r0 & 0xff) << 8) | ((r0 >> 8) & 0xff); // 06038196 swap.b r0,r0
+                cpu.write16(r11.wrapping_add(0), r0 as u16); // 06038198 mov.w r0,@(0,r11)
+                pc = 0x0603819a;
+            }
+            0x0603819a => {
+                r0 = r2; // 0603819a mov r2,r0
+                t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 0603819c shar r0
+                r8 = r8.wrapping_sub(r0); // 0603819e sub r0,r8
+                r0 = r7; // 060381a0 mov r7,r0
+                t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 060381a2 shar r0
+                r8 = r8.wrapping_add(r0); // 060381a4 add r0,r8
+                r0 = r8; // 060381a6 mov r8,r0
+                r0 = r0.wrapping_add(r10); // 060381a8 add r10,r0
+                t = r0 > r13; // 060381aa cmp/hi r13,r0
+                let take = t; // 060381ac bt/s 0x603817e
+                r4 = r4.wrapping_add(32i32 as u32); // 060381ae add #32,r4
+                pc = if take { 0x0603817e } else { 0x060381b0 };
+            }
+            0x060381b0 => {
+                r0 = r3; // 060381b0 mov r3,r0
+                t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 060381b2 shar r0
+                r9 = r9.wrapping_sub(r0); // 060381b4 sub r0,r9
+                r0 = r6; // 060381b6 mov r6,r0
+                t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 060381b8 shar r0
+                r9 = r9.wrapping_sub(r0); // 060381ba sub r0,r9
+                r0 = r9; // 060381bc mov r9,r0
+                r0 = r0.wrapping_add(r12); // 060381be add r12,r0
+                t = r0 > r14; // 060381c0 cmp/hi r14,r0
+                let take = t; // 060381c2 bt/s 0x603817e
+                r1 = r8.rotate_left(16); // 060381c4 swap.w r8,r1
+                pc = if take { 0x0603817e } else { 0x060381c6 };
+            }
+            0x060381c6 => {
+                r8 = r8.wrapping_add(r2); // 060381c6 add r2,r8
+                r0 = r8; // 060381c8 mov r8,r0
+                r0 = r0.wrapping_add(r10); // 060381ca add r10,r0
+                t = r0 > r13; // 060381cc cmp/hi r13,r0
+                let take = t; // 060381ce bt/s 0x603817e
+                r5 = r9; // 060381d0 mov r9,r5
+                pc = if take { 0x0603817e } else { 0x060381d2 };
+            }
+            0x060381d2 => {
+                r5 = (r1 << 16) | (r5 >> 16); // 060381d2 xtrct r1,r5
+                r9 = r9.wrapping_add(r6); // 060381d4 add r6,r9
+                r0 = r9; // 060381d6 mov r9,r0
+                r0 = r0.wrapping_add(r12); // 060381d8 add r12,r0
+                t = r0 > r14; // 060381da cmp/hi r14,r0
+                let take = t; // 060381dc bt/s 0x603817e
+                r0 = r8.rotate_left(16); // 060381de swap.w r8,r0
+                pc = if take { 0x0603817e } else { 0x060381e0 };
+            }
+            0x060381e0 => {
+                r1 = r9; // 060381e0 mov r9,r1
+                r1 = (r0 << 16) | (r1 >> 16); // 060381e2 xtrct r0,r1
+                r8 = r8.wrapping_sub(r7); // 060381e4 sub r7,r8
+                r0 = r8; // 060381e6 mov r8,r0
+                r0 = r0.wrapping_add(r10); // 060381e8 add r10,r0
+                t = r0 > r13; // 060381ea cmp/hi r13,r0
+                let take = t; // 060381ec bt/s 0x603817e
+                r9 = r9.wrapping_add(r3); // 060381ee add r3,r9
+                pc = if take { 0x0603817e } else { 0x060381f0 };
+            }
+            0x060381f0 => {
+                r0 = r9; // 060381f0 mov r9,r0
+                r0 = r0.wrapping_add(r12); // 060381f2 add r12,r0
+                t = r0 > r14; // 060381f4 cmp/hi r14,r0
+                let take = t; // 060381f6 bt/s 0x603817e
+                r3 = r8.rotate_left(16); // 060381f8 swap.w r8,r3
+                pc = if take { 0x0603817e } else { 0x060381fa };
+            }
+            0x060381fa => {
+                r8 = r8.wrapping_sub(r2); // 060381fa sub r2,r8
+                r10 = r10.wrapping_add(r8); // 060381fc add r8,r10
+                t = r10 > r13; // 060381fe cmp/hi r13,r10
+                let take = t; // 06038200 bt/s 0x603817e
+                r7 = r9; // 06038202 mov r9,r7
+                pc = if take { 0x0603817e } else { 0x06038204 };
+            }
+            0x06038204 => {
+                r9 = r9.wrapping_sub(r6); // 06038204 sub r6,r9
+                r12 = r12.wrapping_add(r9); // 06038206 add r9,r12
+                t = r12 > r14; // 06038208 cmp/hi r14,r12
+                let take = t; // 0603820a bt/s 0x603817e
+                r7 = (r3 << 16) | (r7 >> 16); // 0603820c xtrct r3,r7
+                pc = if take { 0x0603817e } else { 0x0603820e };
+            }
+            0x0603820e => {
+                r8 = r8.rotate_left(16); // 0603820e swap.w r8,r8
+                pc = 0x06038210;
+            }
+            0x06038210 => {
+                r0 = r11; // 06038210 mov r11,r0
+                r0 = r0.wrapping_add(36i32 as u32); // 06038212 add #36,r0
+                cpu.write32(w.wrapping_add(52), r0); // 06038214 mov.l r0,@(52,gbr)
+                r0 = cpu.read32(w.wrapping_add(148)); // 06038216 mov.l @(148,gbr),r0
+                r3 = r0 as i16 as i32 as u32; // 06038218 exts.w r0,r3
+                r2 = r0.rotate_left(16); // 0603821a swap.w r0,r2
+                r0 = cpu.read32(w.wrapping_add(816)); // 0603821c mov.l @(816,gbr),r0
+                r2 = r2 as i16 as i32 as u32; // 0603821e exts.w r2,r2
+                r13 = r0 & 0xffff; // 06038220 extu.w r0,r13
+                r12 = r0.rotate_left(16); // 06038222 swap.w r0,r12
+                r12 = r12 & 0xffff; // 06038224 extu.w r12,r12
+                r0 = cpu.read16(r11.wrapping_add(4)) as i16 as i32 as u32; // 06038226 mov.w @(4,r11),r0
+                r0 &= 4; // 06038228 and #4,r0
+                t = r0 & r0 == 0; // 0603822a tst r0,r0
+                r9 = (r8 << 16) | (r9 >> 16); // 0603822c xtrct r8,r9
+                pc = if !t { 0x060382ee } else { 0x06038230 }; // 0603822e bf 0x60382ee
+            }
+            0x06038230 => {
+                r0 = r5 as i16 as i32 as u32; // 06038230 exts.w r5,r0
+                r0 = r0.wrapping_add(r3); // 06038232 add r3,r0
+                t = r0 >= r13; // 06038234 cmp/hs r13,r0
+                let take = t; // 06038236 bt/s 0x6038242
+                r0 = r5.rotate_left(16); // 06038238 swap.w r5,r0
+                pc = if take { 0x06038242 } else { 0x0603823a };
+            }
+            0x0603823a => {
+                r0 = r0 as i16 as i32 as u32; // 0603823a exts.w r0,r0
+                r0 = r0.wrapping_add(r2); // 0603823c add r2,r0
+                t = r12 > r0; // 0603823e cmp/hi r0,r12
+                let take = t; // 06038240 bt/s 0x60382ee
+                r0 = r1 as i16 as i32 as u32; // 06038242 exts.w r1,r0
+                pc = if take { 0x060382ee } else { 0x06038244 };
+            }
+            0x06038242 => {
+                r0 = r1 as i16 as i32 as u32; // 06038242 exts.w r1,r0
+                pc = 0x06038244;
+            }
+            0x06038244 => {
+                r0 = r0.wrapping_add(r3); // 06038244 add r3,r0
+                t = r0 >= r13; // 06038246 cmp/hs r13,r0
+                let take = t; // 06038248 bt/s 0x6038254
+                r0 = r1.rotate_left(16); // 0603824a swap.w r1,r0
+                pc = if take { 0x06038254 } else { 0x0603824c };
+            }
+            0x0603824c => {
+                r0 = r0 as i16 as i32 as u32; // 0603824c exts.w r0,r0
+                r0 = r0.wrapping_add(r2); // 0603824e add r2,r0
+                t = r12 > r0; // 06038250 cmp/hi r0,r12
+                let take = t; // 06038252 bt/s 0x60382f8
+                r0 = r7 as i16 as i32 as u32; // 06038254 exts.w r7,r0
+                pc = if take { 0x060382f8 } else { 0x06038256 };
+            }
+            0x06038254 => {
+                r0 = r7 as i16 as i32 as u32; // 06038254 exts.w r7,r0
+                pc = 0x06038256;
+            }
+            0x06038256 => {
+                r0 = r0.wrapping_add(r3); // 06038256 add r3,r0
+                t = r0 >= r13; // 06038258 cmp/hs r13,r0
+                let take = t; // 0603825a bt/s 0x6038266
+                r0 = r7.rotate_left(16); // 0603825c swap.w r7,r0
+                pc = if take { 0x06038266 } else { 0x0603825e };
+            }
+            0x0603825e => {
+                r0 = r0 as i16 as i32 as u32; // 0603825e exts.w r0,r0
+                r0 = r0.wrapping_add(r2); // 06038260 add r2,r0
+                t = r12 > r0; // 06038262 cmp/hi r0,r12
+                let take = t; // 06038264 bt/s 0x6038308
+                r0 = r9 as i16 as i32 as u32; // 06038266 exts.w r9,r0
+                pc = if take { 0x06038308 } else { 0x06038268 };
+            }
+            0x06038266 => {
+                r0 = r9 as i16 as i32 as u32; // 06038266 exts.w r9,r0
+                pc = 0x06038268;
+            }
+            0x06038268 => {
+                r0 = r0.wrapping_add(r3); // 06038268 add r3,r0
+                t = r0 >= r13; // 0603826a cmp/hs r13,r0
+                let take = t; // 0603826c bt/s 0x6038276
+                r0 = r8 as i16 as i32 as u32; // 0603826e exts.w r8,r0
+                pc = if take { 0x06038276 } else { 0x06038270 };
+            }
+            0x06038270 => {
+                r0 = r0.wrapping_add(r2); // 06038270 add r2,r0
+                t = r12 > r0; // 06038272 cmp/hi r0,r12
+                let take = t; // 06038274 bt/s 0x6038318
+                r8 = 1i32 as u32; // 06038276 mov #1,r8
+                pc = if take { 0x06038318 } else { 0x06038278 };
+            }
+            0x06038276 => {
+                r8 = 1i32 as u32; // 06038276 mov #1,r8
+                pc = 0x06038278;
+            }
+            0x06038278 => {
+                r8 <<= 16; // 06038278 shll16 r8
+                t = r8 & 1 != 0; r8 >>= 1; // 0603827a shlr r8
+                r2 = r9.rotate_left(16); // 0603827c swap.w r9,r2
+                t = r8 & r2 == 0; // 0603827e tst r8,r2
+                { let (x, b1) = r13.overflowing_sub(r13); let (y, b2) = x.overflowing_sub(t as u32); r13 = y; t = b1 || b2; } // 06038280 subc r13,r13
+                r13 = !r13; // 06038282 not r13,r13
+                r13 ^= r2; // 06038284 xor r2,r13
+                t = r8 & r9 == 0; // 06038286 tst r8,r9
+                { let (x, b1) = r2.overflowing_sub(r2); let (y, b2) = x.overflowing_sub(t as u32); r2 = y; t = b1 || b2; } // 06038288 subc r2,r2
+                r2 = !r2; // 0603828a not r2,r2
+                r2 ^= r9; // 0603828c xor r9,r2
+                r13 = r13.wrapping_add(r2); // 0603828e add r2,r13
+                r13 = r13 & 0xffff; // 06038290 extu.w r13,r13
+                r0 = 0x06038318; // 06038292 mova 0x6038318,r0
+                r2 = r7.rotate_left(16); // 06038294 swap.w r7,r2
+                t = r8 & r2 == 0; // 06038296 tst r8,r2
+                { let (x, b1) = r12.overflowing_sub(r12); let (y, b2) = x.overflowing_sub(t as u32); r12 = y; t = b1 || b2; } // 06038298 subc r12,r12
+                r12 = !r12; // 0603829a not r12,r12
+                r12 ^= r2; // 0603829c xor r2,r12
+                t = r8 & r7 == 0; // 0603829e tst r8,r7
+                { let (x, b1) = r2.overflowing_sub(r2); let (y, b2) = x.overflowing_sub(t as u32); r2 = y; t = b1 || b2; } // 060382a0 subc r2,r2
+                r2 = !r2; // 060382a2 not r2,r2
+                r2 ^= r7; // 060382a4 xor r7,r2
+                r12 = r12.wrapping_add(r2); // 060382a6 add r2,r12
+                r12 = r12 & 0xffff; // 060382a8 extu.w r12,r12
+                t = r12 as i32 > r13 as i32; // 060382aa cmp/gt r13,r12
+                let take = t; // 060382ac bt/s 0x60382b4
+                r2 = r1.rotate_left(16); // 060382ae swap.w r1,r2
+                pc = if take { 0x060382b4 } else { 0x060382b0 };
+            }
+            0x060382b0 => {
+                r13 = r12; // 060382b0 mov r12,r13
+                r0 = 0x06038308; // 060382b2 mova 0x6038308,r0
+                pc = 0x060382b4;
+            }
+            0x060382b4 => {
+                t = r8 & r2 == 0; // 060382b4 tst r8,r2
+                { let (x, b1) = r12.overflowing_sub(r12); let (y, b2) = x.overflowing_sub(t as u32); r12 = y; t = b1 || b2; } // 060382b6 subc r12,r12
+                r12 = !r12; // 060382b8 not r12,r12
+                r12 ^= r2; // 060382ba xor r2,r12
+                t = r8 & r1 == 0; // 060382bc tst r8,r1
+                { let (x, b1) = r2.overflowing_sub(r2); let (y, b2) = x.overflowing_sub(t as u32); r2 = y; t = b1 || b2; } // 060382be subc r2,r2
+                r2 = !r2; // 060382c0 not r2,r2
+                r2 ^= r1; // 060382c2 xor r1,r2
+                r12 = r12.wrapping_add(r2); // 060382c4 add r2,r12
+                r12 = r12 & 0xffff; // 060382c6 extu.w r12,r12
+                t = r12 as i32 > r13 as i32; // 060382c8 cmp/gt r13,r12
+                let take = t; // 060382ca bt/s 0x60382d2
+                r2 = r5.rotate_left(16); // 060382cc swap.w r5,r2
+                pc = if take { 0x060382d2 } else { 0x060382ce };
+            }
+            0x060382ce => {
+                r13 = r12; // 060382ce mov r12,r13
+                r0 = 0x06038308; // 060382d0 mova 0x6038308,r0
+                pc = 0x060382d2;
+            }
+            0x060382d2 => {
+                t = r8 & r2 == 0; // 060382d2 tst r8,r2
+                { let (x, b1) = r12.overflowing_sub(r12); let (y, b2) = x.overflowing_sub(t as u32); r12 = y; t = b1 || b2; } // 060382d4 subc r12,r12
+                r12 = !r12; // 060382d6 not r12,r12
+                r12 ^= r2; // 060382d8 xor r2,r12
+                t = r8 & r5 == 0; // 060382da tst r8,r5
+                { let (x, b1) = r2.overflowing_sub(r2); let (y, b2) = x.overflowing_sub(t as u32); r2 = y; t = b1 || b2; } // 060382dc subc r2,r2
+                r2 = !r2; // 060382de not r2,r2
+                r2 ^= r5; // 060382e0 xor r5,r2
+                r12 = r12.wrapping_add(r2); // 060382e2 add r2,r12
+                r12 = r12 & 0xffff; // 060382e4 extu.w r12,r12
+                t = r13 as i32 >= r12 as i32; // 060382e6 cmp/ge r12,r13
+                pc = if t { 0x060382ee } else { 0x060382ea }; // 060382e8 bt 0x60382ee
+            }
+            0x060382ea => {
+                let to = r0; // 060382ea jmp @r0
+                // nop // 060382ec nop 
+                pc = to;
+            }
+            0x060382ee => {
+                cpu.write32(r11.wrapping_add(12), r5); // 060382ee mov.l r5,@(12,r11)
+                cpu.write32(r11.wrapping_add(16), r1); // 060382f0 mov.l r1,@(16,r11)
+                cpu.write32(r11.wrapping_add(20), r7); // 060382f2 mov.l r7,@(20,r11)
+                // 060382f4 rts
+                cpu.write32(r11.wrapping_add(24), r9); // 060382f6 mov.l r9,@(24,r11)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            0x060382f8 => {
+                r0 = cpu.read16(r11.wrapping_add(0)) as i16 as i32 as u32; // 060382f8 mov.w @(0,r11),r0
+                cpu.write32(r11.wrapping_add(16), r5); // 060382fa mov.l r5,@(16,r11)
+                r0 ^= 16; // 060382fc xor #16,r0
+                cpu.write16(r11.wrapping_add(0), r0 as u16); // 060382fe mov.w r0,@(0,r11)
+                cpu.write32(r11.wrapping_add(12), r1); // 06038300 mov.l r1,@(12,r11)
+                cpu.write32(r11.wrapping_add(24), r7); // 06038302 mov.l r7,@(24,r11)
+                // 06038304 rts
+                cpu.write32(r11.wrapping_add(20), r9); // 06038306 mov.l r9,@(20,r11)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            0x06038308 => {
+                r0 = cpu.read16(r11.wrapping_add(0)) as i16 as i32 as u32; // 06038308 mov.w @(0,r11),r0
+                cpu.write32(r11.wrapping_add(20), r5); // 0603830a mov.l r5,@(20,r11)
+                r0 ^= 48; // 0603830c xor #48,r0
+                cpu.write16(r11.wrapping_add(0), r0 as u16); // 0603830e mov.w r0,@(0,r11)
+                cpu.write32(r11.wrapping_add(24), r1); // 06038310 mov.l r1,@(24,r11)
+                cpu.write32(r11.wrapping_add(12), r7); // 06038312 mov.l r7,@(12,r11)
+                // 06038314 rts
+                cpu.write32(r11.wrapping_add(16), r9); // 06038316 mov.l r9,@(16,r11)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            0x06038318 => {
+                r0 = cpu.read16(r11.wrapping_add(0)) as i16 as i32 as u32; // 06038318 mov.w @(0,r11),r0
+                cpu.write32(r11.wrapping_add(24), r5); // 0603831a mov.l r5,@(24,r11)
+                r0 ^= 32; // 0603831c xor #32,r0
+                cpu.write16(r11.wrapping_add(0), r0 as u16); // 0603831e mov.w r0,@(0,r11)
+                cpu.write32(r11.wrapping_add(20), r1); // 06038320 mov.l r1,@(20,r11)
+                cpu.write32(r11.wrapping_add(16), r7); // 06038322 mov.l r7,@(16,r11)
+                // 06038324 rts
+                cpu.write32(r11.wrapping_add(12), r9); // 06038326 mov.l r9,@(12,r11)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+/// 20: polygon data (the master's slPutPolygon: the counts, the points, the polygons, their
+/// attributes, then the matrix): the matrix kept (SGL's copy in its code), the points turned and
+/// put on the screen into the points room (each with its clipping bits against the window, the
+/// window's near level and the far limit; the divide unit's quotients for the perspective), then
+/// each polygon facing the eye (or two-sided) given a depth by its attribute's sort, its
+/// lighting or Gouraud table where its attribute asks, and its VDP1 command made at the slave's
+/// slot and linked by its depth (a chain of handlers per attribute kind, through SGL's tables).
+/// SGL's code block by block (tools/port/asm2sm.py: about 2000 instructions in 227 blocks); it
+/// makes its own pushes (PROLOGUES) and leaves r8-r14 as it used them.
+pub fn slave_polygons(cpu: &mut Cpu) {
+    slave_polygons_blocks(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn slave_polygons_blocks(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x06036dd8;
+    loop {
+        match pc {
+            0x06036c40 => {
+                r0 = 0x00000200; // 06036c40 mov.l 0x6036f58,r0
+                r1 = 0i32 as u32; // 06036c42 mov #0,r1
+                pc = 0x06036c44;
+            }
+            0x06036c44 => {
+                t = r3 as i32 > r0 as i32; // 06036c44 cmp/gt r0,r3
+                pc = if !t { 0x06036c50 } else { 0x06036c48 }; // 06036c46 bf 0x6036c50
+            }
+            0x06036c48 => {
+                r1 = 1i32 as u32; // 06036c48 mov #1,r1
+                t = r3 & 1 != 0; r3 = (r3 as i32 >> 1) as u32; // 06036c4a shar r3
+                // 06036c4c bra 0x6036c44
+                t = r5 & 1 != 0; r5 = (r5 as i32 >> 1) as u32; // 06036c4e shar r5
+                pc = 0x06036c44;
+            }
+            0x06036c50 => {
+                t = r5 as i32 > r0 as i32; // 06036c50 cmp/gt r0,r5
+                pc = if !t { 0x06036c5c } else { 0x06036c54 }; // 06036c52 bf 0x6036c5c
+            }
+            0x06036c54 => {
+                r1 = 1i32 as u32; // 06036c54 mov #1,r1
+                t = r3 & 1 != 0; r3 = (r3 as i32 >> 1) as u32; // 06036c56 shar r3
+                // 06036c58 bra 0x6036c50
+                t = r5 & 1 != 0; r5 = (r5 as i32 >> 1) as u32; // 06036c5a shar r5
+                pc = 0x06036c50;
+            }
+            0x06036c5c => {
+                r0 = r0.wrapping_neg(); // 06036c5c neg r0,r0
+                t = r3 as i32 >= r0 as i32; // 06036c5e cmp/ge r0,r3
+                pc = if t { 0x06036c6a } else { 0x06036c62 }; // 06036c60 bt 0x6036c6a
+            }
+            0x06036c62 => {
+                r1 = 1i32 as u32; // 06036c62 mov #1,r1
+                t = r3 & 1 != 0; r3 = (r3 as i32 >> 1) as u32; // 06036c64 shar r3
+                // 06036c66 bra 0x6036c5c
+                t = r5 & 1 != 0; r5 = (r5 as i32 >> 1) as u32; // 06036c68 shar r5
+                pc = 0x06036c5c;
+            }
+            0x06036c6a => {
+                t = r5 as i32 >= r0 as i32; // 06036c6a cmp/ge r0,r5
+                pc = if t { 0x06036c76 } else { 0x06036c6e }; // 06036c6c bt 0x6036c76
+            }
+            0x06036c6e => {
+                r1 = 1i32 as u32; // 06036c6e mov #1,r1
+                t = r3 & 1 != 0; r3 = (r3 as i32 >> 1) as u32; // 06036c70 shar r3
+                // 06036c72 bra 0x6036c6a
+                t = r5 & 1 != 0; r5 = (r5 as i32 >> 1) as u32; // 06036c74 shar r5
+                pc = 0x06036c6a;
+            }
+            0x06036c76 => {
+                t = r1 & r1 == 0; // 06036c76 tst r1,r1
+                pc = if !t { 0x06036c7e } else { 0x06036c7a }; // 06036c78 bf 0x6036c7e
+            }
+            0x06036c7a => {
+                // 06036c7a bra 0x6036ee0
+                // nop // 06036c7c nop 
+                pc = 0x06036ee0;
+            }
+            0x06036c7e => {
+                r0 = r3; // 06036c7e mov r3,r0
+                r1 = r5; // 06036c80 mov r5,r1
+                r4 = r3; // 06036c82 mov r3,r4
+                r7 = r5; // 06036c84 mov r5,r7
+                t = r0 as i32 >= 0; // 06036c86 cmp/pz r0
+                pc = if t { 0x06036c8c } else { 0x06036c8a }; // 06036c88 bt 0x6036c8c
+            }
+            0x06036c8a => {
+                r0 = r0.wrapping_neg(); // 06036c8a neg r0,r0
+                pc = 0x06036c8c;
+            }
+            0x06036c8c => {
+                t = r1 as i32 >= 0; // 06036c8c cmp/pz r1
+                pc = if t { 0x06036c92 } else { 0x06036c90 }; // 06036c8e bt 0x6036c92
+            }
+            0x06036c90 => {
+                r1 = r1.wrapping_neg(); // 06036c90 neg r1,r1
+                pc = 0x06036c92;
+            }
+            0x06036c92 => {
+                t = r1 as i32 >= r0 as i32; // 06036c92 cmp/ge r0,r1
+                let take = t; // 06036c94 bt/s 0x6036cd2
+                r0 = 4i32 as u32; // 06036c96 mov #4,r0
+                pc = if take { 0x06036cd2 } else { 0x06036c98 };
+            }
+            0x06036c98 => {
+                t = r3 as i32 >= 0; // 06036c98 cmp/pz r3
+                pc = if !t { 0x06036cb6 } else { 0x06036c9c }; // 06036c9a bf 0x6036cb6
+            }
+            0x06036c9c => {
+                r1 = 0x00000200; // 06036c9c mov.l 0x6036f58,r1
+                pc = 0x06036c9e;
+            }
+            0x06036c9e => {
+                r3 = r3.wrapping_add(r4); // 06036c9e add r4,r3
+                t = r3 as i32 > r1 as i32; // 06036ca0 cmp/gt r1,r3
+                let take = t; // 06036ca2 bt/s 0x6036caa
+                r3 = r3.wrapping_sub(r4); // 06036ca4 sub r4,r3
+                pc = if take { 0x06036caa } else { 0x06036ca6 };
+            }
+            0x06036ca6 => {
+                r5 = r5.wrapping_add(r7); // 06036ca6 add r7,r5
+                r3 = r3.wrapping_add(r4); // 06036ca8 add r4,r3
+                pc = 0x06036caa;
+            }
+            0x06036caa => {
+                t = r7 & 1 != 0; r7 = (r7 as i32 >> 1) as u32; // 06036caa shar r7
+                r0 = r0.wrapping_sub(1); t = r0 == 0; // 06036cac dt r0
+                let take = !t; // 06036cae bf/s 0x6036c9e
+                t = r4 & 1 != 0; r4 = (r4 as i32 >> 1) as u32; // 06036cb0 shar r4
+                pc = if take { 0x06036c9e } else { 0x06036cb2 };
+            }
+            0x06036cb2 => {
+                // 06036cb2 bra 0x6036ee0
+                // nop // 06036cb4 nop 
+                pc = 0x06036ee0;
+            }
+            0x06036cb6 => {
+                r1 = 0x00000200; // 06036cb6 mov.l 0x6036f58,r1
+                r1 = r1.wrapping_neg(); // 06036cb8 neg r1,r1
+                pc = 0x06036cba;
+            }
+            0x06036cba => {
+                r3 = r3.wrapping_add(r4); // 06036cba add r4,r3
+                t = r3 as i32 >= r1 as i32; // 06036cbc cmp/ge r1,r3
+                let take = !t; // 06036cbe bf/s 0x6036cc6
+                r3 = r3.wrapping_sub(r4); // 06036cc0 sub r4,r3
+                pc = if take { 0x06036cc6 } else { 0x06036cc2 };
+            }
+            0x06036cc2 => {
+                r5 = r5.wrapping_add(r7); // 06036cc2 add r7,r5
+                r3 = r3.wrapping_add(r4); // 06036cc4 add r4,r3
+                pc = 0x06036cc6;
+            }
+            0x06036cc6 => {
+                t = r7 & 1 != 0; r7 = (r7 as i32 >> 1) as u32; // 06036cc6 shar r7
+                r0 = r0.wrapping_sub(1); t = r0 == 0; // 06036cc8 dt r0
+                let take = !t; // 06036cca bf/s 0x6036cba
+                t = r4 & 1 != 0; r4 = (r4 as i32 >> 1) as u32; // 06036ccc shar r4
+                pc = if take { 0x06036cba } else { 0x06036cce };
+            }
+            0x06036cce => {
+                // 06036cce bra 0x6036ee0
+                // nop // 06036cd0 nop 
+                pc = 0x06036ee0;
+            }
+            0x06036cd2 => {
+                t = r5 as i32 >= 0; // 06036cd2 cmp/pz r5
+                pc = if !t { 0x06036cf0 } else { 0x06036cd6 }; // 06036cd4 bf 0x6036cf0
+            }
+            0x06036cd6 => {
+                r1 = 0x00000200; // 06036cd6 mov.l 0x6036f58,r1
+                pc = 0x06036cd8;
+            }
+            0x06036cd8 => {
+                r5 = r5.wrapping_add(r7); // 06036cd8 add r7,r5
+                t = r5 as i32 > r1 as i32; // 06036cda cmp/gt r1,r5
+                let take = t; // 06036cdc bt/s 0x6036ce4
+                r5 = r5.wrapping_sub(r7); // 06036cde sub r7,r5
+                pc = if take { 0x06036ce4 } else { 0x06036ce0 };
+            }
+            0x06036ce0 => {
+                r3 = r3.wrapping_add(r4); // 06036ce0 add r4,r3
+                r5 = r5.wrapping_add(r7); // 06036ce2 add r7,r5
+                pc = 0x06036ce4;
+            }
+            0x06036ce4 => {
+                t = r4 & 1 != 0; r4 = (r4 as i32 >> 1) as u32; // 06036ce4 shar r4
+                r0 = r0.wrapping_sub(1); t = r0 == 0; // 06036ce6 dt r0
+                let take = !t; // 06036ce8 bf/s 0x6036cd8
+                t = r7 & 1 != 0; r7 = (r7 as i32 >> 1) as u32; // 06036cea shar r7
+                pc = if take { 0x06036cd8 } else { 0x06036cec };
+            }
+            0x06036cec => {
+                // 06036cec bra 0x6036ee0
+                // nop // 06036cee nop 
+                pc = 0x06036ee0;
+            }
+            0x06036cf0 => {
+                r1 = 0x00000200; // 06036cf0 mov.l 0x6036f58,r1
+                r1 = r1.wrapping_neg(); // 06036cf2 neg r1,r1
+                pc = 0x06036cf4;
+            }
+            0x06036cf4 => {
+                r5 = r5.wrapping_add(r7); // 06036cf4 add r7,r5
+                t = r5 as i32 >= r1 as i32; // 06036cf6 cmp/ge r1,r5
+                let take = !t; // 06036cf8 bf/s 0x6036d00
+                r5 = r5.wrapping_sub(r7); // 06036cfa sub r7,r5
+                pc = if take { 0x06036d00 } else { 0x06036cfc };
+            }
+            0x06036cfc => {
+                r3 = r3.wrapping_add(r4); // 06036cfc add r4,r3
+                r5 = r5.wrapping_add(r7); // 06036cfe add r7,r5
+                pc = 0x06036d00;
+            }
+            0x06036d00 => {
+                t = r4 & 1 != 0; r4 = (r4 as i32 >> 1) as u32; // 06036d00 shar r4
+                r0 = r0.wrapping_sub(1); t = r0 == 0; // 06036d02 dt r0
+                let take = !t; // 06036d04 bf/s 0x6036cf4
+                t = r7 & 1 != 0; r7 = (r7 as i32 >> 1) as u32; // 06036d06 shar r7
+                pc = if take { 0x06036cf4 } else { 0x06036d08 };
+            }
+            0x06036d08 => {
+                // 06036d08 bra 0x6036ee0
+                // nop // 06036d0a nop 
+                pc = 0x06036ee0;
+            }
+            0x06036d0c => {
+                r0 = 0x00000200; // 06036d0c mov.l 0x6036f58,r0
+                r1 = 0i32 as u32; // 06036d0e mov #0,r1
+                pc = 0x06036d10;
+            }
+            0x06036d10 => {
+                t = r2 as i32 > r0 as i32; // 06036d10 cmp/gt r0,r2
+                pc = if !t { 0x06036d1c } else { 0x06036d14 }; // 06036d12 bf 0x6036d1c
+            }
+            0x06036d14 => {
+                r1 = 1i32 as u32; // 06036d14 mov #1,r1
+                t = r2 & 1 != 0; r2 = (r2 as i32 >> 1) as u32; // 06036d16 shar r2
+                // 06036d18 bra 0x6036d10
+                t = r5 & 1 != 0; r5 = (r5 as i32 >> 1) as u32; // 06036d1a shar r5
+                pc = 0x06036d10;
+            }
+            0x06036d1c => {
+                t = r5 as i32 > r0 as i32; // 06036d1c cmp/gt r0,r5
+                pc = if !t { 0x06036d28 } else { 0x06036d20 }; // 06036d1e bf 0x6036d28
+            }
+            0x06036d20 => {
+                r1 = 1i32 as u32; // 06036d20 mov #1,r1
+                t = r2 & 1 != 0; r2 = (r2 as i32 >> 1) as u32; // 06036d22 shar r2
+                // 06036d24 bra 0x6036d1c
+                t = r5 & 1 != 0; r5 = (r5 as i32 >> 1) as u32; // 06036d26 shar r5
+                pc = 0x06036d1c;
+            }
+            0x06036d28 => {
+                r0 = r0.wrapping_neg(); // 06036d28 neg r0,r0
+                t = r2 as i32 >= r0 as i32; // 06036d2a cmp/ge r0,r2
+                pc = if t { 0x06036d36 } else { 0x06036d2e }; // 06036d2c bt 0x6036d36
+            }
+            0x06036d2e => {
+                r1 = 1i32 as u32; // 06036d2e mov #1,r1
+                t = r2 & 1 != 0; r2 = (r2 as i32 >> 1) as u32; // 06036d30 shar r2
+                // 06036d32 bra 0x6036d28
+                t = r5 & 1 != 0; r5 = (r5 as i32 >> 1) as u32; // 06036d34 shar r5
+                pc = 0x06036d28;
+            }
+            0x06036d36 => {
+                t = r5 as i32 >= r0 as i32; // 06036d36 cmp/ge r0,r5
+                pc = if t { 0x06036d42 } else { 0x06036d3a }; // 06036d38 bt 0x6036d42
+            }
+            0x06036d3a => {
+                r1 = 1i32 as u32; // 06036d3a mov #1,r1
+                t = r2 & 1 != 0; r2 = (r2 as i32 >> 1) as u32; // 06036d3c shar r2
+                // 06036d3e bra 0x6036d36
+                t = r5 & 1 != 0; r5 = (r5 as i32 >> 1) as u32; // 06036d40 shar r5
+                pc = 0x06036d36;
+            }
+            0x06036d42 => {
+                t = r1 & r1 == 0; // 06036d42 tst r1,r1
+                pc = if !t { 0x06036d4a } else { 0x06036d46 }; // 06036d44 bf 0x6036d4a
+            }
+            0x06036d46 => {
+                // 06036d46 bra 0x6036f46
+                // nop // 06036d48 nop 
+                pc = 0x06036f46;
+            }
+            0x06036d4a => {
+                r0 = r2; // 06036d4a mov r2,r0
+                r1 = r5; // 06036d4c mov r5,r1
+                r4 = r2; // 06036d4e mov r2,r4
+                r7 = r5; // 06036d50 mov r5,r7
+                t = r0 as i32 >= 0; // 06036d52 cmp/pz r0
+                pc = if t { 0x06036d58 } else { 0x06036d56 }; // 06036d54 bt 0x6036d58
+            }
+            0x06036d56 => {
+                r0 = r0.wrapping_neg(); // 06036d56 neg r0,r0
+                pc = 0x06036d58;
+            }
+            0x06036d58 => {
+                t = r1 as i32 >= 0; // 06036d58 cmp/pz r1
+                pc = if t { 0x06036d5e } else { 0x06036d5c }; // 06036d5a bt 0x6036d5e
+            }
+            0x06036d5c => {
+                r1 = r1.wrapping_neg(); // 06036d5c neg r1,r1
+                pc = 0x06036d5e;
+            }
+            0x06036d5e => {
+                t = r1 as i32 >= r0 as i32; // 06036d5e cmp/ge r0,r1
+                let take = t; // 06036d60 bt/s 0x6036d9e
+                r0 = 4i32 as u32; // 06036d62 mov #4,r0
+                pc = if take { 0x06036d9e } else { 0x06036d64 };
+            }
+            0x06036d64 => {
+                t = r2 as i32 >= 0; // 06036d64 cmp/pz r2
+                pc = if !t { 0x06036d82 } else { 0x06036d68 }; // 06036d66 bf 0x6036d82
+            }
+            0x06036d68 => {
+                r1 = 0x00000200; // 06036d68 mov.l 0x6036f58,r1
+                pc = 0x06036d6a;
+            }
+            0x06036d6a => {
+                r2 = r2.wrapping_add(r4); // 06036d6a add r4,r2
+                t = r2 as i32 > r1 as i32; // 06036d6c cmp/gt r1,r2
+                let take = t; // 06036d6e bt/s 0x6036d76
+                r2 = r2.wrapping_sub(r4); // 06036d70 sub r4,r2
+                pc = if take { 0x06036d76 } else { 0x06036d72 };
+            }
+            0x06036d72 => {
+                r5 = r5.wrapping_add(r7); // 06036d72 add r7,r5
+                r2 = r2.wrapping_add(r4); // 06036d74 add r4,r2
+                pc = 0x06036d76;
+            }
+            0x06036d76 => {
+                t = r7 & 1 != 0; r7 = (r7 as i32 >> 1) as u32; // 06036d76 shar r7
+                r0 = r0.wrapping_sub(1); t = r0 == 0; // 06036d78 dt r0
+                let take = !t; // 06036d7a bf/s 0x6036d6a
+                t = r4 & 1 != 0; r4 = (r4 as i32 >> 1) as u32; // 06036d7c shar r4
+                pc = if take { 0x06036d6a } else { 0x06036d7e };
+            }
+            0x06036d7e => {
+                // 06036d7e bra 0x6036f46
+                // nop // 06036d80 nop 
+                pc = 0x06036f46;
+            }
+            0x06036d82 => {
+                r1 = 0x00000200; // 06036d82 mov.l 0x6036f58,r1
+                r1 = r1.wrapping_neg(); // 06036d84 neg r1,r1
+                pc = 0x06036d86;
+            }
+            0x06036d86 => {
+                r2 = r2.wrapping_add(r4); // 06036d86 add r4,r2
+                t = r2 as i32 >= r1 as i32; // 06036d88 cmp/ge r1,r2
+                let take = !t; // 06036d8a bf/s 0x6036d92
+                r2 = r2.wrapping_sub(r4); // 06036d8c sub r4,r2
+                pc = if take { 0x06036d92 } else { 0x06036d8e };
+            }
+            0x06036d8e => {
+                r5 = r5.wrapping_add(r7); // 06036d8e add r7,r5
+                r2 = r2.wrapping_add(r4); // 06036d90 add r4,r2
+                pc = 0x06036d92;
+            }
+            0x06036d92 => {
+                t = r7 & 1 != 0; r7 = (r7 as i32 >> 1) as u32; // 06036d92 shar r7
+                r0 = r0.wrapping_sub(1); t = r0 == 0; // 06036d94 dt r0
+                let take = !t; // 06036d96 bf/s 0x6036d86
+                t = r4 & 1 != 0; r4 = (r4 as i32 >> 1) as u32; // 06036d98 shar r4
+                pc = if take { 0x06036d86 } else { 0x06036d9a };
+            }
+            0x06036d9a => {
+                // 06036d9a bra 0x6036f46
+                // nop // 06036d9c nop 
+                pc = 0x06036f46;
+            }
+            0x06036d9e => {
+                t = r5 as i32 >= 0; // 06036d9e cmp/pz r5
+                pc = if !t { 0x06036dbc } else { 0x06036da2 }; // 06036da0 bf 0x6036dbc
+            }
+            0x06036da2 => {
+                r1 = 0x00000200; // 06036da2 mov.l 0x6036f58,r1
+                pc = 0x06036da4;
+            }
+            0x06036da4 => {
+                r5 = r5.wrapping_add(r7); // 06036da4 add r7,r5
+                t = r5 as i32 > r1 as i32; // 06036da6 cmp/gt r1,r5
+                let take = t; // 06036da8 bt/s 0x6036db0
+                r5 = r5.wrapping_sub(r7); // 06036daa sub r7,r5
+                pc = if take { 0x06036db0 } else { 0x06036dac };
+            }
+            0x06036dac => {
+                r2 = r2.wrapping_add(r4); // 06036dac add r4,r2
+                r5 = r5.wrapping_add(r7); // 06036dae add r7,r5
+                pc = 0x06036db0;
+            }
+            0x06036db0 => {
+                t = r4 & 1 != 0; r4 = (r4 as i32 >> 1) as u32; // 06036db0 shar r4
+                r0 = r0.wrapping_sub(1); t = r0 == 0; // 06036db2 dt r0
+                let take = !t; // 06036db4 bf/s 0x6036da4
+                t = r7 & 1 != 0; r7 = (r7 as i32 >> 1) as u32; // 06036db6 shar r7
+                pc = if take { 0x06036da4 } else { 0x06036db8 };
+            }
+            0x06036db8 => {
+                // 06036db8 bra 0x6036f46
+                // nop // 06036dba nop 
+                pc = 0x06036f46;
+            }
+            0x06036dbc => {
+                r1 = 0x00000200; // 06036dbc mov.l 0x6036f58,r1
+                r1 = r1.wrapping_neg(); // 06036dbe neg r1,r1
+                pc = 0x06036dc0;
+            }
+            0x06036dc0 => {
+                r5 = r5.wrapping_add(r7); // 06036dc0 add r7,r5
+                t = r5 as i32 >= r1 as i32; // 06036dc2 cmp/ge r1,r5
+                let take = !t; // 06036dc4 bf/s 0x6036dcc
+                r5 = r5.wrapping_sub(r7); // 06036dc6 sub r7,r5
+                pc = if take { 0x06036dcc } else { 0x06036dc8 };
+            }
+            0x06036dc8 => {
+                r2 = r2.wrapping_add(r4); // 06036dc8 add r4,r2
+                r5 = r5.wrapping_add(r7); // 06036dca add r7,r5
+                pc = 0x06036dcc;
+            }
+            0x06036dcc => {
+                t = r4 & 1 != 0; r4 = (r4 as i32 >> 1) as u32; // 06036dcc shar r4
+                r0 = r0.wrapping_sub(1); t = r0 == 0; // 06036dce dt r0
+                let take = !t; // 06036dd0 bf/s 0x6036dc0
+                t = r7 & 1 != 0; r7 = (r7 as i32 >> 1) as u32; // 06036dd2 shar r7
+                pc = if take { 0x06036dc0 } else { 0x06036dd4 };
+            }
+            0x06036dd4 => {
+                // 06036dd4 bra 0x6036f46
+                // nop // 06036dd6 nop 
+                pc = 0x06036f46;
+            }
+            0x06036dd8 => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, pr); // 06036dd8 sts.l pr,@-r15
+                r9 = r0; // 06036dda mov r0,r9
+                r0 = cpu.read32(w.wrapping_add(40)); // 06036ddc mov.l @(40,gbr),r0
+                r2 = r9; // 06036dde mov r9,r2
+                r2 <<= 2; // 06036de0 shll2 r2
+                r11 = r2; // 06036de2 mov r2,r11
+                r2 = r2.wrapping_add(r11); // 06036de4 add r11,r2
+                r2 = r2.wrapping_add(r11); // 06036de6 add r11,r2
+                r11 <<= 2; // 06036de8 shll2 r11
+                r11 = r11.wrapping_add(r0); // 06036dea add r0,r11
+                r1 = cpu.read32(r11.wrapping_add(12)); // 06036dec mov.l @(12,r11),r1
+                r14 = -1i32 as u32; // 06036dee mov #-1,r14
+                r0 = cpu.read32(w.wrapping_add(108)); // 06036df0 mov.l @(108,gbr),r0
+                r14 <<= 8; // 06036df2 shll8 r14
+                cpu.write32(r14.wrapping_add(0), r1); // 06036df4 mov.l r1,@(0,r14)
+                r5 = r0.rotate_left(16); // 06036df6 swap.w r0,r5
+                r5 = r5 as i16 as i32 as u32; // 06036df8 exts.w r5,r5
+                cpu.write32(r14.wrapping_add(16), r5); // 06036dfa mov.l r5,@(16,r14)
+                r7 = r0 as i16 as i32 as u32; // 06036dfc exts.w r0,r7
+                cpu.write32(r14.wrapping_add(20), r7); // 06036dfe mov.l r7,@(20,r14)
+                r8 = r0; // 06036e00 mov r0,r8
+                r10 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 06036e02 mov.l @r4+,r10
+                r2 = r2.wrapping_add(-12i32 as u32); // 06036e04 add #-12,r2
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r4); // 06036e06 mov.l r4,@-r15
+                r10 = r10.wrapping_add(r2); // 06036e08 add r2,r10
+                r4 = r4.wrapping_add(12i32 as u32); // 06036e0a add #12,r4
+                r0 = 0x06036f5c; // 06036e0c mova 0x6036f5c,r0
+                r6 = r0; // 06036e0e mov r0,r6
+                r0 = cpu.read32(r4.wrapping_add(0)); // 06036e10 mov.l @(0,r4),r0
+                r1 = cpu.read32(r4.wrapping_add(4)); // 06036e12 mov.l @(4,r4),r1
+                r2 = cpu.read32(r4.wrapping_add(8)); // 06036e14 mov.l @(8,r4),r2
+                cpu.write32(r6.wrapping_add(0), r0); // 06036e16 mov.l r0,@(0,r6)
+                cpu.write32(r6.wrapping_add(4), r1); // 06036e18 mov.l r1,@(4,r6)
+                cpu.write32(r6.wrapping_add(8), r2); // 06036e1a mov.l r2,@(8,r6)
+                r0 = cpu.read32(r4.wrapping_add(16)); // 06036e1c mov.l @(16,r4),r0
+                r1 = cpu.read32(r4.wrapping_add(20)); // 06036e1e mov.l @(20,r4),r1
+                r2 = cpu.read32(r4.wrapping_add(24)); // 06036e20 mov.l @(24,r4),r2
+                cpu.write32(r6.wrapping_add(16), r0); // 06036e22 mov.l r0,@(16,r6)
+                cpu.write32(r6.wrapping_add(20), r1); // 06036e24 mov.l r1,@(20,r6)
+                cpu.write32(r6.wrapping_add(24), r2); // 06036e26 mov.l r2,@(24,r6)
+                r0 = cpu.read32(r4.wrapping_add(32)); // 06036e28 mov.l @(32,r4),r0
+                r1 = cpu.read32(r4.wrapping_add(36)); // 06036e2a mov.l @(36,r4),r1
+                r2 = cpu.read32(r4.wrapping_add(40)); // 06036e2c mov.l @(40,r4),r2
+                cpu.write32(r6.wrapping_add(32), r0); // 06036e2e mov.l r0,@(32,r6)
+                cpu.write32(r6.wrapping_add(36), r1); // 06036e30 mov.l r1,@(36,r6)
+                cpu.write32(r6.wrapping_add(40), r2); // 06036e32 mov.l r2,@(40,r6)
+                r0 = cpu.read32(r4.wrapping_add(12)); // 06036e34 mov.l @(12,r4),r0
+                r1 = cpu.read32(r4.wrapping_add(28)); // 06036e36 mov.l @(28,r4),r1
+                r2 = cpu.read32(r4.wrapping_add(44)); // 06036e38 mov.l @(44,r4),r2
+                cpu.write32(r6.wrapping_add(12), r0); // 06036e3a mov.l r0,@(12,r6)
+                cpu.write32(r6.wrapping_add(28), r1); // 06036e3c mov.l r1,@(28,r6)
+                cpu.write32(r6.wrapping_add(44), r2); // 06036e3e mov.l r2,@(44,r6)
+                t = r9 & r9 == 0; // 06036e40 tst r9,r9
+                let take = !t; // 06036e42 bf/s 0x6036e4a
+                r6 = r6.wrapping_add(32i32 as u32); // 06036e44 add #32,r6
+                pc = if take { 0x06036e4a } else { 0x06036e46 };
+            }
+            0x06036e46 => {
+                // 06036e46 bra 0x6036f4c
+                // nop // 06036e48 nop 
+                pc = 0x06036f4c;
+            }
+            0x06036e4a => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r5); // 06036e4a mov.l r5,@-r15
+                r0 = r11; // 06036e4c mov r11,r0
+                cpu.write32(w.wrapping_add(40), r0); // 06036e4e mov.l r0,@(40,gbr)
+                r0 = cpu.read8(w.wrapping_add(173)) as i8 as i32 as u32; // 06036e50 mov.b @(173,gbr),r0
+                r0 = r0.wrapping_add(1i32 as u32); // 06036e52 add #1,r0
+                t = r8 & 1 != 0; r8 >>= 1; // 06036e54 shlr r8
+                pc = 0x06036e56;
+            }
+            0x06036e56 => {
+                r0 = r0.wrapping_sub(1); t = r0 == 0; // 06036e56 dt r0
+                let take = !t; // 06036e58 bf/s 0x6036e56
+                t = r8 & 1 != 0; r8 >>= 1; // 06036e5a shlr r8
+                pc = if take { 0x06036e56 } else { 0x06036e5c };
+            }
+            0x06036e5c => {
+                r0 = cpu.read32(w.wrapping_add(816)); // 06036e5c mov.l @(816,gbr),r0
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r7); // 06036e5e mov.l r7,@-r15
+                r13 = r0 & 0xffff; // 06036e60 extu.w r0,r13
+                r4 = cpu.read32(r11.wrapping_add(4)); // 06036e62 mov.l @(4,r11),r4
+                r12 = r0.rotate_left(16); // 06036e64 swap.w r0,r12
+                r5 = cpu.read32(r11.wrapping_add(8)); // 06036e66 mov.l @(8,r11),r5
+                r12 = r12 & 0xffff; // 06036e68 extu.w r12,r12
+                r0 = cpu.read32(w.wrapping_add(908)); // 06036e6a mov.l @(908,gbr),r0
+                r12 = r12.wrapping_add(r0); // 06036e6c add r0,r12
+                r13 = r13.wrapping_add(r0); // 06036e6e add r0,r13
+                r12 = r12.wrapping_add(r0); // 06036e70 add r0,r12
+                r13 = r13.wrapping_add(r0); // 06036e72 add r0,r13
+                r7 = cpu.read32(r14.wrapping_add(28)); // 06036e74 mov.l @(28,r14),r7
+                pc = 0x06036e76;
+            }
+            0x06036e76 => {
+                mac = 0; // 06036e76 clrmac 
+                { let x = cpu.read32(r10) as i32 as i64; r10 = r10.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036e78 mac.l @r10+,@r6+
+                r0 = cpu.read32(r15.wrapping_add(4)); // 06036e7a mov.l @(4,r15),r0
+                { let x = cpu.read32(r10) as i32 as i64; r10 = r10.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036e7c mac.l @r10+,@r6+
+                r1 = cpu.read32(r6.wrapping_add(4)); // 06036e7e mov.l @(4,r6),r1
+                { let x = cpu.read32(r10) as i32 as i64; r10 = r10.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036e80 mac.l @r10+,@r6+
+                r6 = r6.wrapping_add(-44i32 as u32); // 06036e82 add #-44,r6
+                r10 = r10.wrapping_add(-12i32 as u32); // 06036e84 add #-12,r10
+                r2 = (mac >> 32) as u32; // 06036e86 sts mach,r2
+                r3 = mac as u32; // 06036e88 sts macl,r3
+                cpu.write32(r14.wrapping_add(16), r0); // 06036e8a mov.l r0,@(16,r14)
+                r3 = (r2 << 16) | (r3 >> 16); // 06036e8c xtrct r2,r3
+                r3 = r3.wrapping_add(r1); // 06036e8e add r1,r3
+                t = r3 as i32 >= r8 as i32; // 06036e90 cmp/ge r8,r3
+                let take = t; // 06036e92 bt/s 0x6036e98
+                r0 = cpu.read32(r15.wrapping_add(0)); // 06036e94 mov.l @(0,r15),r0
+                pc = if take { 0x06036e98 } else { 0x06036e96 };
+            }
+            0x06036e96 => {
+                r3 = r8; // 06036e96 mov r8,r3
+                pc = 0x06036e98;
+            }
+            0x06036e98 => {
+                cpu.write32(r14.wrapping_add(0), r3); // 06036e98 mov.l r3,@(0,r14)
+                r11 = r11.wrapping_add(-16i32 as u32); // 06036e9a add #-16,r11
+                cpu.write32(r14.wrapping_add(20), r0); // 06036e9c mov.l r0,@(20,r14)
+                mac = r4 as i32 as i64 * r7 as i32 as i64; // 06036e9e dmuls.l r4,r7
+                r0 = cpu.read16(w.wrapping_add(148)) as i16 as i32 as u32; // 06036ea0 mov.w @(148,gbr),r0
+                t = r4 & 1 != 0; r4 >>= 1; // 06036ea2 shlr r4
+                cpu.write32(r11.wrapping_add(12), r3); // 06036ea4 mov.l r3,@(12,r11)
+                r3 = (mac >> 32) as u32; // 06036ea6 sts mach,r3
+                mac = r5 as i32 as i64 * r7 as i32 as i64; // 06036ea8 dmuls.l r5,r7
+                r0 = r0.wrapping_add(r3); // 06036eaa add r3,r0
+                cpu.write32(r11.wrapping_add(24), r5); // 06036eac mov.l r5,@(24,r11)
+                r1 = r0; // 06036eae mov r0,r1
+                r0 = cpu.read32(w.wrapping_add(908)); // 06036eb0 mov.l @(908,gbr),r0
+                r0 = r0.wrapping_add(r1); // 06036eb2 add r1,r0
+                t = r0 >= r12; // 06036eb4 cmp/hs r12,r0
+                { let (x, c1) = r4.overflowing_add(r4); let (y, c2) = x.overflowing_add(t as u32); r4 = y; t = c1 || c2; } // 06036eb6 addc r4,r4
+                r5 = (mac >> 32) as u32; // 06036eb8 sts mach,r5
+                r0 = cpu.read16(w.wrapping_add(150)) as i16 as i32 as u32; // 06036eba mov.w @(150,gbr),r0
+                mac = 0; // 06036ebc clrmac 
+                { let x = cpu.read32(r10) as i32 as i64; r10 = r10.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036ebe mac.l @r10+,@r6+
+                r0 = r0.wrapping_add(r5); // 06036ec0 add r5,r0
+                r1 = r0; // 06036ec2 mov r0,r1
+                r0 = cpu.read32(w.wrapping_add(908)); // 06036ec4 mov.l @(908,gbr),r0
+                r0 = r0.wrapping_add(r1); // 06036ec6 add r1,r0
+                t = r0 >= r13; // 06036ec8 cmp/hs r13,r0
+                { let x = cpu.read32(r10) as i32 as i64; r10 = r10.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036eca mac.l @r10+,@r6+
+                r0 = t as u32; // 06036ecc movt r0
+                r4 |= r0; // 06036ece or r0,r4
+                { let x = cpu.read32(r10) as i32 as i64; r10 = r10.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036ed0 mac.l @r10+,@r6+
+                cpu.write32(r11.wrapping_add(20), r4); // 06036ed2 mov.l r4,@(20,r11)
+                r0 = cpu.read32(w.wrapping_add(892)); // 06036ed4 mov.l @(892,gbr),r0
+                r4 &= r0; // 06036ed6 and r0,r4
+                t = r4 & 1 != 0; r4 = (r4 as i32 >> 1) as u32; // 06036ed8 shar r4
+                pc = if !t { 0x06036ee0 } else { 0x06036edc }; // 06036eda bf 0x6036ee0
+            }
+            0x06036edc => {
+                // 06036edc bra 0x6036c40
+                // nop // 06036ede nop 
+                pc = 0x06036c40;
+            }
+            0x06036ee0 => {
+                r5 <<= 16; // 06036ee0 shll16 r5
+                r2 = cpu.read32(r6); r6 = r6.wrapping_add(4); // 06036ee2 mov.l @r6+,r2
+                r10 = r10.wrapping_add(-12i32 as u32); // 06036ee4 add #-12,r10
+                r1 = (mac >> 32) as u32; // 06036ee6 sts mach,r1
+                r4 = mac as u32; // 06036ee8 sts macl,r4
+                mac = 0; // 06036eea clrmac 
+                { let x = cpu.read32(r10) as i32 as i64; r10 = r10.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036eec mac.l @r10+,@r6+
+                r5 = (r3 << 16) | (r5 >> 16); // 06036eee xtrct r3,r5
+                cpu.write32(r11.wrapping_add(16), r5); // 06036ef0 mov.l r5,@(16,r11)
+                { let x = cpu.read32(r10) as i32 as i64; r10 = r10.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036ef2 mac.l @r10+,@r6+
+                r4 = (r1 << 16) | (r4 >> 16); // 06036ef4 xtrct r1,r4
+                r4 = r4.wrapping_add(r2); // 06036ef6 add r2,r4
+                { let x = cpu.read32(r10) as i32 as i64; r10 = r10.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036ef8 mac.l @r10+,@r6+
+                r2 = cpu.read32(r6); // 06036efa mov.l @r6,r2
+                r6 = r6.wrapping_add(4i32 as u32); // 06036efc add #4,r6
+                r10 = r10.wrapping_add(-24i32 as u32); // 06036efe add #-24,r10
+                r1 = (mac >> 32) as u32; // 06036f00 sts mach,r1
+                r5 = mac as u32; // 06036f02 sts macl,r5
+                r7 = cpu.read32(r14.wrapping_add(28)); // 06036f04 mov.l @(28,r14),r7
+                r5 = (r1 << 16) | (r5 >> 16); // 06036f06 xtrct r1,r5
+                r9 = r9.wrapping_sub(1); t = r9 == 0; // 06036f08 dt r9
+                let take = !t; // 06036f0a bf/s 0x6036e76
+                r5 = r5.wrapping_add(r2); // 06036f0c add r2,r5
+                pc = if take { 0x06036e76 } else { 0x06036f0e };
+            }
+            0x06036f0e => {
+                mac = r4 as i32 as i64 * r7 as i32 as i64; // 06036f0e dmuls.l r4,r7
+                r0 = cpu.read16(w.wrapping_add(148)) as i16 as i32 as u32; // 06036f10 mov.w @(148,gbr),r0
+                t = r4 & 1 != 0; r4 >>= 1; // 06036f12 shlr r4
+                cpu.write32(r11.wrapping_add(8), r5); // 06036f14 mov.l r5,@(8,r11)
+                r2 = (mac >> 32) as u32; // 06036f16 sts mach,r2
+                mac = r5 as i32 as i64 * r7 as i32 as i64; // 06036f18 dmuls.l r5,r7
+                r0 = r0.wrapping_add(r2); // 06036f1a add r2,r0
+                r1 = r0; // 06036f1c mov r0,r1
+                r0 = cpu.read32(w.wrapping_add(908)); // 06036f1e mov.l @(908,gbr),r0
+                r0 = r0.wrapping_add(r1); // 06036f20 add r1,r0
+                t = r0 >= r12; // 06036f22 cmp/hs r12,r0
+                r5 = (mac >> 32) as u32; // 06036f24 sts mach,r5
+                r0 = cpu.read16(w.wrapping_add(150)) as i16 as i32 as u32; // 06036f26 mov.w @(150,gbr),r0
+                { let (x, c1) = r4.overflowing_add(r4); let (y, c2) = x.overflowing_add(t as u32); r4 = y; t = c1 || c2; } // 06036f28 addc r4,r4
+                r0 = r0.wrapping_add(r5); // 06036f2a add r5,r0
+                r1 = r0; // 06036f2c mov r0,r1
+                r0 = cpu.read32(w.wrapping_add(908)); // 06036f2e mov.l @(908,gbr),r0
+                r0 = r0.wrapping_add(r1); // 06036f30 add r1,r0
+                t = r0 >= r13; // 06036f32 cmp/hs r13,r0
+                r0 = t as u32; // 06036f34 movt r0
+                r4 |= r0; // 06036f36 or r0,r4
+                cpu.write32(r11.wrapping_add(4), r4); // 06036f38 mov.l r4,@(4,r11)
+                r0 = cpu.read32(w.wrapping_add(892)); // 06036f3a mov.l @(892,gbr),r0
+                r4 &= r0; // 06036f3c and r0,r4
+                t = r4 & 1 != 0; r4 = (r4 as i32 >> 1) as u32; // 06036f3e shar r4
+                pc = if !t { 0x06036f46 } else { 0x06036f42 }; // 06036f40 bf 0x6036f46
+            }
+            0x06036f42 => {
+                // 06036f42 bra 0x6036d0c
+                // nop // 06036f44 nop 
+                pc = 0x06036d0c;
+            }
+            0x06036f46 => {
+                r5 <<= 16; // 06036f46 shll16 r5
+                r5 = (r2 << 16) | (r5 >> 16); // 06036f48 xtrct r2,r5
+                cpu.write32(r11.wrapping_add(0), r5); // 06036f4a mov.l r5,@(0,r11)
+                pc = 0x06036f4c;
+            }
+            0x06036f4c => {
+                r10 = r11; // 06036f4c mov r11,r10
+                r15 = r15.wrapping_add(8i32 as u32); // 06036f4e add #8,r15
+                r4 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06036f50 mov.l @r15+,r4
+                // 06036f52 bra 0x6036f90
+                r6 = r6.wrapping_add(-32i32 as u32); // 06036f54 add #-32,r6
+                pc = 0x06036f90;
+            }
+            0x06036f90 => {
+                r0 = cpu.read8(w.wrapping_add(169)) as i8 as i32 as u32; // 06036f90 mov.b @(169,gbr),r0
+                t = r0 & 1 == 0; // 06036f92 tst #1,r0
+                let take = !t; // 06036f94 bf/s 0x6036f9a
+                r1 = 32i32 as u32; // 06036f96 mov #32,r1
+                pc = if take { 0x06036f9a } else { 0x06036f98 };
+            }
+            0x06036f98 => {
+                r1 = 16i32 as u32; // 06036f98 mov #16,r1
+                pc = 0x06036f9a;
+            }
+            0x06036f9a => {
+                r0 |= r1; // 06036f9a or r1,r0
+                cpu.write8(w.wrapping_add(169), r0 as u8); // 06036f9c mov.b r0,@(169,gbr)
+                r0 = cpu.read32(w.wrapping_add(52)); // 06036f9e mov.l @(52,gbr),r0
+                r3 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 06036fa0 mov.l @r4+,r3
+                r7 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 06036fa2 mov.l @r4+,r7
+                r8 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 06036fa4 mov.l @r4+,r8
+                r11 = r0; // 06036fa6 mov r0,r11
+                r0 = cpu.read32(w.wrapping_add(60)); // 06036fa8 mov.l @(60,gbr),r0
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r4); // 06036faa mov.l r4,@-r15
+                r0 = r0.wrapping_add(4i32 as u32); // 06036fac add #4,r0
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r0); // 06036fae mov.l r0,@-r15
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r3); // 06036fb0 mov.l r3,@-r15
+                r0 = cpu.read32(w.wrapping_add(108)); // 06036fb2 mov.l @(108,gbr),r0
+                r14 = -1i32 as u32; // 06036fb4 mov #-1,r14
+                r1 = r0; // 06036fb6 mov r0,r1
+                r0 = cpu.read8(w.wrapping_add(173)) as i8 as i32 as u32; // 06036fb8 mov.b @(173,gbr),r0
+                r1 >>= 16; // 06036fba shlr16 r1
+                pc = 0x06036fbc;
+            }
+            0x06036fbc => {
+                r0 = r0.wrapping_sub(1); t = r0 == 0; // 06036fbc dt r0
+                let take = !t; // 06036fbe bf/s 0x6036fbc
+                t = r1 & 1 != 0; r1 >>= 1; // 06036fc0 shlr r1
+                pc = if take { 0x06036fbc } else { 0x06036fc2 };
+            }
+            0x06036fc2 => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r1); // 06036fc2 mov.l r1,@-r15
+                r15 = r15.wrapping_add(-12i32 as u32); // 06036fc4 add #-12,r15
+                r0 = 0x06037074; // 06036fc6 mova 0x6037074,r0
+                pr = r0; // 06036fc8 lds r0,pr
+                pc = 0x06036fca;
+            }
+            0x06036fca => {
+                mac = 0; // 06036fca clrmac 
+                { let x = cpu.read32(r7) as i32 as i64; r7 = r7.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036fcc mac.l @r7+,@r6+
+                r0 = cpu.read16(r7.wrapping_add(8)) as i16 as i32 as u32; // 06036fce mov.w @(8,r7),r0
+                r5 = r15; // 06036fd0 mov r15,r5
+                { let x = cpu.read32(r7) as i32 as i64; r7 = r7.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036fd2 mac.l @r7+,@r6+
+                r1 = r0 as i16 as i32 as u32; // 06036fd4 exts.w r0,r1
+                r1 <<= 2; // 06036fd6 shll2 r1
+                { let x = cpu.read32(r7) as i32 as i64; r7 = r7.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036fd8 mac.l @r7+,@r6+
+                r6 = r6.wrapping_add(4i32 as u32); // 06036fda add #4,r6
+                r7 = r7.wrapping_add(-12i32 as u32); // 06036fdc add #-12,r7
+                r1 <<= 2; // 06036fde shll2 r1
+                r0 = (mac >> 32) as u32; // 06036fe0 sts mach,r0
+                r13 = mac as u32; // 06036fe2 sts macl,r13
+                mac = 0; // 06036fe4 clrmac 
+                { let x = cpu.read32(r7) as i32 as i64; r7 = r7.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036fe6 mac.l @r7+,@r6+
+                r13 = (r0 << 16) | (r13 >> 16); // 06036fe8 xtrct r0,r13
+                cpu.write32(r5.wrapping_add(0), r13); // 06036fea mov.l r13,@(0,r5)
+                { let x = cpu.read32(r7) as i32 as i64; r7 = r7.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036fec mac.l @r7+,@r6+
+                r1 = r1.wrapping_add(r10); // 06036fee add r10,r1
+                r4 = 4i32 as u32; // 06036ff0 mov #4,r4
+                { let x = cpu.read32(r7) as i32 as i64; r7 = r7.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06036ff2 mac.l @r7+,@r6+
+                r6 = r6.wrapping_add(4i32 as u32); // 06036ff4 add #4,r6
+                r7 = r7.wrapping_add(-12i32 as u32); // 06036ff6 add #-12,r7
+                r4 = r4.wrapping_add(r1); // 06036ff8 add r1,r4
+                r0 = (mac >> 32) as u32; // 06036ffa sts mach,r0
+                r2 = mac as u32; // 06036ffc sts macl,r2
+                mac = 0; // 06036ffe clrmac 
+                { let x = cpu.read32(r7) as i32 as i64; r7 = r7.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06037000 mac.l @r7+,@r6+
+                r2 = (r0 << 16) | (r2 >> 16); // 06037002 xtrct r0,r2
+                cpu.write32(r5.wrapping_add(4), r2); // 06037004 mov.l r2,@(4,r5)
+                { let x = cpu.read32(r7) as i32 as i64; r7 = r7.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06037006 mac.l @r7+,@r6+
+                r12 = cpu.read16(r8) as i16 as i32 as u32; // 06037008 mov.w @r8,r12
+                r9 = 127i32 as u32; // 0603700a mov #127,r9
+                { let x = cpu.read32(r7) as i32 as i64; r7 = r7.wrapping_add(4); let y = cpu.read32(r6) as i32 as i64; r6 = r6.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 0603700c mac.l @r7+,@r6+
+                r6 = r6.wrapping_add(-44i32 as u32); // 0603700e add #-44,r6
+                r9 &= r12; // 06037010 and r12,r9
+                r9 <<= 2; // 06037012 shll2 r9
+                r0 = (mac >> 32) as u32; // 06037014 sts mach,r0
+                r3 = mac as u32; // 06037016 sts macl,r3
+                mac = 0; // 06037018 clrmac 
+                { let x = cpu.read32(r4) as i32 as i64; r4 = r4.wrapping_add(4); let y = cpu.read32(r5) as i32 as i64; r5 = r5.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 0603701a mac.l @r4+,@r5+
+                r3 = (r0 << 16) | (r3 >> 16); // 0603701c xtrct r0,r3
+                r0 = 0x06037318; // 0603701e mova 0x6037318,r0
+                { let x = cpu.read32(r4) as i32 as i64; r4 = r4.wrapping_add(4); let y = cpu.read32(r5) as i32 as i64; r5 = r5.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06037020 mac.l @r4+,@r5+
+                cpu.write32(r5, r3); // 06037022 mov.l r3,@r5
+                r9 <<= 2; // 06037024 shll2 r9
+                { let x = cpu.read32(r4) as i32 as i64; r4 = r4.wrapping_add(4); let y = cpu.read32(r5) as i32 as i64; r5 = r5.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06037026 mac.l @r4+,@r5+
+                r9 = r9.wrapping_add(r0); // 06037028 add r0,r9
+                r0 = cpu.read16(r8.wrapping_add(10)) as i16 as i32 as u32; // 0603702a mov.w @(10,r8),r0
+                r7 = r7.wrapping_add(2i32 as u32); // 0603702c add #2,r7
+                r4 = (mac >> 32) as u32; // 0603702e sts mach,r4
+                cpu.write16(r11.wrapping_add(0), r0 as u16); // 06037030 mov.w r0,@(0,r11)
+                r0 = cpu.read32(w.wrapping_add(900)); // 06037032 mov.l @(900,gbr),r0
+                t = r4 as i32 >= r0 as i32; // 06037034 cmp/ge r0,r4
+                let take = t; // 06037036 bt/s 0x6037042
+                r0 = (r12 & 0xffff_0000) | ((r12 & 0xff) << 8) | ((r12 >> 8) & 0xff); // 06037038 swap.b r12,r0
+                pc = if take { 0x06037042 } else { 0x0603703a };
+            }
+            0x0603703a => {
+                r0 = cpu.read32(r9); r9 = r9.wrapping_add(4); // 0603703a mov.l @r9+,r0
+                r2 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 0603703c mov.w @r7+,r2
+                let to = r0; // 0603703e jmp @r0
+                r2 <<= 2; // 06037040 shll2 r2
+                pc = to;
+            }
+            0x06037042 => {
+                t = r0 & 1 == 0; // 06037042 tst #1,r0
+                let take = t; // 06037044 bt/s 0x603705a
+                r3 = r3.wrapping_neg(); // 06037046 neg r3,r3
+                pc = if take { 0x0603705a } else { 0x06037048 };
+            }
+            0x06037048 => {
+                r5 = r5.wrapping_sub(4); cpu.write32(r5, r3); // 06037048 mov.l r3,@-r5
+                r2 = r2.wrapping_neg(); // 0603704a neg r2,r2
+                r5 = r5.wrapping_sub(4); cpu.write32(r5, r2); // 0603704c mov.l r2,@-r5
+                r13 = r13.wrapping_neg(); // 0603704e neg r13,r13
+                r5 = r5.wrapping_sub(4); cpu.write32(r5, r13); // 06037050 mov.l r13,@-r5
+                r0 = cpu.read32(r9); r9 = r9.wrapping_add(4); // 06037052 mov.l @r9+,r0
+                r2 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 06037054 mov.w @r7+,r2
+                let to = r0; // 06037056 jmp @r0
+                r2 <<= 2; // 06037058 shll2 r2
+                pc = to;
+            }
+            0x0603705a => {
+                // 0603705a bra 0x6037088
+                r7 = r7.wrapping_add(6i32 as u32); // 0603705c add #6,r7
+                pc = 0x06037088;
+            }
+            0x06037060 => {
+                r0 = cpu.read16(r8.wrapping_add(2)) as i16 as i32 as u32; // 06037060 mov.w @(2,r8),r0
+                r5 = cpu.read32(r15.wrapping_add(20)); // 06037062 mov.l @(20,r15),r5
+                r0 <<= 2; // 06037064 shll2 r0
+                r0 = r0.wrapping_add(r0); // 06037066 add r0,r0
+                r0 = cpu.read32(r0.wrapping_add(r5)); // 06037068 mov.l @(r0,r5),r0
+                cpu.write32(r11.wrapping_add(8), r0); // 0603706a mov.l r0,@(8,r11)
+                pc = 0x0603706c;
+            }
+            0x0603706c => {
+                r0 = cpu.read16(r8.wrapping_add(8)) as i16 as i32 as u32; // 0603706c mov.w @(8,r8),r0
+                r5 = cpu.read32(r8.wrapping_add(4)); // 0603706e mov.l @(4,r8),r5
+                cpu.write16(r11.wrapping_add(28), r0 as u16); // 06037070 mov.w r0,@(28,r11)
+                cpu.write32(r11.wrapping_add(4), r5); // 06037072 mov.l r5,@(4,r11)
+                pc = 0x06037074;
+            }
+            0x06037074 => {
+                r0 = r14; // 06037074 mov r14,r0
+                cpu.write16(r11.wrapping_add(30), r0 as u16); // 06037076 mov.w r0,@(30,r11)
+                r0 = cpu.read32(w.wrapping_add(56)); // 06037078 mov.l @(56,gbr),r0
+                r1 = (r14 & 0xffff_0000) | ((r14 & 0xff) << 8) | ((r14 >> 8) & 0xff); // 0603707a swap.b r14,r1
+                r1 = r1 & 0xff; // 0603707c extu.b r1,r1
+                r1 <<= 2; // 0603707e shll2 r1
+                r2 = cpu.read32(r0.wrapping_add(r1)); // 06037080 mov.l @(r0,r1),r2
+                cpu.write32(r0.wrapping_add(r1), r11); // 06037082 mov.l r11,@(r0,r1)
+                cpu.write32(r11.wrapping_add(32), r2); // 06037084 mov.l r2,@(32,r11)
+                r11 = r11.wrapping_add(36i32 as u32); // 06037086 add #36,r11
+                pc = 0x06037088;
+            }
+            0x06037088 => {
+                r0 = cpu.read32(r15.wrapping_add(16)); // 06037088 mov.l @(16,r15),r0
+                r8 = r8.wrapping_add(12i32 as u32); // 0603708a add #12,r8
+                r0 = r0.wrapping_sub(1); t = r0 == 0; // 0603708c dt r0
+                let take = !t; // 0603708e bf/s 0x6036fca
+                cpu.write32(r15.wrapping_add(16), r0); // 06037090 mov.l r0,@(16,r15)
+                pc = if take { 0x06036fca } else { 0x06037092 };
+            }
+            0x06037092 => {
+                r15 = r15.wrapping_add(24i32 as u32); // 06037092 add #24,r15
+                r4 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06037094 mov.l @r15+,r4
+                pr = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06037096 lds.l @r15+,pr
+                r4 = r4.wrapping_add(48i32 as u32); // 06037098 add #48,r4
+                r0 = r11; // 0603709a mov r11,r0
+                // 0603709c rts
+                cpu.write32(w.wrapping_add(52), r0); // 0603709e mov.l r0,@(52,gbr)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            0x060370a0 => {
+                r3 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 060370a0 mov.w @r7+,r3
+                r2 <<= 2; // 060370a2 shll2 r2
+                r14 = cpu.read32(r1.wrapping_add(12)); // 060370a4 mov.l @(12,r1),r14
+                r2 = r2.wrapping_add(r10); // 060370a6 add r10,r2
+                r4 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 060370a8 mov.w @r7+,r4
+                r0 = cpu.read32(r2.wrapping_add(12)); // 060370aa mov.l @(12,r2),r0
+                r3 <<= 2; // 060370ac shll2 r3
+                r14 = r14.wrapping_add(r0); // 060370ae add r0,r14
+                r3 <<= 2; // 060370b0 shll2 r3
+                r3 = r3.wrapping_add(r10); // 060370b2 add r10,r3
+                r4 <<= 2; // 060370b4 shll2 r4
+                r5 = cpu.read32(r3.wrapping_add(12)); // 060370b6 mov.l @(12,r3),r5
+                r4 <<= 2; // 060370b8 shll2 r4
+                r4 = r4.wrapping_add(r10); // 060370ba add r10,r4
+                r0 = cpu.read32(r4.wrapping_add(12)); // 060370bc mov.l @(12,r4),r0
+                r5 = r5.wrapping_add(r0); // 060370be add r0,r5
+                t = r14 & 1 != 0; r14 = (r14 as i32 >> 1) as u32; // 060370c0 shar r14
+                t = r5 & 1 != 0; r5 = (r5 as i32 >> 1) as u32; // 060370c2 shar r5
+                r14 = r14.wrapping_add(r5); // 060370c4 add r5,r14
+                t = r14 & 1 != 0; r14 = (r14 as i32 >> 1) as u32; // 060370c6 shar r14
+                r14 >>= 16; // 060370c8 shlr16 r14
+                r14 = r14 as i16 as i32 as u32; // 060370ca exts.w r14,r14
+                r5 = cpu.read32(r15.wrapping_add(12)); // 060370cc mov.l @(12,r15),r5
+                r0 = cpu.read16(w.wrapping_add(160)) as i16 as i32 as u32; // 060370ce mov.w @(160,gbr),r0
+                r14 = r14.wrapping_sub(r5); // 060370d0 sub r5,r14
+                t = r14 > r0; // 060370d2 cmp/hi r0,r14
+                let take = t; // 060370d4 bt/s 0x6037088
+                r14 = r14.wrapping_add(r5); // 060370d6 add r5,r14
+                pc = if take { 0x06037088 } else { 0x060370d8 };
+            }
+            0x060370d8 => {
+                r0 = cpu.read32(r9); r9 = r9.wrapping_add(4); // 060370d8 mov.l @r9+,r0
+                let to = r0; // 060370da jmp @r0
+                // nop // 060370dc nop 
+                pc = to;
+            }
+            0x060370e0 => {
+                r0 = cpu.read16(r1.wrapping_add(12)) as i16 as i32 as u32; // 060370e0 mov.w @(12,r1),r0
+                r2 <<= 2; // 060370e2 shll2 r2
+                r3 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 060370e4 mov.w @r7+,r3
+                r14 = r0 as i16 as i32 as u32; // 060370e6 exts.w r0,r14
+                r4 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 060370e8 mov.w @r7+,r4
+                r2 = r2.wrapping_add(r10); // 060370ea add r10,r2
+                r0 = cpu.read16(r2.wrapping_add(12)) as i16 as i32 as u32; // 060370ec mov.w @(12,r2),r0
+                r3 <<= 2; // 060370ee shll2 r3
+                t = r14 as i32 > r0 as i32; // 060370f0 cmp/gt r0,r14
+                let take = !t; // 060370f2 bf/s 0x60370f8
+                r3 <<= 2; // 060370f4 shll2 r3
+                pc = if take { 0x060370f8 } else { 0x060370f6 };
+            }
+            0x060370f6 => {
+                r14 = r0; // 060370f6 mov r0,r14
+                pc = 0x060370f8;
+            }
+            0x060370f8 => {
+                r3 = r3.wrapping_add(r10); // 060370f8 add r10,r3
+                r4 <<= 2; // 060370fa shll2 r4
+                r0 = cpu.read16(r3.wrapping_add(12)) as i16 as i32 as u32; // 060370fc mov.w @(12,r3),r0
+                r4 <<= 2; // 060370fe shll2 r4
+                t = r14 as i32 > r0 as i32; // 06037100 cmp/gt r0,r14
+                let take = !t; // 06037102 bf/s 0x6037108
+                r4 = r4.wrapping_add(r10); // 06037104 add r10,r4
+                pc = if take { 0x06037108 } else { 0x06037106 };
+            }
+            0x06037106 => {
+                r14 = r0; // 06037106 mov r0,r14
+                pc = 0x06037108;
+            }
+            0x06037108 => {
+                r0 = cpu.read16(r4.wrapping_add(12)) as i16 as i32 as u32; // 06037108 mov.w @(12,r4),r0
+                r5 = cpu.read32(r15.wrapping_add(12)); // 0603710a mov.l @(12,r15),r5
+                t = r14 as i32 > r0 as i32; // 0603710c cmp/gt r0,r14
+                pc = if !t { 0x06037112 } else { 0x06037110 }; // 0603710e bf 0x6037112
+            }
+            0x06037110 => {
+                r14 = r0; // 06037110 mov r0,r14
+                pc = 0x06037112;
+            }
+            0x06037112 => {
+                r0 = cpu.read16(w.wrapping_add(160)) as i16 as i32 as u32; // 06037112 mov.w @(160,gbr),r0
+                r14 = r14.wrapping_sub(r5); // 06037114 sub r5,r14
+                t = r14 > r0; // 06037116 cmp/hi r0,r14
+                let take = t; // 06037118 bt/s 0x6037088
+                r14 = r14.wrapping_add(r5); // 0603711a add r5,r14
+                pc = if take { 0x06037088 } else { 0x0603711c };
+            }
+            0x0603711c => {
+                r0 = cpu.read32(r9); r9 = r9.wrapping_add(4); // 0603711c mov.l @r9+,r0
+                let to = r0; // 0603711e jmp @r0
+                // nop // 06037120 nop 
+                pc = to;
+            }
+            0x06037124 => {
+                r3 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 06037124 mov.w @r7+,r3
+                r2 <<= 2; // 06037126 shll2 r2
+                r0 = cpu.read16(r1.wrapping_add(12)) as i16 as i32 as u32; // 06037128 mov.w @(12,r1),r0
+                r2 = r2.wrapping_add(r10); // 0603712a add r10,r2
+                r4 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 0603712c mov.w @r7+,r4
+                r14 = r0 as i16 as i32 as u32; // 0603712e exts.w r0,r14
+                r0 = cpu.read16(r2.wrapping_add(12)) as i16 as i32 as u32; // 06037130 mov.w @(12,r2),r0
+                r3 <<= 2; // 06037132 shll2 r3
+                r3 <<= 2; // 06037134 shll2 r3
+                r3 = r3.wrapping_add(r10); // 06037136 add r10,r3
+                t = r14 as i32 >= r0 as i32; // 06037138 cmp/ge r0,r14
+                let take = t; // 0603713a bt/s 0x6037140
+                r4 <<= 2; // 0603713c shll2 r4
+                pc = if take { 0x06037140 } else { 0x0603713e };
+            }
+            0x0603713e => {
+                r14 = r0; // 0603713e mov r0,r14
+                pc = 0x06037140;
+            }
+            0x06037140 => {
+                r0 = cpu.read16(r3.wrapping_add(12)) as i16 as i32 as u32; // 06037140 mov.w @(12,r3),r0
+                r4 <<= 2; // 06037142 shll2 r4
+                t = r14 as i32 >= r0 as i32; // 06037144 cmp/ge r0,r14
+                let take = t; // 06037146 bt/s 0x603714c
+                r4 = r4.wrapping_add(r10); // 06037148 add r10,r4
+                pc = if take { 0x0603714c } else { 0x0603714a };
+            }
+            0x0603714a => {
+                r14 = r0; // 0603714a mov r0,r14
+                pc = 0x0603714c;
+            }
+            0x0603714c => {
+                r0 = cpu.read16(r4.wrapping_add(12)) as i16 as i32 as u32; // 0603714c mov.w @(12,r4),r0
+                r5 = cpu.read32(r15.wrapping_add(12)); // 0603714e mov.l @(12,r15),r5
+                t = r14 as i32 >= r0 as i32; // 06037150 cmp/ge r0,r14
+                pc = if t { 0x06037156 } else { 0x06037154 }; // 06037152 bt 0x6037156
+            }
+            0x06037154 => {
+                r14 = r0; // 06037154 mov r0,r14
+                pc = 0x06037156;
+            }
+            0x06037156 => {
+                r0 = cpu.read16(w.wrapping_add(160)) as i16 as i32 as u32; // 06037156 mov.w @(160,gbr),r0
+                r14 = r14.wrapping_sub(r5); // 06037158 sub r5,r14
+                t = r14 > r0; // 0603715a cmp/hi r0,r14
+                let take = t; // 0603715c bt/s 0x6037088
+                r14 = r14.wrapping_add(r5); // 0603715e add r5,r14
+                pc = if take { 0x06037088 } else { 0x06037160 };
+            }
+            0x06037160 => {
+                r0 = cpu.read32(r9); r9 = r9.wrapping_add(4); // 06037160 mov.l @r9+,r0
+                let to = r0; // 06037162 jmp @r0
+                // nop // 06037164 nop 
+                pc = to;
+            }
+            0x06037168 => {
+                r0 = cpu.read16(w.wrapping_add(160)) as i16 as i32 as u32; // 06037168 mov.w @(160,gbr),r0
+                r2 <<= 2; // 0603716a shll2 r2
+                t = r14 > r0; // 0603716c cmp/hi r0,r14
+                let take = t; // 0603716e bt/s 0x6037186
+                r2 = r2.wrapping_add(r10); // 06037170 add r10,r2
+                pc = if take { 0x06037186 } else { 0x06037172 };
+            }
+            0x06037172 => {
+                r3 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 06037172 mov.w @r7+,r3
+                r3 <<= 2; // 06037174 shll2 r3
+                r4 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 06037176 mov.w @r7+,r4
+                r3 <<= 2; // 06037178 shll2 r3
+                r3 = r3.wrapping_add(r10); // 0603717a add r10,r3
+                r4 <<= 2; // 0603717c shll2 r4
+                r0 = cpu.read32(r9); r9 = r9.wrapping_add(4); // 0603717e mov.l @r9+,r0
+                r4 <<= 2; // 06037180 shll2 r4
+                let to = r0; // 06037182 jmp @r0
+                r4 = r4.wrapping_add(r10); // 06037184 add r10,r4
+                pc = to;
+            }
+            0x06037186 => {
+                // 06037186 bra 0x6037088
+                r7 = r7.wrapping_add(4i32 as u32); // 06037188 add #4,r7
+                pc = 0x06037088;
+            }
+            0x0603718c => {
+                r3 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 0603718c mov.w @r7+,r3
+                r2 <<= 2; // 0603718e shll2 r2
+                r14 = cpu.read32(r1.wrapping_add(12)); // 06037190 mov.l @(12,r1),r14
+                r2 = r2.wrapping_add(r10); // 06037192 add r10,r2
+                r4 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 06037194 mov.w @r7+,r4
+                r0 = cpu.read32(r2.wrapping_add(12)); // 06037196 mov.l @(12,r2),r0
+                r3 <<= 2; // 06037198 shll2 r3
+                r14 = r14.wrapping_add(r0); // 0603719a add r0,r14
+                r3 <<= 2; // 0603719c shll2 r3
+                r3 = r3.wrapping_add(r10); // 0603719e add r10,r3
+                r4 <<= 2; // 060371a0 shll2 r4
+                r5 = cpu.read32(r3.wrapping_add(12)); // 060371a2 mov.l @(12,r3),r5
+                r4 <<= 2; // 060371a4 shll2 r4
+                r4 = r4.wrapping_add(r10); // 060371a6 add r10,r4
+                r0 = cpu.read32(r4.wrapping_add(12)); // 060371a8 mov.l @(12,r4),r0
+                r5 = r5.wrapping_add(r0); // 060371aa add r0,r5
+                t = r14 & 1 != 0; r14 = (r14 as i32 >> 1) as u32; // 060371ac shar r14
+                t = r5 & 1 != 0; r5 = (r5 as i32 >> 1) as u32; // 060371ae shar r5
+                r14 = r14.wrapping_add(r5); // 060371b0 add r5,r14
+                t = r14 & 1 != 0; r14 = (r14 as i32 >> 1) as u32; // 060371b2 shar r14
+                r5 = cpu.read32(r15.wrapping_add(12)); // 060371b4 mov.l @(12,r15),r5
+                r0 = cpu.read16(w.wrapping_add(160)) as i16 as i32 as u32; // 060371b6 mov.w @(160,gbr),r0
+                r5 <<= 16; // 060371b8 shll16 r5
+                r0 <<= 16; // 060371ba shll16 r0
+                r0 = r0.wrapping_add(r5); // 060371bc add r5,r0
+                t = r14 > r0; // 060371be cmp/hi r0,r14
+                let take = t; // 060371c0 bt/s 0x6037292
+                t = r5 & 1 != 0; r5 >>= 1; // 060371c2 shlr r5
+                pc = if take { 0x06037292 } else { 0x060371c4 };
+            }
+            0x060371c4 => {
+                t = r14 as i32 > r5 as i32; // 060371c4 cmp/gt r5,r14
+                pc = if !t { 0x06037292 } else { 0x060371c8 }; // 060371c6 bf 0x6037292
+            }
+            0x060371c8 => {
+                // 060371c8 bra 0x6037296
+                r14 >>= 16; // 060371ca shlr16 r14
+                pc = 0x06037296;
+            }
+            0x060371d4 => {
+                r14 = cpu.read32(r1.wrapping_add(12)); // 060371d4 mov.l @(12,r1),r14
+                r2 <<= 2; // 060371d6 shll2 r2
+                r3 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 060371d8 mov.w @r7+,r3
+                r4 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 060371da mov.w @r7+,r4
+                r2 = r2.wrapping_add(r10); // 060371dc add r10,r2
+                r0 = cpu.read32(r2.wrapping_add(12)); // 060371de mov.l @(12,r2),r0
+                r3 <<= 2; // 060371e0 shll2 r3
+                t = r14 as i32 > r0 as i32; // 060371e2 cmp/gt r0,r14
+                let take = !t; // 060371e4 bf/s 0x60371ea
+                r3 <<= 2; // 060371e6 shll2 r3
+                pc = if take { 0x060371ea } else { 0x060371e8 };
+            }
+            0x060371e8 => {
+                r14 = r0; // 060371e8 mov r0,r14
+                pc = 0x060371ea;
+            }
+            0x060371ea => {
+                r3 = r3.wrapping_add(r10); // 060371ea add r10,r3
+                r4 <<= 2; // 060371ec shll2 r4
+                r0 = cpu.read32(r3.wrapping_add(12)); // 060371ee mov.l @(12,r3),r0
+                r4 <<= 2; // 060371f0 shll2 r4
+                t = r14 as i32 > r0 as i32; // 060371f2 cmp/gt r0,r14
+                let take = !t; // 060371f4 bf/s 0x60371fa
+                r4 = r4.wrapping_add(r10); // 060371f6 add r10,r4
+                pc = if take { 0x060371fa } else { 0x060371f8 };
+            }
+            0x060371f8 => {
+                r14 = r0; // 060371f8 mov r0,r14
+                pc = 0x060371fa;
+            }
+            0x060371fa => {
+                r0 = cpu.read32(r4.wrapping_add(12)); // 060371fa mov.l @(12,r4),r0
+                r5 = cpu.read32(r15.wrapping_add(12)); // 060371fc mov.l @(12,r15),r5
+                t = r14 as i32 > r0 as i32; // 060371fe cmp/gt r0,r14
+                pc = if !t { 0x06037204 } else { 0x06037202 }; // 06037200 bf 0x6037204
+            }
+            0x06037202 => {
+                r14 = r0; // 06037202 mov r0,r14
+                pc = 0x06037204;
+            }
+            0x06037204 => {
+                r0 = cpu.read16(w.wrapping_add(160)) as i16 as i32 as u32; // 06037204 mov.w @(160,gbr),r0
+                r5 <<= 16; // 06037206 shll16 r5
+                r0 <<= 16; // 06037208 shll16 r0
+                r0 = r0.wrapping_add(r5); // 0603720a add r5,r0
+                t = r14 > r0; // 0603720c cmp/hi r0,r14
+                let take = t; // 0603720e bt/s 0x6037292
+                t = r5 & 1 != 0; r5 >>= 1; // 06037210 shlr r5
+                pc = if take { 0x06037292 } else { 0x06037212 };
+            }
+            0x06037212 => {
+                t = r14 as i32 > r5 as i32; // 06037212 cmp/gt r5,r14
+                pc = if !t { 0x06037292 } else { 0x06037216 }; // 06037214 bf 0x6037292
+            }
+            0x06037216 => {
+                // 06037216 bra 0x6037296
+                r14 >>= 16; // 06037218 shlr16 r14
+                pc = 0x06037296;
+            }
+            0x06037220 => {
+                r3 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 06037220 mov.w @r7+,r3
+                r2 <<= 2; // 06037222 shll2 r2
+                r14 = cpu.read32(r1.wrapping_add(12)); // 06037224 mov.l @(12,r1),r14
+                r2 = r2.wrapping_add(r10); // 06037226 add r10,r2
+                r4 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 06037228 mov.w @r7+,r4
+                r0 = cpu.read32(r2.wrapping_add(12)); // 0603722a mov.l @(12,r2),r0
+                r3 <<= 2; // 0603722c shll2 r3
+                r3 <<= 2; // 0603722e shll2 r3
+                r3 = r3.wrapping_add(r10); // 06037230 add r10,r3
+                t = r14 as i32 >= r0 as i32; // 06037232 cmp/ge r0,r14
+                let take = t; // 06037234 bt/s 0x603723a
+                r4 <<= 2; // 06037236 shll2 r4
+                pc = if take { 0x0603723a } else { 0x06037238 };
+            }
+            0x06037238 => {
+                r14 = r0; // 06037238 mov r0,r14
+                pc = 0x0603723a;
+            }
+            0x0603723a => {
+                r0 = cpu.read32(r3.wrapping_add(12)); // 0603723a mov.l @(12,r3),r0
+                r4 <<= 2; // 0603723c shll2 r4
+                t = r14 as i32 >= r0 as i32; // 0603723e cmp/ge r0,r14
+                let take = t; // 06037240 bt/s 0x6037246
+                r4 = r4.wrapping_add(r10); // 06037242 add r10,r4
+                pc = if take { 0x06037246 } else { 0x06037244 };
+            }
+            0x06037244 => {
+                r14 = r0; // 06037244 mov r0,r14
+                pc = 0x06037246;
+            }
+            0x06037246 => {
+                r0 = cpu.read32(r4.wrapping_add(12)); // 06037246 mov.l @(12,r4),r0
+                r5 = cpu.read32(r15.wrapping_add(12)); // 06037248 mov.l @(12,r15),r5
+                t = r14 as i32 >= r0 as i32; // 0603724a cmp/ge r0,r14
+                pc = if t { 0x06037250 } else { 0x0603724e }; // 0603724c bt 0x6037250
+            }
+            0x0603724e => {
+                r14 = r0; // 0603724e mov r0,r14
+                pc = 0x06037250;
+            }
+            0x06037250 => {
+                r0 = cpu.read16(w.wrapping_add(160)) as i16 as i32 as u32; // 06037250 mov.w @(160,gbr),r0
+                r5 <<= 16; // 06037252 shll16 r5
+                r0 <<= 16; // 06037254 shll16 r0
+                r0 = r0.wrapping_add(r5); // 06037256 add r5,r0
+                t = r14 > r0; // 06037258 cmp/hi r0,r14
+                let take = t; // 0603725a bt/s 0x6037292
+                t = r5 & 1 != 0; r5 >>= 1; // 0603725c shlr r5
+                pc = if take { 0x06037292 } else { 0x0603725e };
+            }
+            0x0603725e => {
+                t = r14 as i32 > r5 as i32; // 0603725e cmp/gt r5,r14
+                pc = if !t { 0x06037292 } else { 0x06037262 }; // 06037260 bf 0x6037292
+            }
+            0x06037262 => {
+                // 06037262 bra 0x6037296
+                r14 >>= 16; // 06037264 shlr16 r14
+                pc = 0x06037296;
+            }
+            0x0603726c => {
+                r0 = cpu.read16(w.wrapping_add(160)) as i16 as i32 as u32; // 0603726c mov.w @(160,gbr),r0
+                r2 <<= 2; // 0603726e shll2 r2
+                t = r14 > r0; // 06037270 cmp/hi r0,r14
+                let take = t; // 06037272 bt/s 0x603728a
+                r2 = r2.wrapping_add(r10); // 06037274 add r10,r2
+                pc = if take { 0x0603728a } else { 0x06037276 };
+            }
+            0x06037276 => {
+                r3 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 06037276 mov.w @r7+,r3
+                r3 <<= 2; // 06037278 shll2 r3
+                r4 = cpu.read16(r7) as i16 as i32 as u32; r7 = r7.wrapping_add(2); // 0603727a mov.w @r7+,r4
+                r3 <<= 2; // 0603727c shll2 r3
+                r3 = r3.wrapping_add(r10); // 0603727e add r10,r3
+                r4 <<= 2; // 06037280 shll2 r4
+                r0 = cpu.read32(r9); r9 = r9.wrapping_add(4); // 06037282 mov.l @r9+,r0
+                r4 <<= 2; // 06037284 shll2 r4
+                let to = r0; // 06037286 jmp @r0
+                r4 = r4.wrapping_add(r10); // 06037288 add r10,r4
+                pc = to;
+            }
+            0x0603728a => {
+                // 0603728a bra 0x6037088
+                r7 = r7.wrapping_add(4i32 as u32); // 0603728c add #4,r7
+                pc = 0x06037088;
+            }
+            0x06037290 => {
+                r14 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06037290 mov.l @r15+,r14
+                pc = 0x06037292;
+            }
+            0x06037292 => {
+                // 06037292 bra 0x6037088
+                // nop // 06037294 nop 
+                pc = 0x06037088;
+            }
+            0x06037296 => {
+                r0 = cpu.read32(r1.wrapping_add(4)); // 06037296 mov.l @(4,r1),r0
+                t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 06037298 shar r0
+                let take = !t; // 0603729a bf/s 0x60372ae
+                r0 = cpu.read32(r2.wrapping_add(4)); // 0603729c mov.l @(4,r2),r0
+                pc = if take { 0x060372ae } else { 0x0603729e };
+            }
+            0x0603729e => {
+                t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 0603729e shar r0
+                let take = !t; // 060372a0 bf/s 0x60372ae
+                r0 = cpu.read32(r3.wrapping_add(4)); // 060372a2 mov.l @(4,r3),r0
+                pc = if take { 0x060372ae } else { 0x060372a4 };
+            }
+            0x060372a4 => {
+                t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 060372a4 shar r0
+                let take = !t; // 060372a6 bf/s 0x60372ae
+                r0 = cpu.read32(r4.wrapping_add(4)); // 060372a8 mov.l @(4,r4),r0
+                pc = if take { 0x060372ae } else { 0x060372aa };
+            }
+            0x060372aa => {
+                t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 060372aa shar r0
+                pc = if t { 0x06037292 } else { 0x060372ae }; // 060372ac bt 0x6037292
+            }
+            0x060372ae => {
+                r0 = cpu.read32(w.wrapping_add(892)); // 060372ae mov.l @(892,gbr),r0
+                t = r0 & 1 != 0; r0 = r0.rotate_right(1); // 060372b0 rotr r0
+                pc = if t { 0x0603730c } else { 0x060372b4 }; // 060372b2 bt 0x603730c
+            }
+            0x060372b4 => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r14); // 060372b4 mov.l r14,@-r15
+                r14 = 0xfffffc00; // 060372b6 mov.w 0x6037314,r14
+                r5 = 0x000003ff; // 060372b8 mov.w 0x6037316,r5
+                r0 = cpu.read16(r1.wrapping_add(0)) as i16 as i32 as u32; // 060372ba mov.w @(0,r1),r0
+                t = r0 as i32 > r5 as i32; // 060372bc cmp/gt r5,r0
+                let take = t; // 060372be bt/s 0x6037290
+                t = r0 as i32 >= r14 as i32; // 060372c0 cmp/ge r14,r0
+                pc = if take { 0x06037290 } else { 0x060372c2 };
+            }
+            0x060372c2 => {
+                let take = !t; // 060372c2 bf/s 0x6037290
+                r0 = cpu.read16(r1.wrapping_add(2)) as i16 as i32 as u32; // 060372c4 mov.w @(2,r1),r0
+                pc = if take { 0x06037290 } else { 0x060372c6 };
+            }
+            0x060372c6 => {
+                t = r0 as i32 > r5 as i32; // 060372c6 cmp/gt r5,r0
+                let take = t; // 060372c8 bt/s 0x6037290
+                t = r0 as i32 >= r14 as i32; // 060372ca cmp/ge r14,r0
+                pc = if take { 0x06037290 } else { 0x060372cc };
+            }
+            0x060372cc => {
+                let take = !t; // 060372cc bf/s 0x6037290
+                r0 = cpu.read16(r2.wrapping_add(0)) as i16 as i32 as u32; // 060372ce mov.w @(0,r2),r0
+                pc = if take { 0x06037290 } else { 0x060372d0 };
+            }
+            0x060372d0 => {
+                t = r0 as i32 > r5 as i32; // 060372d0 cmp/gt r5,r0
+                let take = t; // 060372d2 bt/s 0x6037290
+                t = r0 as i32 >= r14 as i32; // 060372d4 cmp/ge r14,r0
+                pc = if take { 0x06037290 } else { 0x060372d6 };
+            }
+            0x060372d6 => {
+                let take = !t; // 060372d6 bf/s 0x6037290
+                r0 = cpu.read16(r2.wrapping_add(2)) as i16 as i32 as u32; // 060372d8 mov.w @(2,r2),r0
+                pc = if take { 0x06037290 } else { 0x060372da };
+            }
+            0x060372da => {
+                t = r0 as i32 > r5 as i32; // 060372da cmp/gt r5,r0
+                let take = t; // 060372dc bt/s 0x6037290
+                t = r0 as i32 >= r14 as i32; // 060372de cmp/ge r14,r0
+                pc = if take { 0x06037290 } else { 0x060372e0 };
+            }
+            0x060372e0 => {
+                let take = !t; // 060372e0 bf/s 0x6037290
+                r0 = cpu.read16(r3.wrapping_add(0)) as i16 as i32 as u32; // 060372e2 mov.w @(0,r3),r0
+                pc = if take { 0x06037290 } else { 0x060372e4 };
+            }
+            0x060372e4 => {
+                t = r0 as i32 > r5 as i32; // 060372e4 cmp/gt r5,r0
+                let take = t; // 060372e6 bt/s 0x6037290
+                t = r0 as i32 >= r14 as i32; // 060372e8 cmp/ge r14,r0
+                pc = if take { 0x06037290 } else { 0x060372ea };
+            }
+            0x060372ea => {
+                let take = !t; // 060372ea bf/s 0x6037290
+                r0 = cpu.read16(r3.wrapping_add(2)) as i16 as i32 as u32; // 060372ec mov.w @(2,r3),r0
+                pc = if take { 0x06037290 } else { 0x060372ee };
+            }
+            0x060372ee => {
+                t = r0 as i32 > r5 as i32; // 060372ee cmp/gt r5,r0
+                let take = t; // 060372f0 bt/s 0x6037290
+                t = r0 as i32 >= r14 as i32; // 060372f2 cmp/ge r14,r0
+                pc = if take { 0x06037290 } else { 0x060372f4 };
+            }
+            0x060372f4 => {
+                let take = !t; // 060372f4 bf/s 0x6037290
+                r0 = cpu.read16(r4.wrapping_add(0)) as i16 as i32 as u32; // 060372f6 mov.w @(0,r4),r0
+                pc = if take { 0x06037290 } else { 0x060372f8 };
+            }
+            0x060372f8 => {
+                t = r0 as i32 > r5 as i32; // 060372f8 cmp/gt r5,r0
+                let take = t; // 060372fa bt/s 0x6037290
+                t = r0 as i32 >= r14 as i32; // 060372fc cmp/ge r14,r0
+                pc = if take { 0x06037290 } else { 0x060372fe };
+            }
+            0x060372fe => {
+                let take = !t; // 060372fe bf/s 0x6037290
+                r0 = cpu.read16(r4.wrapping_add(2)) as i16 as i32 as u32; // 06037300 mov.w @(2,r4),r0
+                pc = if take { 0x06037290 } else { 0x06037302 };
+            }
+            0x06037302 => {
+                t = r0 as i32 > r5 as i32; // 06037302 cmp/gt r5,r0
+                let take = t; // 06037304 bt/s 0x6037290
+                t = r0 as i32 >= r14 as i32; // 06037306 cmp/ge r14,r0
+                pc = if take { 0x06037290 } else { 0x06037308 };
+            }
+            0x06037308 => {
+                pc = if !t { 0x06037290 } else { 0x0603730a }; // 06037308 bf 0x6037290
+            }
+            0x0603730a => {
+                r14 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 0603730a mov.l @r15+,r14
+                pc = 0x0603730c;
+            }
+            0x0603730c => {
+                r0 = cpu.read32(r9); r9 = r9.wrapping_add(4); // 0603730c mov.l @r9+,r0
+                let to = r0; // 0603730e jmp @r0
+                // nop // 06037310 nop 
+                pc = to;
+            }
+            0x06037b18 => {
+                r0 = cpu.read16(r8.wrapping_add(2)) as i16 as i32 as u32; // 06037b18 mov.w @(2,r8),r0
+                r5 = cpu.read32(r15.wrapping_add(20)); // 06037b1a mov.l @(20,r15),r5
+                r0 <<= 2; // 06037b1c shll2 r0
+                r0 = r0.wrapping_add(r0); // 06037b1e add r0,r0
+                r0 = cpu.read32(r0.wrapping_add(r5)); // 06037b20 mov.l @(r0,r5),r0
+                cpu.write32(r11.wrapping_add(8), r0); // 06037b22 mov.l r0,@(8,r11)
+                pc = 0x06037b24;
+            }
+            0x06037b24 => {
+                r0 = cpu.read16(r8.wrapping_add(8)) as i16 as i32 as u32; // 06037b24 mov.w @(8,r8),r0
+                r5 = cpu.read32(r8.wrapping_add(4)); // 06037b26 mov.l @(4,r8),r5
+                cpu.write16(r11.wrapping_add(28), r0 as u16); // 06037b28 mov.w r0,@(28,r11)
+                cpu.write32(r11.wrapping_add(4), r5); // 06037b2a mov.l r5,@(4,r11)
+                pc = 0x06037b2c;
+            }
+            0x06037b2c => {
+                r5 >>= 16; // 06037b2c shlr16 r5
+                r5 >>= 2; // 06037b2e shlr2 r5
+                t = r5 & 1 != 0; r5 >>= 1; // 06037b30 shlr r5
+                pc = if !t { 0x06037b3a } else { 0x06037b34 }; // 06037b32 bf 0x6037b3a
+            }
+            0x06037b34 => {
+                r1 = cpu.read32(r1.wrapping_add(0)); // 06037b34 mov.l @(0,r1),r1
+                // 06037b36 bra 0x6037bdc
+                r5 = cpu.read32(r2.wrapping_add(0)); // 06037b38 mov.l @(0,r2),r5
+                pc = 0x06037bdc;
+            }
+            0x06037b3a => {
+                r0 = cpu.read32(r1.wrapping_add(4)); // 06037b3a mov.l @(4,r1),r0
+                r1 = cpu.read32(r1.wrapping_add(0)); // 06037b3c mov.l @(0,r1),r1
+                t = r0 & 1 == 0; // 06037b3e tst #1,r0
+                let take = t; // 06037b40 bt/s 0x6037bdc
+                r5 = cpu.read32(r2.wrapping_add(0)); // 06037b42 mov.l @(0,r2),r5
+                pc = if take { 0x06037bdc } else { 0x06037b44 };
+            }
+            0x06037b44 => {
+                r0 = cpu.read32(r2.wrapping_add(4)); // 06037b44 mov.l @(4,r2),r0
+                r2 = r5; // 06037b46 mov r5,r2
+                t = r0 & 1 == 0; // 06037b48 tst #1,r0
+                let take = t; // 06037b4a bt/s 0x6037bf2
+                r5 = cpu.read32(r3.wrapping_add(0)); // 06037b4c mov.l @(0,r3),r5
+                pc = if take { 0x06037bf2 } else { 0x06037b4e };
+            }
+            0x06037b4e => {
+                r0 = cpu.read32(r3.wrapping_add(4)); // 06037b4e mov.l @(4,r3),r0
+                r3 = r5; // 06037b50 mov r5,r3
+                t = r0 & 1 == 0; // 06037b52 tst #1,r0
+                let take = t; // 06037b54 bt/s 0x6037c08
+                r5 = cpu.read32(r4.wrapping_add(0)); // 06037b56 mov.l @(0,r4),r5
+                pc = if take { 0x06037c08 } else { 0x06037b58 };
+            }
+            0x06037b58 => {
+                r0 = cpu.read32(r4.wrapping_add(4)); // 06037b58 mov.l @(4,r4),r0
+                r4 = r5; // 06037b5a mov r5,r4
+                t = r0 & 1 == 0; // 06037b5c tst #1,r0
+                let take = t; // 06037b5e bt/s 0x6037c1e
+                r5 = 1i32 as u32; // 06037b60 mov #1,r5
+                pc = if take { 0x06037c1e } else { 0x06037b62 };
+            }
+            0x06037b62 => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r9); // 06037b62 mov.l r9,@-r15
+                r5 <<= 16; // 06037b64 shll16 r5
+                t = r5 & 1 != 0; r5 >>= 1; // 06037b66 shlr r5
+                r9 = r4.rotate_left(16); // 06037b68 swap.w r4,r9
+                t = r5 & r9 == 0; // 06037b6a tst r5,r9
+                { let (x, b1) = r13.overflowing_sub(r13); let (y, b2) = x.overflowing_sub(t as u32); r13 = y; t = b1 || b2; } // 06037b6c subc r13,r13
+                r13 = !r13; // 06037b6e not r13,r13
+                r13 ^= r9; // 06037b70 xor r9,r13
+                t = r5 & r4 == 0; // 06037b72 tst r5,r4
+                { let (x, b1) = r9.overflowing_sub(r9); let (y, b2) = x.overflowing_sub(t as u32); r9 = y; t = b1 || b2; } // 06037b74 subc r9,r9
+                r9 = !r9; // 06037b76 not r9,r9
+                r9 ^= r4; // 06037b78 xor r4,r9
+                r13 = r13.wrapping_add(r9); // 06037b7a add r9,r13
+                r13 = r13 & 0xffff; // 06037b7c extu.w r13,r13
+                r0 = 0x06037c20; // 06037b7e mova 0x6037c20,r0
+                r9 = r3.rotate_left(16); // 06037b80 swap.w r3,r9
+                t = r5 & r9 == 0; // 06037b82 tst r5,r9
+                { let (x, b1) = r12.overflowing_sub(r12); let (y, b2) = x.overflowing_sub(t as u32); r12 = y; t = b1 || b2; } // 06037b84 subc r12,r12
+                r12 = !r12; // 06037b86 not r12,r12
+                r12 ^= r9; // 06037b88 xor r9,r12
+                t = r5 & r3 == 0; // 06037b8a tst r5,r3
+                { let (x, b1) = r9.overflowing_sub(r9); let (y, b2) = x.overflowing_sub(t as u32); r9 = y; t = b1 || b2; } // 06037b8c subc r9,r9
+                r9 = !r9; // 06037b8e not r9,r9
+                r9 ^= r3; // 06037b90 xor r3,r9
+                r12 = r12.wrapping_add(r9); // 06037b92 add r9,r12
+                r12 = r12 & 0xffff; // 06037b94 extu.w r12,r12
+                t = r12 as i32 > r13 as i32; // 06037b96 cmp/gt r13,r12
+                let take = t; // 06037b98 bt/s 0x6037ba0
+                r9 = r2.rotate_left(16); // 06037b9a swap.w r2,r9
+                pc = if take { 0x06037ba0 } else { 0x06037b9c };
+            }
+            0x06037b9c => {
+                r13 = r12; // 06037b9c mov r12,r13
+                r0 = 0x06037c0c; // 06037b9e mova 0x6037c0c,r0
+                pc = 0x06037ba0;
+            }
+            0x06037ba0 => {
+                t = r5 & r9 == 0; // 06037ba0 tst r5,r9
+                { let (x, b1) = r12.overflowing_sub(r12); let (y, b2) = x.overflowing_sub(t as u32); r12 = y; t = b1 || b2; } // 06037ba2 subc r12,r12
+                r12 = !r12; // 06037ba4 not r12,r12
+                r12 ^= r9; // 06037ba6 xor r9,r12
+                t = r5 & r2 == 0; // 06037ba8 tst r5,r2
+                { let (x, b1) = r9.overflowing_sub(r9); let (y, b2) = x.overflowing_sub(t as u32); r9 = y; t = b1 || b2; } // 06037baa subc r9,r9
+                r9 = !r9; // 06037bac not r9,r9
+                r9 ^= r2; // 06037bae xor r2,r9
+                r12 = r12.wrapping_add(r9); // 06037bb0 add r9,r12
+                r12 = r12 & 0xffff; // 06037bb2 extu.w r12,r12
+                t = r12 as i32 > r13 as i32; // 06037bb4 cmp/gt r13,r12
+                let take = t; // 06037bb6 bt/s 0x6037bbe
+                r9 = r1.rotate_left(16); // 06037bb8 swap.w r1,r9
+                pc = if take { 0x06037bbe } else { 0x06037bba };
+            }
+            0x06037bba => {
+                r13 = r12; // 06037bba mov r12,r13
+                r0 = 0x06037bf8; // 06037bbc mova 0x6037bf8,r0
+                pc = 0x06037bbe;
+            }
+            0x06037bbe => {
+                t = r5 & r9 == 0; // 06037bbe tst r5,r9
+                { let (x, b1) = r12.overflowing_sub(r12); let (y, b2) = x.overflowing_sub(t as u32); r12 = y; t = b1 || b2; } // 06037bc0 subc r12,r12
+                r12 = !r12; // 06037bc2 not r12,r12
+                r12 ^= r9; // 06037bc4 xor r9,r12
+                t = r5 & r1 == 0; // 06037bc6 tst r5,r1
+                { let (x, b1) = r9.overflowing_sub(r9); let (y, b2) = x.overflowing_sub(t as u32); r9 = y; t = b1 || b2; } // 06037bc8 subc r9,r9
+                r9 = !r9; // 06037bca not r9,r9
+                r9 ^= r1; // 06037bcc xor r1,r9
+                r12 = r12.wrapping_add(r9); // 06037bce add r9,r12
+                r12 = r12 & 0xffff; // 06037bd0 extu.w r12,r12
+                t = r13 as i32 >= r12 as i32; // 06037bd2 cmp/ge r12,r13
+                let take = t; // 06037bd4 bt/s 0x6037be2
+                r9 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06037bd6 mov.l @r15+,r9
+                pc = if take { 0x06037be2 } else { 0x06037bd8 };
+            }
+            0x06037bd8 => {
+                let to = r0; // 06037bd8 jmp @r0
+                r5 = cpu.read32(r9); r9 = r9.wrapping_add(4); // 06037bda mov.l @r9+,r5
+                pc = to;
+            }
+            0x06037bdc => {
+                r3 = cpu.read32(r3.wrapping_add(0)); // 06037bdc mov.l @(0,r3),r3
+                r2 = r5; // 06037bde mov r5,r2
+                r4 = cpu.read32(r4.wrapping_add(0)); // 06037be0 mov.l @(0,r4),r4
+                pc = 0x06037be2;
+            }
+            0x06037be2 => {
+                r5 = cpu.read32(r9); r9 = r9.wrapping_add(4); // 06037be2 mov.l @r9+,r5
+                cpu.write32(r11.wrapping_add(12), r1); // 06037be4 mov.l r1,@(12,r11)
+                cpu.write32(r11.wrapping_add(16), r2); // 06037be6 mov.l r2,@(16,r11)
+                cpu.write32(r11.wrapping_add(20), r3); // 06037be8 mov.l r3,@(20,r11)
+                let to = r5; // 06037bea jmp @r5
+                cpu.write32(r11.wrapping_add(24), r4); // 06037bec mov.l r4,@(24,r11)
+                pc = to;
+            }
+            0x06037bf2 => {
+                r4 = cpu.read32(r4.wrapping_add(0)); // 06037bf2 mov.l @(0,r4),r4
+                r3 = r5; // 06037bf4 mov r5,r3
+                r5 = cpu.read32(r9); r9 = r9.wrapping_add(4); // 06037bf6 mov.l @r9+,r5
+                pc = 0x06037bf8;
+            }
+            0x06037bf8 => {
+                r0 = cpu.read16(r11.wrapping_add(0)) as i16 as i32 as u32; // 06037bf8 mov.w @(0,r11),r0
+                cpu.write32(r11.wrapping_add(16), r1); // 06037bfa mov.l r1,@(16,r11)
+                r0 ^= 16; // 06037bfc xor #16,r0
+                cpu.write16(r11.wrapping_add(0), r0 as u16); // 06037bfe mov.w r0,@(0,r11)
+                cpu.write32(r11.wrapping_add(12), r2); // 06037c00 mov.l r2,@(12,r11)
+                cpu.write32(r11.wrapping_add(24), r3); // 06037c02 mov.l r3,@(24,r11)
+                let to = r5; // 06037c04 jmp @r5
+                cpu.write32(r11.wrapping_add(20), r4); // 06037c06 mov.l r4,@(20,r11)
+                pc = to;
+            }
+            0x06037c08 => {
+                r4 = r5; // 06037c08 mov r5,r4
+                r5 = cpu.read32(r9); r9 = r9.wrapping_add(4); // 06037c0a mov.l @r9+,r5
+                pc = 0x06037c0c;
+            }
+            0x06037c0c => {
+                r0 = cpu.read16(r11.wrapping_add(0)) as i16 as i32 as u32; // 06037c0c mov.w @(0,r11),r0
+                cpu.write32(r11.wrapping_add(20), r1); // 06037c0e mov.l r1,@(20,r11)
+                r0 ^= 48; // 06037c10 xor #48,r0
+                cpu.write16(r11.wrapping_add(0), r0 as u16); // 06037c12 mov.w r0,@(0,r11)
+                cpu.write32(r11.wrapping_add(24), r2); // 06037c14 mov.l r2,@(24,r11)
+                cpu.write32(r11.wrapping_add(12), r3); // 06037c16 mov.l r3,@(12,r11)
+                let to = r5; // 06037c18 jmp @r5
+                cpu.write32(r11.wrapping_add(16), r4); // 06037c1a mov.l r4,@(16,r11)
+                pc = to;
+            }
+            0x06037c1e => {
+                r5 = cpu.read32(r9); r9 = r9.wrapping_add(4); // 06037c1e mov.l @r9+,r5
+                pc = 0x06037c20;
+            }
+            0x06037c20 => {
+                r0 = cpu.read16(r11.wrapping_add(0)) as i16 as i32 as u32; // 06037c20 mov.w @(0,r11),r0
+                cpu.write32(r11.wrapping_add(24), r1); // 06037c22 mov.l r1,@(24,r11)
+                r0 ^= 32; // 06037c24 xor #32,r0
+                cpu.write16(r11.wrapping_add(0), r0 as u16); // 06037c26 mov.w r0,@(0,r11)
+                cpu.write32(r11.wrapping_add(20), r2); // 06037c28 mov.l r2,@(20,r11)
+                cpu.write32(r11.wrapping_add(16), r3); // 06037c2a mov.l r3,@(16,r11)
+                let to = r5; // 06037c2c jmp @r5
+                cpu.write32(r11.wrapping_add(12), r4); // 06037c2e mov.l r4,@(12,r11)
+                pc = to;
+            }
+            0x06037c30 => {
+                mac = 0; // 06037c30 clrmac 
+                r5 = w; // 06037c32 stc gbr,r5
+                r4 = r15; // 06037c34 mov r15,r4
+                r5 = r5.wrapping_add(88i32 as u32); // 06037c36 add #88,r5
+                { let x = cpu.read32(r4) as i32 as i64; r4 = r4.wrapping_add(4); let y = cpu.read32(r5) as i32 as i64; r5 = r5.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06037c38 mac.l @r4+,@r5+
+                r0 = cpu.read16(r8.wrapping_add(6)) as i16 as i32 as u32; // 06037c3a mov.w @(6,r8),r0
+                r1 = 31i32 as u32; // 06037c3c mov #31,r1
+                r3 = (r0 & 0xffff_0000) | ((r0 & 0xff) << 8) | ((r0 >> 8) & 0xff); // 06037c3e swap.b r0,r3
+                { let x = cpu.read32(r4) as i32 as i64; r4 = r4.wrapping_add(4); let y = cpu.read32(r5) as i32 as i64; r5 = r5.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06037c40 mac.l @r4+,@r5+
+                r3 >>= 2; // 06037c42 shlr2 r3
+                r3 &= r1; // 06037c44 and r1,r3
+                r1 &= r0; // 06037c46 and r0,r1
+                { let x = cpu.read32(r4) as i32 as i64; r4 = r4.wrapping_add(4); let y = cpu.read32(r5) as i32 as i64; r5 = r5.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06037c48 mac.l @r4+,@r5+
+                r0 >>= 2; // 06037c4a shlr2 r0
+                r0 >>= 2; // 06037c4c shlr2 r0
+                r2 = 31i32 as u32; // 06037c4e mov #31,r2
+                t = r0 & 1 != 0; r0 >>= 1; // 06037c50 shlr r0
+                r2 &= r0; // 06037c52 and r0,r2
+                r5 = (mac >> 32) as u32; // 06037c54 sts mach,r5
+                r4 = mac as u32; // 06037c56 sts macl,r4
+                t = r5 & r5 == 0; // 06037c58 tst r5,r5
+                let take = t; // 06037c5a bt/s 0x6037c70
+                r0 = cpu.read32(w.wrapping_add(100)); // 06037c5c mov.l @(100,gbr),r0
+                pc = if take { 0x06037c70 } else { 0x06037c5e };
+            }
+            0x06037c5e => {
+                r5 = r5.wrapping_add(1i32 as u32); // 06037c5e add #1,r5
+                t = r5 & r5 == 0; // 06037c60 tst r5,r5
+                pc = if t { 0x06037c74 } else { 0x06037c64 }; // 06037c62 bt 0x6037c74
+            }
+            0x06037c64 => {
+                r4 = -1i32 as u32; // 06037c64 mov #-1,r4
+                t = r5 as i32 > 0; // 06037c66 cmp/pl r5
+                let take = t; // 06037c68 bt/s 0x6037c7c
+                r4 = r4 & 0xff; // 06037c6a extu.b r4,r4
+                pc = if take { 0x06037c7c } else { 0x06037c6c };
+            }
+            0x06037c6c => {
+                // 06037c6c bra 0x6037c84
+                // nop // 06037c6e nop 
+                pc = 0x06037c84;
+            }
+            0x06037c70 => {
+                r5 = -128i32 as u32; // 06037c70 mov #-128,r5
+                r5 = r5 & 0xff; // 06037c72 extu.b r5,r5
+                pc = 0x06037c74;
+            }
+            0x06037c74 => {
+                r4 >>= 16; // 06037c74 shlr16 r4
+                r4 >>= 8; // 06037c76 shlr8 r4
+                t = r4 & 1 != 0; r4 >>= 1; // 06037c78 shlr r4
+                r4 |= r5; // 06037c7a or r5,r4
+                pc = 0x06037c7c;
+            }
+            0x06037c7c => {
+                r5 = -8i32 as u32; // 06037c7c mov #-8,r5
+                r4 &= r5; // 06037c7e and r5,r4
+                r4 <<= 2; // 06037c80 shll2 r4
+                r0 = r0.wrapping_add(r4); // 06037c82 add r4,r0
+                pc = 0x06037c84;
+            }
+            0x06037c84 => {
+                r5 = 4i32 as u32; // 06037c84 mov #4,r5
+                r5 <<= 8; // 06037c86 shll8 r5
+                r1 = cpu.read8(r0.wrapping_add(r1)) as i8 as i32 as u32; // 06037c88 mov.b @(r0,r1),r1
+                r0 = r0.wrapping_add(r5); // 06037c8a add r5,r0
+                r2 = cpu.read8(r0.wrapping_add(r2)) as i8 as i32 as u32; // 06037c8c mov.b @(r0,r2),r2
+                r0 = r0.wrapping_add(r5); // 06037c8e add r5,r0
+                r0 = cpu.read8(r0.wrapping_add(r3)) as i8 as i32 as u32; // 06037c90 mov.b @(r0,r3),r0
+                r0 |= 32; // 06037c92 or #32,r0
+                r0 = (r0 & 0xffff_0000) | ((r0 & 0xff) << 8) | ((r0 >> 8) & 0xff); // 06037c94 swap.b r0,r0
+                r2 <<= 2; // 06037c96 shll2 r2
+                t = r2 >> 31 != 0; r2 <<= 1; // 06037c98 shll r2
+                r0 = r0.wrapping_add(r2); // 06037c9a add r2,r0
+                r0 <<= 2; // 06037c9c shll2 r0
+                r1 |= r0; // 06037c9e or r0,r1
+                r0 = cpu.read16(r8.wrapping_add(4)) as i16 as i32 as u32; // 06037ca0 mov.w @(4,r8),r0
+                r1 <<= 16; // 06037ca2 shll16 r1
+                r1 = (r0 << 16) | (r1 >> 16); // 06037ca4 xtrct r0,r1
+                r0 = cpu.read16(r8.wrapping_add(8)) as i16 as i32 as u32; // 06037ca6 mov.w @(8,r8),r0
+                cpu.write32(r11.wrapping_add(4), r1); // 06037ca8 mov.l r1,@(4,r11)
+                // 06037caa rts
+                cpu.write16(r11.wrapping_add(28), r0 as u16); // 06037cac mov.w r0,@(28,r11)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            0x06037cae => {
+                mac = 0; // 06037cae clrmac 
+                r4 = r15; // 06037cb0 mov r15,r4
+                r5 = w; // 06037cb2 stc gbr,r5
+                r5 = r5.wrapping_add(88i32 as u32); // 06037cb4 add #88,r5
+                { let x = cpu.read32(r4) as i32 as i64; r4 = r4.wrapping_add(4); let y = cpu.read32(r5) as i32 as i64; r5 = r5.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06037cb6 mac.l @r4+,@r5+
+                { let x = cpu.read32(r4) as i32 as i64; r4 = r4.wrapping_add(4); let y = cpu.read32(r5) as i32 as i64; r5 = r5.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06037cb8 mac.l @r4+,@r5+
+                r0 = cpu.read32(r8.wrapping_add(4)); // 06037cba mov.l @(4,r8),r0
+                { let x = cpu.read32(r4) as i32 as i64; r4 = r4.wrapping_add(4); let y = cpu.read32(r5) as i32 as i64; r5 = r5.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06037cbc mac.l @r4+,@r5+
+                r1 = 7i32 as u32; // 06037cbe mov #7,r1
+                r5 = (mac >> 32) as u32; // 06037cc0 sts mach,r5
+                r4 = mac as u32; // 06037cc2 sts macl,r4
+                t = r5 & r5 == 0; // 06037cc4 tst r5,r5
+                let take = t; // 06037cc6 bt/s 0x6037cd4
+                r5 = r5.wrapping_add(1i32 as u32); // 06037cc8 add #1,r5
+                pc = if take { 0x06037cd4 } else { 0x06037cca };
+            }
+            0x06037cca => {
+                t = r5 & r5 == 0; // 06037cca tst r5,r5
+                let take = t; // 06037ccc bt/s 0x6037cd6
+                t = r5 as i32 >= 0; // 06037cce cmp/pz r5
+                pc = if take { 0x06037cd6 } else { 0x06037cd0 };
+            }
+            0x06037cd0 => {
+                let take = !t; // 06037cd0 bf/s 0x6037ce2
+                r4 = -1i32 as u32; // 06037cd2 mov #-1,r4
+                pc = if take { 0x06037ce2 } else { 0x06037cd4 };
+            }
+            0x06037cd4 => {
+                r5 = 8i32 as u32; // 06037cd4 mov #8,r5
+                pc = 0x06037cd6;
+            }
+            0x06037cd6 => {
+                t = r4 >> 31 != 0; r4 = r4.rotate_left(1); // 06037cd6 rotl r4
+                t = r4 >> 31 != 0; r4 = r4.rotate_left(1); // 06037cd8 rotl r4
+                t = r4 >> 31 != 0; r4 = r4.rotate_left(1); // 06037cda rotl r4
+                r4 &= r1; // 06037cdc and r1,r4
+                r4 |= r5; // 06037cde or r5,r4
+                r0 = r0.wrapping_add(r4); // 06037ce0 add r4,r0
+                pc = 0x06037ce2;
+            }
+            0x06037ce2 => {
+                // 06037ce2 rts
+                cpu.write32(r11.wrapping_add(4), r0); // 06037ce4 mov.l r0,@(4,r11)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            0x06037ce6 => {
+                r0 = cpu.read16(r8.wrapping_add(2)) as i16 as i32 as u32; // 06037ce6 mov.w @(2,r8),r0
+                r1 = cpu.read32(r15.wrapping_add(20)); // 06037ce8 mov.l @(20,r15),r1
+                r0 <<= 2; // 06037cea shll2 r0
+                r0 = r0.wrapping_add(r0); // 06037cec add r0,r0
+                r0 = cpu.read32(r0.wrapping_add(r1)); // 06037cee mov.l @(r0,r1),r0
+                mac = 0; // 06037cf0 clrmac 
+                cpu.write32(r11.wrapping_add(8), r0); // 06037cf2 mov.l r0,@(8,r11)
+                r5 = w; // 06037cf4 stc gbr,r5
+                r4 = r15; // 06037cf6 mov r15,r4
+                r5 = r5.wrapping_add(88i32 as u32); // 06037cf8 add #88,r5
+                { let x = cpu.read32(r4) as i32 as i64; r4 = r4.wrapping_add(4); let y = cpu.read32(r5) as i32 as i64; r5 = r5.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06037cfa mac.l @r4+,@r5+
+                r3 = cpu.read32(r8.wrapping_add(4)); // 06037cfc mov.l @(4,r8),r3
+                { let x = cpu.read32(r4) as i32 as i64; r4 = r4.wrapping_add(4); let y = cpu.read32(r5) as i32 as i64; r5 = r5.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06037cfe mac.l @r4+,@r5+
+                r0 = r3.rotate_left(16); // 06037d00 swap.w r3,r0
+                r0 &= 56; // 06037d02 and #56,r0
+                { let x = cpu.read32(r4) as i32 as i64; r4 = r4.wrapping_add(4); let y = cpu.read32(r5) as i32 as i64; r5 = r5.wrapping_add(4); mac = mac.wrapping_add(x * y); if cpu.sh2.sr & 2 != 0 { mac = mac.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff); } } // 06037d04 mac.l @r4+,@r5+
+                t = r0 == 8i32 as u32; // 06037d06 cmp/eq #8,r0
+                pc = if t { 0x06037d0e } else { 0x06037d0a }; // 06037d08 bt 0x6037d0e
+            }
+            0x06037d0a => {
+                t = r0 == 40i32 as u32; // 06037d0a cmp/eq #40,r0
+                pc = if !t { 0x06037d42 } else { 0x06037d0e }; // 06037d0c bf 0x6037d42
+            }
+            0x06037d0e => {
+                r0 = 0xffffffe0; // 06037d0e mov.w 0x6037d4a,r0
+                r1 = (mac >> 32) as u32; // 06037d10 sts mach,r1
+                r2 = mac as u32; // 06037d12 sts macl,r2
+                t = r1 & r1 == 0; // 06037d14 tst r1,r1
+                let take = t; // 06037d16 bt/s 0x6037d24
+                r1 = r1.wrapping_add(1i32 as u32); // 06037d18 add #1,r1
+                pc = if take { 0x06037d24 } else { 0x06037d1a };
+            }
+            0x06037d1a => {
+                t = r1 & r1 == 0; // 06037d1a tst r1,r1
+                let take = t; // 06037d1c bt/s 0x6037d26
+                t = r1 as i32 >= 0; // 06037d1e cmp/pz r1
+                pc = if take { 0x06037d26 } else { 0x06037d20 };
+            }
+            0x06037d20 => {
+                let take = !t; // 06037d20 bf/s 0x6037d32
+                r2 = -1i32 as u32; // 06037d22 mov #-1,r2
+                pc = if take { 0x06037d32 } else { 0x06037d24 };
+            }
+            0x06037d24 => {
+                r1 = 16i32 as u32; // 06037d24 mov #16,r1
+                pc = 0x06037d26;
+            }
+            0x06037d26 => {
+                r2 >>= 16; // 06037d26 shlr16 r2
+                r2 >>= 8; // 06037d28 shlr8 r2
+                r2 >>= 2; // 06037d2a shlr2 r2
+                r2 >>= 2; // 06037d2c shlr2 r2
+                r2 |= r1; // 06037d2e or r1,r2
+                r0 = r0.wrapping_add(r2); // 06037d30 add r2,r0
+                pc = 0x06037d32;
+            }
+            0x06037d32 => {
+                r2 = -8i32 as u32; // 06037d32 mov #-8,r2
+                cpu.write16(r11.wrapping_add(28), r0 as u16); // 06037d34 mov.w r0,@(28,r11)
+                r0 = r3.rotate_left(16); // 06037d36 swap.w r3,r0
+                r0 &= r2; // 06037d38 and r2,r0
+                r0 |= 4; // 06037d3a or #4,r0
+                r0 = r0.rotate_left(16); // 06037d3c swap.w r0,r0
+                // 06037d3e rts
+                cpu.write32(r11.wrapping_add(4), r0); // 06037d40 mov.l r0,@(4,r11)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            0x06037d42 => {
+                r0 = cpu.read16(r8.wrapping_add(8)) as i16 as i32 as u32; // 06037d42 mov.w @(8,r8),r0
+                cpu.write32(r11.wrapping_add(4), r3); // 06037d44 mov.l r3,@(4,r11)
+                // 06037d46 rts
+                cpu.write16(r11.wrapping_add(28), r0 as u16); // 06037d48 mov.w r0,@(28,r11)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            0x06037e64 => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r2); // 06037e64 mov.l r2,@-r15
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r1); // 06037e66 mov.l r1,@-r15
+                r1 = 0x060383cc; // 06037e68 mov.l 0x6037ea8,r1
+                r13 = cpu.read32(r1.wrapping_add(0)); // 06037e6a mov.l @(0,r1),r13
+                r12 = cpu.read32(r1.wrapping_add(4)); // 06037e6c mov.l @(4,r1),r12
+                r5 = r14; // 06037e6e mov r14,r5
+                t = r13 as i32 >= r5 as i32; // 06037e70 cmp/ge r5,r13
+                let take = t; // 06037e72 bt/s 0x6037e8e
+                r0 = 0i32 as u32; // 06037e74 mov #0,r0
+                pc = if take { 0x06037e8e } else { 0x06037e76 };
+            }
+            0x06037e76 => {
+                r5 = r5.wrapping_sub(r13); // 06037e76 sub r13,r5
+                t = r5 as i32 >= r12 as i32; // 06037e78 cmp/ge r12,r5
+                let take = t; // 06037e7a bt/s 0x6037e8e
+                r0 = cpu.read16(r1.wrapping_add(10)) as i16 as i32 as u32; // 06037e7c mov.w @(10,r1),r0
+                pc = if take { 0x06037e8e } else { 0x06037e7e };
+            }
+            0x06037e7e => {
+                r0 = cpu.read16(r1.wrapping_add(8)) as i16 as i32 as u32; // 06037e7e mov.w @(8,r1),r0
+                r2 = r0; // 06037e80 mov r0,r2
+                t = r0 == 0i32 as u32; // 06037e82 cmp/eq #0,r0
+                let take = t; // 06037e84 bt/s 0x6037e8e
+                r0 = r5; // 06037e86 mov r5,r0
+                pc = if take { 0x06037e8e } else { 0x06037e88 };
+            }
+            0x06037e88 => {
+                r2 = r2.wrapping_sub(1); t = r2 == 0; // 06037e88 dt r2
+                let take = !t; // 06037e8a bf/s 0x6037e88
+                t = r0 & 1 != 0; r0 >>= 1; // 06037e8c shlr r0
+                pc = if take { 0x06037e88 } else { 0x06037e8e };
+            }
+            0x06037e8e => {
+                r5 = r0; // 06037e8e mov r0,r5
+                r0 = cpu.read16(r1.wrapping_add(12)) as i16 as i32 as u32; // 06037e90 mov.w @(12,r1),r0
+                r0 = r0.wrapping_add(r5); // 06037e92 add r5,r0
+                cpu.write16(r8.wrapping_add(8), r0 as u16); // 06037e94 mov.w r0,@(8,r8)
+                r0 = cpu.read16(r8.wrapping_add(4)) as i16 as i32 as u32; // 06037e96 mov.w @(4,r8),r0
+                r0 |= 4; // 06037e98 or #4,r0
+                cpu.write16(r8.wrapping_add(4), r0 as u16); // 06037e9a mov.w r0,@(4,r8)
+                r1 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06037e9c mov.l @r15+,r1
+                r2 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06037e9e mov.l @r15+,r2
+                r0 = 0x06037b2c; // 06037ea0 mov.l 0x6037eac,r0
+                let to = r0; // 06037ea2 jmp @r0
+                // nop // 06037ea4 nop 
+                pc = to;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+/// 4: the frame's end on the slave: the depth table walked from the farthest list to the nearest
+/// (128 lists), each list's commands linked in turn into VDP1's command list (SGL's, from
+/// 0x060089bc: jumps to each command, the window's clipping commands where the drawing changes
+/// window), the lists emptied. SGL's code block by block (asm2sm.py).
+pub fn slave_frame_draw(cpu: &mut Cpu) {
+    slave_handler_4_blocks(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn slave_handler_4_blocks(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x06036ab0;
+    loop {
+        match pc {
+            0x06036ab0 => {
+                r10 = 0x060089c0; // 06036ab0 mov.l 0x6036bc4,r10
+                r11 = 0x060089bc; // 06036ab2 mov.l 0x6036bc0,r11
+                r10 = cpu.read32(r10); // 06036ab4 mov.l @r10,r10
+                r12 = 0x00000400; // 06036ab6 mov.w 0x6036bba,r12
+                r11 = cpu.read32(r11); // 06036ab8 mov.l @r11,r11
+                r0 = 0x260ffcb0; // 06036aba mov.l 0x6036be0,r0
+                r10 = r10.wrapping_add(r12); // 06036abc add r12,r10
+                r0 = cpu.read8(r0) as i8 as i32 as u32; // 06036abe mov.b @r0,r0
+                r12 = r10; // 06036ac0 mov r10,r12
+                t = r0 & 128 == 0; // 06036ac2 tst #128,r0
+                let take = t; // 06036ac4 bt/s 0x6036ace
+                r10 = r10.wrapping_add(-4i32 as u32); // 06036ac6 add #-4,r10
+                pc = if take { 0x06036ace } else { 0x06036ac8 };
+            }
+            0x06036ac8 => {
+                r0 = 0x060364cc; // 06036ac8 mov.l 0x6036be4,r0
+                cpu.write32(r11.wrapping_add(8), r0); // 06036aca mov.l r0,@(8,r11)
+                r11 = r11.wrapping_add(12i32 as u32); // 06036acc add #12,r11
+                pc = 0x06036ace;
+            }
+            0x06036ace => {
+                r9 = 0x00000080; // 06036ace mov.w 0x6036bbc,r9
+                r8 = cpu.read32(r10); // 06036ad0 mov.l @r10,r8
+                pc = 0x06036ad2;
+            }
+            0x06036ad2 => {
+                r10 = r10.wrapping_add(-4i32 as u32); // 06036ad2 add #-4,r10
+                t = r8 & r8 == 0; // 06036ad4 tst r8,r8
+                let take = !t; // 06036ad6 bf/s 0x6036afa
+                r9 = r9.wrapping_sub(1); t = r9 == 0; // 06036ad8 dt r9
+                pc = if take { 0x06036afa } else { 0x06036ada };
+            }
+            0x06036ada => {
+                let take = !t; // 06036ada bf/s 0x6036ad2
+                r8 = cpu.read32(r10); // 06036adc mov.l @r10,r8
+                pc = if take { 0x06036ad2 } else { 0x06036ade };
+            }
+            0x06036ade => {
+                r0 = cpu.read8(w.wrapping_add(169)) as i8 as i32 as u32; // 06036ade mov.b @(169,gbr),r0
+                t = r0 & 32 == 0; // 06036ae0 tst #32,r0
+                let take = t; // 06036ae2 bt/s 0x6036b5c
+                r0 = 0i32 as u32; // 06036ae4 mov #0,r0
+                pc = if take { 0x06036b5c } else { 0x06036ae6 };
+            }
+            0x06036ae6 => {
+                cpu.write8(w.wrapping_add(169), r0 as u8); // 06036ae6 mov.b r0,@(169,gbr)
+                r0 = r10; // 06036ae8 mov r10,r0
+                r1 = 0x060fff00; // 06036aea mov.l 0x6036bcc,r1
+                r0 = r0.wrapping_add(4i32 as u32); // 06036aec add #4,r0
+                r2 = 0x060fff2c; // 06036aee mov.l 0x6036bd4,r2
+                cpu.write32(w.wrapping_add(56), r0); // 06036af0 mov.l r0,@(56,gbr)
+                cpu.write32(r11.wrapping_add(8), r1); // 06036af2 mov.l r1,@(8,r11)
+                cpu.write32(r11.wrapping_add(20), r2); // 06036af4 mov.l r2,@(20,r11)
+                // 06036af6 bra 0x6036ace
+                r11 = r11.wrapping_add(24i32 as u32); // 06036af8 add #24,r11
+                pc = 0x06036ace;
+            }
+            0x06036afa => {
+                r6 = 0i32 as u32; // 06036afa mov #0,r6
+                r7 = 0i32 as u32; // 06036afc mov #0,r7
+                pc = 0x06036afe;
+            }
+            0x06036afe => {
+                r0 = cpu.read16(r8.wrapping_add(30)) as i16 as i32 as u32; // 06036afe mov.w @(30,r8),r0
+                r2 = cpu.read32(r8.wrapping_add(32)); // 06036b00 mov.l @(32,r8),r2
+                r0 = r0 & 0xff; // 06036b02 extu.b r0,r0
+                r0 <<= 2; // 06036b04 shll2 r0
+                t = r6 >= r0; // 06036b06 cmp/hs r0,r6
+                let take = t; // 06036b08 bt/s 0x6036b0e
+                r1 = cpu.read32(r0.wrapping_add(r12)); // 06036b0a mov.l @(r0,r12),r1
+                pc = if take { 0x06036b0e } else { 0x06036b0c };
+            }
+            0x06036b0c => {
+                r6 = r0; // 06036b0c mov r0,r6
+                pc = 0x06036b0e;
+            }
+            0x06036b0e => {
+                cpu.write32(r8.wrapping_add(32), r1); // 06036b0e mov.l r1,@(32,r8)
+                r7 = r7.wrapping_add(1i32 as u32); // 06036b10 add #1,r7
+                cpu.write32(r0.wrapping_add(r12), r8); // 06036b12 mov.l r8,@(r0,r12)
+                t = r2 & r2 == 0; // 06036b14 tst r2,r2
+                let take = !t; // 06036b16 bf/s 0x6036afe
+                r8 = r2; // 06036b18 mov r2,r8
+                pc = if take { 0x06036afe } else { 0x06036b1a };
+            }
+            0x06036b1a => {
+                cpu.write32(r10.wrapping_add(4), r2); // 06036b1a mov.l r2,@(4,r10)
+                r8 = r12; // 06036b1c mov r12,r8
+                r8 = r8.wrapping_add(r6); // 06036b1e add r6,r8
+                pc = 0x06036b20;
+            }
+            0x06036b20 => {
+                r6 = cpu.read32(r8); // 06036b20 mov.l @r8,r6
+                r8 = r8.wrapping_add(-4i32 as u32); // 06036b22 add #-4,r8
+                t = r6 & r6 == 0; // 06036b24 tst r6,r6
+                pc = if t { 0x06036b20 } else { 0x06036b28 }; // 06036b26 bt 0x6036b20
+            }
+            0x06036b28 => {
+                r0 = cpu.read32(r6.wrapping_add(32)); // 06036b28 mov.l @(32,r6),r0
+                cpu.write32(r11.wrapping_add(8), r6); // 06036b2a mov.l r6,@(8,r11)
+                r11 = r11.wrapping_add(12i32 as u32); // 06036b2c add #12,r11
+                r6 = r0; // 06036b2e mov r0,r6
+                t = r0 & r0 == 0; // 06036b30 tst r0,r0
+                let take = !t; // 06036b32 bf/s 0x6036b28
+                r7 = r7.wrapping_sub(1); t = r7 == 0; // 06036b34 dt r7
+                pc = if take { 0x06036b28 } else { 0x06036b36 };
+            }
+            0x06036b36 => {
+                let take = !t; // 06036b36 bf/s 0x6036b20
+                cpu.write32(r8.wrapping_add(4), r0); // 06036b38 mov.l r0,@(4,r8)
+                pc = if take { 0x06036b20 } else { 0x06036b3a };
+            }
+            0x06036b3a => {
+                t = r9 & r9 == 0; // 06036b3a tst r9,r9
+                let take = !t; // 06036b3c bf/s 0x6036ad2
+                r8 = cpu.read32(r10); // 06036b3e mov.l @r10,r8
+                pc = if take { 0x06036ad2 } else { 0x06036b40 };
+            }
+            0x06036b40 => {
+                r0 = cpu.read8(w.wrapping_add(169)) as i8 as i32 as u32; // 06036b40 mov.b @(169,gbr),r0
+                t = r0 & 32 == 0; // 06036b42 tst #32,r0
+                let take = t; // 06036b44 bt/s 0x6036b5c
+                r0 = 0i32 as u32; // 06036b46 mov #0,r0
+                pc = if take { 0x06036b5c } else { 0x06036b48 };
+            }
+            0x06036b48 => {
+                cpu.write8(w.wrapping_add(169), r0 as u8); // 06036b48 mov.b r0,@(169,gbr)
+                r0 = r10; // 06036b4a mov r10,r0
+                r0 = r0.wrapping_add(4i32 as u32); // 06036b4c add #4,r0
+                r1 = 0x060fff00; // 06036b4e mov.l 0x6036bcc,r1
+                r2 = 0x060fff2c; // 06036b50 mov.l 0x6036bd4,r2
+                cpu.write32(w.wrapping_add(56), r0); // 06036b52 mov.l r0,@(56,gbr)
+                cpu.write32(r11.wrapping_add(8), r1); // 06036b54 mov.l r1,@(8,r11)
+                cpu.write32(r11.wrapping_add(20), r2); // 06036b56 mov.l r2,@(20,r11)
+                // 06036b58 bra 0x6036ace
+                r11 = r11.wrapping_add(24i32 as u32); // 06036b5a add #24,r11
+                pc = 0x06036ace;
+            }
+            0x06036b5c => {
+                r2 = 0x86036bbe; // 06036b5c mov.l 0x6036bd8,r2
+                cpu.write32(r11.wrapping_add(8), r2); // 06036b5e mov.l r2,@(8,r11)
+                r1 = cpu.read32(r11.wrapping_add(4)); // 06036b60 mov.l @(4,r11),r1
+                r0 = 1i32 as u32; // 06036b62 mov #1,r0
+                cpu.write8(w.wrapping_add(168), r0 as u8); // 06036b64 mov.b r0,@(168,gbr)
+                r0 = r1 & 0xffff; // 06036b66 extu.w r1,r0
+                r0 >>= 2; // 06036b68 shlr2 r0
+                r0 >>= 2; // 06036b6a shlr2 r0
+                t = r0 & 1 != 0; r0 >>= 1; // 06036b6c shlr r0
+                r0 = r0.wrapping_add(-3i32 as u32); // 06036b6e add #-3,r0
+                cpu.write16(w.wrapping_add(164), r0 as u16); // 06036b70 mov.w r0,@(164,gbr)
+                r0 = -1i32 as u32; // 06036b72 mov #-1,r0
+                cpu.write8(w.wrapping_add(166), r0 as u8); // 06036b74 mov.b r0,@(166,gbr)
+                r6 = 0x060ffefc; // 06036b76 mov.l 0x6036bc8,r6
+                r4 = r4.wrapping_add(-4i32 as u32); // 06036b78 add #-4,r4
+                r7 = 0x25c00020; // 06036b7a mov.l 0x6036bec,r7
+                r0 = cpu.read32(r6.wrapping_add(0)); // 06036b7c mov.l @(0,r6),r0
+                r1 = cpu.read32(r6.wrapping_add(12)); // 06036b7e mov.l @(12,r6),r1
+                r2 = cpu.read32(r6.wrapping_add(20)); // 06036b80 mov.l @(20,r6),r2
+                cpu.write32(r7.wrapping_add(0), r0); // 06036b82 mov.l r0,@(0,r7)
+                cpu.write32(r7.wrapping_add(12), r1); // 06036b84 mov.l r1,@(12,r7)
+                cpu.write32(r7.wrapping_add(20), r2); // 06036b86 mov.l r2,@(20,r7)
+                r0 = cpu.read32(r6.wrapping_add(44)); // 06036b88 mov.l @(44,r6),r0
+                r1 = cpu.read32(r6.wrapping_add(56)); // 06036b8a mov.l @(56,r6),r1
+                cpu.write32(r7.wrapping_add(32), r0); // 06036b8c mov.l r0,@(32,r7)
+                cpu.write32(r7.wrapping_add(44), r1); // 06036b8e mov.l r1,@(44,r7)
+                r2 = 0x060089c4; // 06036b90 mov.l 0x6036bdc,r2
+                r0 = cpu.read32(w.wrapping_add(64)); // 06036b92 mov.l @(64,gbr),r0
+                r2 = cpu.read32(r2); // 06036b94 mov.l @r2,r2
+                r0 = r0.wrapping_add(r2); // 06036b96 add r2,r0
+                cpu.write32(w.wrapping_add(52), r0); // 06036b98 mov.l r0,@(52,gbr)
+                r1 = -92i32 as u32; // 06036b9a mov #-92,r1
+                r1 <<= 2; // 06036b9c shll2 r1
+                r0 = 17i32 as u32; // 06036b9e mov #17,r0
+                cpu.write8(r1.wrapping_add(2), r0 as u8); // 06036ba0 mov.b r0,@(2,r1)
+                // nop // 06036ba2 nop 
+                // nop // 06036ba4 nop 
+                // nop // 06036ba6 nop 
+                // nop // 06036ba8 nop 
+                // nop // 06036baa nop 
+                // nop // 06036bac nop 
+                // nop // 06036bae nop 
+                // nop // 06036bb0 nop 
+                // nop // 06036bb2 nop 
+                // nop // 06036bb4 nop 
+                // 06036bb6 rts
+                // nop // 06036bb8 nop 
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+
+/// 8: the slave's screen set up for a TV mode (the first word): the screen's width and height from
+/// SGL's table of modes (the windows' size, the default depth the width), both windows back to
+/// level 1, far limit 0x3fff and that depth, the light, the points room and polygon buffers, the
+/// depth tables cleared (0x060361ec, 64 pairs a call), the shade tables made (0x060361fe), VDP1's
+/// command list laid out (a jump every 32 bytes), the cache purged. SGL's code block by block
+/// (asm2sm.py).
+pub fn slave_screen(cpu: &mut Cpu) {
+    slave_handler_8_blocks(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn slave_handler_8_blocks(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x06036292;
+    loop {
+        match pc {
+            0x06036292 => {
+                r2 = 0x060357a0; // 06036292 mov.l 0x603637c,r2
+                r0 &= 124; // 06036294 and #124,r0
+                r0 = r0.wrapping_add(r2); // 06036296 add r2,r0
+                r2 = cpu.read16(r0) as i16 as i32 as u32; r0 = r0.wrapping_add(2); // 06036298 mov.w @r0+,r2
+                r3 = cpu.read16(r0) as i16 as i32 as u32; // 0603629a mov.w @r0,r3
+                r5 = 0x060fff28; // 0603629c mov.l 0x6036380,r5
+                r7 = 0x060364cc; // 0603629e mov.l 0x6036390,r7
+                r0 = r3.rotate_left(16); // 060362a0 swap.w r3,r0
+                r0 = (r2 << 16) | (r0 >> 16); // 060362a2 xtrct r2,r0
+                cpu.write32(r5.wrapping_add(12), r0); // 060362a4 mov.l r0,@(12,r5)
+                cpu.write32(r5.wrapping_add(16), r0); // 060362a6 mov.l r0,@(16,r5)
+                cpu.write32(w.wrapping_add(148), r0); // 060362a8 mov.l r0,@(148,gbr)
+                r0 = r0.wrapping_add(r0); // 060362aa add r0,r0
+                cpu.write32(w.wrapping_add(816), r0); // 060362ac mov.l r0,@(816,gbr)
+                r0 = r2.wrapping_neg(); // 060362ae neg r2,r0
+                r1 = r3.wrapping_neg(); // 060362b0 neg r3,r1
+                r1 <<= 16; // 060362b2 shll16 r1
+                r1 = (r0 << 16) | (r1 >> 16); // 060362b4 xtrct r0,r1
+                cpu.write32(r7.wrapping_add(12), r1); // 060362b6 mov.l r1,@(12,r7)
+                r0 = r2.rotate_left(16); // 060362b8 swap.w r2,r0
+                cpu.write32(w.wrapping_add(108), r0); // 060362ba mov.l r0,@(108,gbr)
+                r0 = 10i32 as u32; // 060362bc mov #10,r0
+                cpu.write16(r5.wrapping_add(4), r0 as u16); // 060362be mov.w r0,@(4,r5)
+                r0 = 0x100a000c; // 060362c0 mov.l 0x6036394,r0
+                cpu.write32(r5.wrapping_add(0), r0); // 060362c2 mov.l r0,@(0,r5)
+                r5 = 0x00000140; // 060362c4 mov.w 0x6036376,r5
+                r0 = 0x00000200; // 060362c6 mov.w 0x6036378,r0
+                r5 = r5.wrapping_add(r2); // 060362c8 add r2,r5
+                r0 = r0.wrapping_add(r3); // 060362ca add r3,r0
+                r0 <<= 16; // 060362cc shll16 r0
+                r0 = (r5 << 16) | (r0 >> 16); // 060362ce xtrct r5,r0
+                cpu.write32(w.wrapping_add(156), r0); // 060362d0 mov.l r0,@(156,gbr)
+                r5 = 0x060ffefc; // 060362d2 mov.l 0x6036488,r5
+                r2 = r2.wrapping_add(r2); // 060362d4 add r2,r2
+                r3 = r3.wrapping_add(r3); // 060362d6 add r3,r3
+                r2 = r2.wrapping_add(-1i32 as u32); // 060362d8 add #-1,r2
+                r3 = r3.wrapping_add(-1i32 as u32); // 060362da add #-1,r3
+                r3 <<= 16; // 060362dc shll16 r3
+                r3 = (r2 << 16) | (r3 >> 16); // 060362de xtrct r2,r3
+                cpu.write32(r5.wrapping_add(20), r3); // 060362e0 mov.l r3,@(20,r5)
+                cpu.write32(r5.wrapping_add(24), r3); // 060362e2 mov.l r3,@(24,r5)
+                cpu.write32(r7.wrapping_add(16), r3); // 060362e4 mov.l r3,@(16,r7)
+                r0 = 1i32 as u32; // 060362e6 mov #1,r0
+                cpu.write8(w.wrapping_add(173), r0 as u8); // 060362e8 mov.b r0,@(173,gbr)
+                r1 = r5; // 060362ea mov r5,r1
+                r1 = r1.wrapping_add(31i32 as u32); // 060362ec add #31,r1
+                cpu.write8(r1.wrapping_add(0), r0 as u8); // 060362ee mov.b r0,@(0,r1)
+                cpu.write8(r1.wrapping_add(4), r0 as u8); // 060362f0 mov.b r0,@(4,r1)
+                r0 = 8i32 as u32; // 060362f2 mov #8,r0
+                cpu.write16(r5.wrapping_add(4), r0 as u16); // 060362f4 mov.w r0,@(4,r5)
+                r0 = 0x10080008; // 060362f6 mov.l 0x6036398,r0
+                cpu.write32(r5.wrapping_add(0), r0); // 060362f8 mov.l r0,@(0,r5)
+                r0 = 0x00003fff; // 060362fa mov.w 0x6036374,r0
+                r1 = r5; // 060362fc mov r5,r1
+                cpu.write16(w.wrapping_add(160), r0 as u16); // 060362fe mov.w r0,@(160,gbr)
+                r1 = r1.wrapping_add(28i32 as u32); // 06036300 add #28,r1
+                cpu.write16(r1, r0 as u16); // 06036302 mov.w r0,@r1
+                cpu.write16(r1.wrapping_add(4), r0 as u16); // 06036304 mov.w r0,@(4,r1)
+                r0 = cpu.read32(w.wrapping_add(108)); // 06036306 mov.l @(108,gbr),r0
+                cpu.write32(r5.wrapping_add(36), r0); // 06036308 mov.l r0,@(36,r5)
+                cpu.write32(r5.wrapping_add(40), r0); // 0603630a mov.l r0,@(40,r5)
+                r0 = 0i32 as u32; // 0603630c mov #0,r0
+                cpu.write32(r5.wrapping_add(12), r0); // 0603630e mov.l r0,@(12,r5)
+                cpu.write32(r5.wrapping_add(16), r0); // 06036310 mov.l r0,@(16,r5)
+                cpu.write8(w.wrapping_add(169), r0 as u8); // 06036312 mov.b r0,@(169,gbr)
+                cpu.write32(w.wrapping_add(900), r0); // 06036314 mov.l r0,@(900,gbr)
+                cpu.write32(w.wrapping_add(908), r0); // 06036316 mov.l r0,@(908,gbr)
+                r0 = 1i32 as u32; // 06036318 mov #1,r0
+                cpu.write32(w.wrapping_add(892), r0); // 0603631a mov.l r0,@(892,gbr)
+                r0 = 0x060089c4; // 0603631c mov.l 0x60364c8,r0
+                r2 = 0x060089c8; // 0603631e mov.l 0x603648c,r2
+                r0 = cpu.read32(r0); // 06036320 mov.l @r0,r0
+                cpu.write32(w.wrapping_add(52), r0); // 06036322 mov.l r0,@(52,gbr)
+                r0 = cpu.read32(r2); // 06036324 mov.l @r2,r0
+                cpu.write32(w.wrapping_add(40), r0); // 06036326 mov.l r0,@(40,gbr)
+                r0 = 0i32 as u32; // 06036328 mov #0,r0
+                cpu.write32(w.wrapping_add(88), r0); // 0603632a mov.l r0,@(88,gbr)
+                cpu.write32(w.wrapping_add(92), r0); // 0603632c mov.l r0,@(92,gbr)
+                cpu.write32(w.wrapping_add(64), r0); // 0603632e mov.l r0,@(64,gbr)
+                r0 = -1i32 as u32; // 06036330 mov #-1,r0
+                r0 <<= 16; // 06036332 shll16 r0
+                cpu.write32(w.wrapping_add(96), r0); // 06036334 mov.l r0,@(96,gbr)
+                r0 = 0x060089c0; // 06036336 mov.l 0x60364c0,r0
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, pr); // 06036338 sts.l pr,@-r15
+                r0 = cpu.read32(r0); // 0603633a mov.l @r0,r0
+                let to = 0x060361ec; // 0603633c bsr 0x60361ec
+                r2 = r0; // 0603633e mov r0,r2
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x06036340;
+                pc = 0x06036340;
+            }
+            0x06036340 => {
+                r0 = r2; // 06036340 mov r2,r0
+                let to = 0x060361ec; // 06036342 bsr 0x60361ec
+                cpu.write32(w.wrapping_add(56), r0); // 06036344 mov.l r0,@(56,gbr)
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x06036346;
+                pc = 0x06036346;
+            }
+            0x06036346 => {
+                let to = 0x060361ec; // 06036346 bsr 0x60361ec
+                // nop // 06036348 nop 
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x0603634a;
+                pc = 0x0603634a;
+            }
+            0x0603634a => {
+                let to = 0x060361ec; // 0603634a bsr 0x60361ec
+                // nop // 0603634c nop 
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x0603634e;
+                pc = 0x0603634e;
+            }
+            0x0603634e => {
+                r0 = 0x060089cc; // 0603634e mov.l 0x6036384,r0
+                r0 = cpu.read32(r0); // 06036350 mov.l @r0,r0
+                let to = 0x060361fe; // 06036352 bsr 0x60361fe
+                cpu.write32(w.wrapping_add(100), r0); // 06036354 mov.l r0,@(100,gbr)
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x06036356;
+                pc = 0x06036356;
+            }
+            0x06036356 => {
+                r3 = 0x060089bc; // 06036356 mov.l 0x60364c4,r3
+                r1 = 0x06004064; // 06036358 mov.l 0x603638c,r1
+                r3 = cpu.read32(r3); // 0603635a mov.l @r3,r3
+                r1 = cpu.read32(r1); // 0603635c mov.l @r1,r1
+                r0 = 0x25c00060; // 0603635e mov.l 0x6036490,r0
+                r1 = r1.wrapping_add(r3); // 06036360 add r3,r1
+                r2 = 30i32 as u32; // 06036362 mov #30,r2
+                pc = 0x06036364;
+            }
+            0x06036364 => {
+                cpu.write32(r3.wrapping_add(4), r0); // 06036364 mov.l r0,@(4,r3)
+                cpu.write32(r3.wrapping_add(0), r2); // 06036366 mov.l r2,@(0,r3)
+                r3 = r3.wrapping_add(12i32 as u32); // 06036368 add #12,r3
+                t = r3 as i32 >= r1 as i32; // 0603636a cmp/ge r1,r3
+                let take = !t; // 0603636c bf/s 0x6036364
+                r0 = r0.wrapping_add(32i32 as u32); // 0603636e add #32,r0
+                pc = if take { 0x06036364 } else { 0x06036370 };
+            }
+            0x06036370 => {
+                // 06036370 bra 0x60364a0
+                pr = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06036372 lds.l @r15+,pr
+                pc = 0x060364a0;
+            }
+            0x060364a0 => {
+                r1 = -92i32 as u32; // 060364a0 mov #-92,r1
+                r1 <<= 2; // 060364a2 shll2 r1
+                r0 = 17i32 as u32; // 060364a4 mov #17,r0
+                cpu.write8(r1.wrapping_add(2), r0 as u8); // 060364a6 mov.b r0,@(2,r1)
+                // nop // 060364a8 nop 
+                // nop // 060364aa nop 
+                // nop // 060364ac nop 
+                // nop // 060364ae nop 
+                // nop // 060364b0 nop 
+                // nop // 060364b2 nop 
+                // nop // 060364b4 nop 
+                // nop // 060364b6 nop 
+                // nop // 060364b8 nop 
+                // nop // 060364ba nop 
+                // 060364bc rts
+                // nop // 060364be nop 
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+
+/// 0x060361ec (slave_screen's): 64 pairs of longs from r2 on cleared.
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+pub fn slave_clear_pairs(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x060361ec;
+    loop {
+        match pc {
+            0x060361ec => {
+                r0 = 0i32 as u32; // 060361ec mov #0,r0
+                r1 = 64i32 as u32; // 060361ee mov #64,r1
+                pc = 0x060361f0;
+            }
+            0x060361f0 => {
+                cpu.write32(r2, r0); // 060361f0 mov.l r0,@r2
+                cpu.write32(r2.wrapping_add(4), r0); // 060361f2 mov.l r0,@(4,r2)
+                r1 = r1.wrapping_sub(1); t = r1 == 0; // 060361f4 dt r1
+                let take = !t; // 060361f6 bf/s 0x60361f0
+                r2 = r2.wrapping_add(8i32 as u32); // 060361f8 add #8,r2
+                pc = if take { 0x060361f0 } else { 0x060361fa };
+            }
+            0x060361fa => {
+                // 060361fa rts
+                // nop // 060361fc nop 
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+
+/// 0x060361fe (slave_screen's): SGL's shade tables made at r0: 32 rows of three bytes (the
+/// shades' brightness ramp, 0-31 clamped, for each of three planes 0x400 apart), then the grey
+/// Gouraud entries at the end of VDP1's VRAM (32 of four words, 0x421 apart).
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+pub fn slave_shade_tables(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x060361fe;
+    loop {
+        match pc {
+            0x060361fe => {
+                r5 = r0; // 060361fe mov r0,r5
+                r2 = 4i32 as u32; // 06036200 mov #4,r2
+                r2 <<= 8; // 06036202 shll8 r2
+                r3 = 32i32 as u32; // 06036204 mov #32,r3
+                r7 = 31i32 as u32; // 06036206 mov #31,r7
+                r0 = 16i32 as u32; // 06036208 mov #16,r0
+                pc = 0x0603620a;
+            }
+            0x0603620a => {
+                r0 = r0.wrapping_sub(r3); // 0603620a sub r3,r0
+                r1 = 32i32 as u32; // 0603620c mov #32,r1
+                pc = 0x0603620e;
+            }
+            0x0603620e => {
+                r6 = 0i32 as u32; // 0603620e mov #0,r6
+                t = r0 as i32 > 0; // 06036210 cmp/pl r0
+                pc = if !t { 0x0603621c } else { 0x06036214 }; // 06036212 bf 0x603621c
+            }
+            0x06036214 => {
+                r6 = r0; // 06036214 mov r0,r6
+                t = r6 as i32 > r7 as i32; // 06036216 cmp/gt r7,r6
+                pc = if !t { 0x0603621c } else { 0x0603621a }; // 06036218 bf 0x603621c
+            }
+            0x0603621a => {
+                r6 = r7; // 0603621a mov r7,r6
+                pc = 0x0603621c;
+            }
+            0x0603621c => {
+                cpu.write8(r5, r6 as u8); // 0603621c mov.b r6,@r5
+                r5 = r5.wrapping_add(r2); // 0603621e add r2,r5
+                cpu.write8(r5, r6 as u8); // 06036220 mov.b r6,@r5
+                r5 = r5.wrapping_add(r2); // 06036222 add r2,r5
+                cpu.write8(r5, r6 as u8); // 06036224 mov.b r6,@r5
+                r5 = r5.wrapping_sub(r2); // 06036226 sub r2,r5
+                r5 = r5.wrapping_sub(r2); // 06036228 sub r2,r5
+                r0 = r0.wrapping_add(1i32 as u32); // 0603622a add #1,r0
+                r1 = r1.wrapping_sub(1); t = r1 == 0; // 0603622c dt r1
+                let take = !t; // 0603622e bf/s 0x603620e
+                r5 = r5.wrapping_add(1i32 as u32); // 06036230 add #1,r5
+                pc = if take { 0x0603620e } else { 0x06036232 };
+            }
+            0x06036232 => {
+                r3 = r3.wrapping_sub(1); t = r3 == 0; // 06036232 dt r3
+                let take = !t; // 06036234 bf/s 0x603620a
+                r0 = 16i32 as u32; // 06036236 mov #16,r0
+                pc = if take { 0x0603620a } else { 0x06036238 };
+            }
+            0x06036238 => {
+                r3 = 0x25c7ff00; // 06036238 mov.l 0x6036388,r3
+                r0 = 0i32 as u32; // 0603623a mov #0,r0
+                r2 = 0x00000421; // 0603623c mov.w 0x603639c,r2
+                r1 = 32i32 as u32; // 0603623e mov #32,r1
+                pc = 0x06036240;
+            }
+            0x06036240 => {
+                cpu.write16(r3.wrapping_add(0), r0 as u16); // 06036240 mov.w r0,@(0,r3)
+                cpu.write16(r3.wrapping_add(2), r0 as u16); // 06036242 mov.w r0,@(2,r3)
+                cpu.write16(r3.wrapping_add(4), r0 as u16); // 06036244 mov.w r0,@(4,r3)
+                cpu.write16(r3.wrapping_add(6), r0 as u16); // 06036246 mov.w r0,@(6,r3)
+                r0 = r0.wrapping_add(r2); // 06036248 add r2,r0
+                r1 = r1.wrapping_sub(1); t = r1 == 0; // 0603624a dt r1
+                let take = !t; // 0603624c bf/s 0x6036240
+                r3 = r3.wrapping_add(8i32 as u32); // 0603624e add #8,r3
+                pc = if take { 0x06036240 } else { 0x06036250 };
+            }
+            0x06036250 => {
+                // 06036250 rts
+                // nop // 06036252 nop 
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+
+/// SGL's drawing set-up (slInitSystem's, with the TV mode and the texture table): the command
+/// buffer begun with the slave's screen set-up (command 8 with the mode, the slave signalled),
+/// VDP1's registers (its TV mode by the screen mode's hi-res bit, the frame change, the plot
+/// trigger, the erase colour and area) and the start of its command list (a system clip, the
+/// end), the master's window (depth, edges, centre, screen size) from SGL's table of modes, the
+/// texture table, the polygon buffer and points room, the counts and light cleared. SGL's code
+/// block by block (asm2sm.py).
+pub fn draw_init(cpu: &mut Cpu) {
+    draw_init_blocks(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn draw_init_blocks(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x060364e0;
+    loop {
+        match pc {
+            0x060364e0 => {
+                r0 = 0x060089d0; // 060364e0 mov.l 0x60365e4,r0
+                r1 = 0x20000000; // 060364e2 mov.l 0x60365e8,r1
+                r0 = cpu.read32(r0); // 060364e4 mov.l @r0,r0
+                r0 |= r1; // 060364e6 or r1,r0
+                cpu.write32(w.wrapping_add(68), r0); // 060364e8 mov.l r0,@(68,gbr)
+                cpu.write32(w.wrapping_add(72), r0); // 060364ea mov.l r0,@(72,gbr)
+                r3 = r0; // 060364ec mov r0,r3
+                r7 = 0x25c00000; // 060364ee mov.l 0x60365ec,r7
+                r6 = 0x25d00000; // 060364f0 mov.l 0x60365f0,r6
+                r0 = 0xffff8000; // 060364f2 mov.w 0x60365da,r0
+                cpu.write16(r7, r0 as u16); // 060364f4 mov.w r0,@r7
+                r0 = cpu.read8(w.wrapping_add(176)) as i8 as i32 as u32; // 060364f6 mov.b @(176,gbr),r0
+                r1 = 31i32 as u32; // 060364f8 mov #31,r1
+                r4 &= r1; // 060364fa and r1,r4
+                r0 &= 128; // 060364fc and #128,r0
+                r0 |= r4; // 060364fe or r4,r0
+                t = r0 & 16 == 0; // 06036500 tst #16,r0
+                pc = if t { 0x06036506 } else { 0x06036504 }; // 06036502 bt 0x6036506
+            }
+            0x06036504 => {
+                r0 &= 127; // 06036504 and #127,r0
+                pc = 0x06036506;
+            }
+            0x06036506 => {
+                cpu.write8(w.wrapping_add(176), r0 as u8); // 06036506 mov.b r0,@(176,gbr)
+                r0 >>= 2; // 06036508 shlr2 r0
+                t = r0 & 1 != 0; r0 >>= 1; // 0603650a shlr r0
+                r0 &= 1; // 0603650c and #1,r0
+                r4 <<= 2; // 0603650e shll2 r4
+                cpu.write16(r6.wrapping_add(0), r0 as u16); // 06036510 mov.w r0,@(0,r6)
+                cpu.write32(r3.wrapping_add(4), r4); // 06036512 mov.l r4,@(4,r3)
+                r1 = 8i32 as u32; // 06036514 mov #8,r1
+                cpu.write32(r3.wrapping_add(0), r1); // 06036516 mov.l r1,@(0,r3)
+                r0 = r3; // 06036518 mov r3,r0
+                r1 = 0x21000000; // 0603651a mov.l 0x603660c,r1
+                r0 = r0.wrapping_add(8i32 as u32); // 0603651c add #8,r0
+                cpu.write32(w.wrapping_add(72), r0); // 0603651e mov.l r0,@(72,gbr)
+                cpu.write16(r1, r0 as u16); // 06036520 mov.w r0,@r1
+                r0 = r5; // 06036522 mov r5,r0
+                cpu.write32(w.wrapping_add(60), r0); // 06036524 mov.l r0,@(60,gbr)
+                r0 = 0x060357a0; // 06036526 mov.l 0x6036608,r0
+                r1 = 1i32 as u32; // 06036528 mov #1,r1
+                r2 = cpu.read32(r0.wrapping_add(r4)); // 0603652a mov.l @(r0,r4),r2
+                r1 <<= 16; // 0603652c shll16 r1
+                r0 = r2.rotate_left(16); // 0603652e swap.w r2,r0
+                r0 <<= 16; // 06036530 shll16 r0
+                cpu.write32(w.wrapping_add(104), r0); // 06036532 mov.l r0,@(104,gbr)
+                r0 = r2.wrapping_neg(); // 06036534 neg r2,r0
+                r0 = r0.wrapping_add(r1); // 06036536 add r1,r0
+                cpu.write32(w.wrapping_add(120), r0); // 06036538 mov.l r0,@(120,gbr)
+                r0 = 0x01400200; // 0603653a mov.l 0x60365e0,r0
+                r1 = r1.wrapping_add(1i32 as u32); // 0603653c add #1,r1
+                r0 = r0.wrapping_add(r2); // 0603653e add r2,r0
+                cpu.write32(w.wrapping_add(152), r0); // 06036540 mov.l r0,@(152,gbr)
+                r0 = r2; // 06036542 mov r2,r0
+                cpu.write32(w.wrapping_add(144), r0); // 06036544 mov.l r0,@(144,gbr)
+                r0 = r0.wrapping_sub(r1); // 06036546 sub r1,r0
+                cpu.write32(w.wrapping_add(124), r0); // 06036548 mov.l r0,@(124,gbr)
+                r2 = r2.wrapping_add(r2); // 0603654a add r2,r2
+                r0 = r2; // 0603654c mov r2,r0
+                cpu.write32(w.wrapping_add(128), r0); // 0603654e mov.l r0,@(128,gbr)
+                cpu.write32(w.wrapping_add(132), r0); // 06036550 mov.l r0,@(132,gbr)
+                r0 = r0.wrapping_sub(r1); // 06036552 sub r1,r0
+                cpu.write32(r7.wrapping_add(20), r0); // 06036554 mov.l r0,@(20,r7)
+                r0 = 0i32 as u32; // 06036556 mov #0,r0
+                cpu.write32(w.wrapping_add(896), r0); // 06036558 mov.l r0,@(896,gbr)
+                cpu.write32(w.wrapping_add(904), r0); // 0603655a mov.l r0,@(904,gbr)
+                r0 = 1i32 as u32; // 0603655c mov #1,r0
+                cpu.write32(w.wrapping_add(888), r0); // 0603655e mov.l r0,@(888,gbr)
+                r0 = 0x02000140; // 06036560 mov.l 0x60365dc,r0
+                cpu.write32(w.wrapping_add(772), r0); // 06036562 mov.l r0,@(772,gbr)
+                r3 <<= 16; // 06036564 shll16 r3
+                r3 |= r0; // 06036566 or r0,r3
+                r3 = r3.wrapping_add(r3); // 06036568 add r3,r3
+                r0 = r2; // 0603656a mov r2,r0
+                r0 = r0.wrapping_add(r3); // 0603656c add r3,r0
+                cpu.write32(w.wrapping_add(140), r0); // 0603656e mov.l r0,@(140,gbr)
+                r1 = 0xffff8000; // 06036570 mov.w 0x60365da,r1
+                r0 = r7; // 06036572 mov r7,r0
+                r0 = r0.wrapping_add(32i32 as u32); // 06036574 add #32,r0
+                cpu.write16(r0, r1 as u16); // 06036576 mov.w r1,@r0
+                r0 = 0x060089c4; // 06036578 mov.l 0x60365f4,r0
+                r1 = 0x06004068; // 0603657a mov.l 0x60365f8,r1
+                r0 = cpu.read32(r0); // 0603657c mov.l @r0,r0
+                r1 = cpu.read32(r1); // 0603657e mov.l @r1,r1
+                r0 = r0.wrapping_add(-36i32 as u32); // 06036580 add #-36,r0
+                t = r1 & 1 != 0; r1 >>= 1; // 06036582 shlr r1
+                r0 = r0.wrapping_add(r1); // 06036584 add r1,r0
+                cpu.write32(w.wrapping_add(48), r0); // 06036586 mov.l r0,@(48,gbr)
+                r0 = 0i32 as u32; // 06036588 mov #0,r0
+                cpu.write32(w.wrapping_add(64), r0); // 0603658a mov.l r0,@(64,gbr)
+                r1 = 0x10090004; // 0603658c mov.l 0x6036610,r1
+                cpu.write32(r7, r1); // 0603658e mov.l r1,@r7
+                r0 = 0i32 as u32; // 06036590 mov #0,r0
+                cpu.write16(r6.wrapping_add(2), r0 as u16); // 06036592 mov.w r0,@(2,r6)
+                r0 = 2i32 as u32; // 06036594 mov #2,r0
+                cpu.write16(r6.wrapping_add(4), r0 as u16); // 06036596 mov.w r0,@(4,r6)
+                r0 = 0i32 as u32; // 06036598 mov #0,r0
+                cpu.write16(w.wrapping_add(114), r0 as u16); // 0603659a mov.w r0,@(114,gbr)
+                cpu.write16(r6.wrapping_add(6), r0 as u16); // 0603659c mov.w r0,@(6,r6)
+                cpu.write16(r6.wrapping_add(8), r0 as u16); // 0603659e mov.w r0,@(8,r6)
+                r0 = 0x000058ff; // 060365a0 mov.w 0x60365d6,r0
+                r1 = 0x060089c8; // 060365a2 mov.l 0x60365fc,r1
+                r2 = 0x06004058; // 060365a4 mov.l 0x6036604,r2
+                r3 = 0x0600405a; // 060365a6 mov.l 0x6036600,r3
+                cpu.write16(r6.wrapping_add(10), r0 as u16); // 060365a8 mov.w r0,@(10,r6)
+                r0 = cpu.read32(r1); // 060365aa mov.l @r1,r0
+                r2 = cpu.read16(r2) as i16 as i32 as u32; // 060365ac mov.w @r2,r2
+                r3 = cpu.read16(r3) as i16 as i32 as u32; // 060365ae mov.w @r3,r3
+                cpu.write32(w.wrapping_add(36), r0); // 060365b0 mov.l r0,@(36,gbr)
+                r0 = r2.rotate_left(16); // 060365b2 swap.w r2,r0
+                r0 = (r3 << 16) | (r0 >> 16); // 060365b4 xtrct r3,r0
+                cpu.write32(w.wrapping_add(136), r0); // 060365b6 mov.l r0,@(136,gbr)
+                r0 = 0x00003fff; // 060365b8 mov.w 0x60365d8,r0
+                cpu.write16(w.wrapping_add(112), r0 as u16); // 060365ba mov.w r0,@(112,gbr)
+                r0 = 0i32 as u32; // 060365bc mov #0,r0
+                cpu.write8(w.wrapping_add(168), r0 as u8); // 060365be mov.b r0,@(168,gbr)
+                cpu.write32(w.wrapping_add(116), r0); // 060365c0 mov.l r0,@(116,gbr)
+                cpu.write32(w.wrapping_add(76), r0); // 060365c2 mov.l r0,@(76,gbr)
+                cpu.write32(w.wrapping_add(80), r0); // 060365c4 mov.l r0,@(80,gbr)
+                r0 = -1i32 as u32; // 060365c6 mov #-1,r0
+                cpu.write8(w.wrapping_add(166), r0 as u8); // 060365c8 mov.b r0,@(166,gbr)
+                r0 <<= 16; // 060365ca shll16 r0
+                cpu.write32(w.wrapping_add(84), r0); // 060365cc mov.l r0,@(84,gbr)
+                r0 = 1i32 as u32; // 060365ce mov #1,r0
+                cpu.write8(w.wrapping_add(166), r0 as u8); // 060365d0 mov.b r0,@(166,gbr)
+                // 060365d2 rts
+                cpu.write8(w.wrapping_add(172), r0 as u8); // 060365d4 mov.b r0,@(172,gbr)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}

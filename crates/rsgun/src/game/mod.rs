@@ -61,6 +61,9 @@ pub struct Cpu<'a> {
     /// The r14 the rewrite was called with (the registration sets r14 to the rewrite's frame;
     /// SGL's assembly that pushes r14 pushes this).
     pub caller_r14: u32,
+    /// The r14 the rewrite leaves (`leave_r14`: SGL's slave handlers use it without keeping it),
+    /// else the caller's again.
+    r14_out: Option<u32>,
 }
 
 impl Cpu<'_> {
@@ -186,6 +189,12 @@ impl Cpu<'_> {
         self.sh2.macl = sum as u32;
     }
 
+    /// r14 left as SGL's code leaves it (a top-level rewrite's; the registration gives the caller's
+    /// back otherwise).
+    pub fn leave_r14(&mut self, v: u32) {
+        self.r14_out = Some(v);
+    }
+
     /// SR's T bit left as SGL's code leaves it.
     pub fn leave_t(&mut self, t: bool) {
         self.sh2.sr = (self.sh2.sr & !1) | t as u32;
@@ -262,8 +271,9 @@ const SR_PUSH: u8 = 20;
 /// slPutPolygonX pushes PR first, then r9 and r8; the rotation parameters' push r8 first, then PR
 /// and the others (and GBR, which the rewrite writes itself); slScrAutoDisp pushes PR first, then
 /// the others, and takes its frame by a subtraction; SGL's interrupt handlers save what they use,
-/// GBR, MACH, MACL and SR among it.
-const PROLOGUES: [(u32, &[u8], u32); 10] = [
+/// GBR, MACH, MACL and SR among it; SGL's routines run block by block (asm2sm.py) make their own
+/// pushes.
+const PROLOGUES: [(u32, &[u8], u32); 11] = [
     (0x0606_e9fc, &[6, 7], 0),
     (0x0607_10b0, &[PR_PUSH, 9, 8], 0),
     (0x0606_e50c, &[8, PR_PUSH, 14, 13, 12, 11, 10, 9], 0),
@@ -274,6 +284,7 @@ const PROLOGUES: [(u32, &[u8], u32); 10] = [
     (0x0603_4c1a, &[0, 4, 3, 2, 1, PR_PUSH, MACH_PUSH, MACL_PUSH], 0),
     (0x0603_32d6, &[0, 7, 6, 5, 4, 3, 2, PR_PUSH, 1, GBR_PUSH, MACH_PUSH, MACL_PUSH, SR_PUSH], 0),
     (0x0603_3430, &[0, 1, GBR_PUSH, PR_PUSH, 7, 6, 5, 4, 3, 2, MACH_PUSH, MACL_PUSH, SR_PUSH], 0),
+    (0x0603_6dd8, &[], 0),
 ];
 
 impl Prologue {
@@ -382,10 +393,12 @@ macro_rules! rewrites {
                     sh2.r[15] = prologue.enter(sh2, &mut *bus);
                     let fp = sh2.r[14];
                     sh2.r[14] = sh2.r[15];
-                    let result = $f(&mut Cpu { sh2: &mut *sh2, bus, caller_r14: fp }, $($arg),* $(, $($sarg),+)?);
+                    let mut cpu = Cpu { sh2: &mut *sh2, bus, caller_r14: fp, r14_out: None };
+                    let result = $f(&mut cpu, $($arg),* $(, $($sarg),+)?);
+                    let r14 = cpu.r14_out.unwrap_or(fp);
                     rewrites!(@result sh2, result, $ret);
                     sh2.r[15] = sp;
-                    sh2.r[14] = fp;
+                    sh2.r[14] = r14;
                     sh2.pc = ret;
                 },
                 stringify!($f),
@@ -1106,6 +1119,13 @@ pub fn register(n: &mut Natives) {
         0x0603_6412 => sgl::slave_frame_end[] -> (),
         0x0603_8330 => sgl::slave_quads[] -> (),
         0x0603_7f0e => sgl::slave_sprite[] -> (),
+        0x0603_7f74 => sgl::slave_turned_sprite[] -> (),
+        0x0603_6dd8 => sgl::slave_polygons[] -> (),
+        0x0603_6ab0 => sgl::slave_frame_draw[] -> (),
+        0x0603_6292 => sgl::slave_screen[] -> (),
+        0x0603_61ec => sgl::slave_clear_pairs[] -> (),
+        0x0603_61fe => sgl::slave_shade_tables[] -> (),
+        0x0603_64e0 => sgl::draw_init[] -> (),
         0x0606_9a0c => math::sl_sin[a] -> u32,
         0x0606_9a30 => math::sl_cos[a] -> u32,
         0x0606_e26c => math::sl_mul_fx[a, b] -> u32,

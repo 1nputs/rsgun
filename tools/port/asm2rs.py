@@ -8,11 +8,19 @@ the instructions those routines use; branches, delay slots and anything else are
 """
 import re, sys
 def r(n): return f"r{n}"
-out = []
-for line in open(sys.argv[1]):
+
+
+def parse(line):
+    """A listing line: (address, opcode, mnemonic, operands without spaces, the literal comment),
+    or None."""
     m = re.match(r"([0-9a-f]{8}): ([0-9a-f]{4})\s+(\S+)\s*(.*?)\s*(;.*)?$", line.rstrip())
-    if not m: continue
-    addr, op, mn, args = m.group(1), int(m.group(2), 16), m.group(3), m.group(4).replace(" ", "")
+    if not m:
+        return None
+    return m.group(1), int(m.group(2), 16), m.group(3), m.group(4).replace(" ", ""), m.group(5) or ""
+
+
+def convert(addr, mn, args, lit):
+    """One instruction as a Rust statement, or None (a branch, or one not handled)."""
     a = re.split(r",(?![^(]*\))", args)
     def reg(s): return "r" + s[1:] if s.startswith("r") else s
     s = None
@@ -58,10 +66,11 @@ for line in open(sys.argv[1]):
         k = mn[4:]
         if k == "pz": s = f"t = {reg(a[0])} as i32 >= 0;"
         elif k == "pl": s = f"t = {reg(a[0])} as i32 > 0;"
+        elif a[0].startswith("#"):
+            s = f"t = r0 == {int(a[0][1:])}i32 as u32;"
         else:
             x, y = reg(a[0]), reg(a[1])
             s = {"eq": f"t = {y} == {x};", "hs": f"t = {y} >= {x};", "hi": f"t = {y} > {x};", "ge": f"t = {y} as i32 >= {x} as i32;", "gt": f"t = {y} as i32 > {x} as i32;"}[k]
-    lit = m.group(5) or ""
     mm = None
     def mem(x):
         return re.fullmatch(r"@\((\d+),(r\d+|gbr)\)", x)
@@ -114,6 +123,18 @@ for line in open(sys.argv[1]):
     elif s is None and mn in ("clrt",): s = "t = false;"
     elif s is None and mn in ("sett",): s = "t = true;"
     elif s is None and mn == "nop": s = "// nop"
-    if s is None: s = f"// TODO {mn} {args}"
-    out.append(f"    {s} // {addr} {mn} {args}")
-print("\n".join(out))
+    return s
+
+
+if __name__ == "__main__":
+    out = []
+    for line in open(sys.argv[1]):
+        p = parse(line)
+        if not p:
+            continue
+        addr, _, mn, args, lit = p
+        s = convert(addr, mn, args, lit)
+        if s is None:
+            s = f"// TODO {mn} {args}"
+        out.append(f"    {s} // {addr} {mn} {args}")
+    print("\n".join(out))
