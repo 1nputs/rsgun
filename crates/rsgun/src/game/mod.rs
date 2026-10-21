@@ -529,6 +529,8 @@ pub fn register(n: &mut Natives) {
         0x0605_be90 => ground::route_exec[o] -> (),
         0x0605_bf28 => ground::launcher_exec[o] -> (),
         0x0605_c1d4 => ground::turret_exec[o] -> (),
+        0x0605_dba4 => ground::shard_exec[o] -> (),
+        0x0605_de54 => ground::hatch_exec[o] -> (),
         0x0605_c700 => ground::ride[o] -> (),
         0x0606_38c0 => aim::point_area_wide[p] -> u32,
         0x0606_3900 => aim::point_area[p] -> u32,

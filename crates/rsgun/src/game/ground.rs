@@ -1057,3 +1057,126 @@ pub fn big_gun_exec(cpu: &mut Cpu, o: u32) {
     let a = cpu.read16(o + ANGLE).wrapping_add(cpu.read16(o + G_TURN));
     cpu.write16(o + ANGLE, a);
 }
+
+/// A ground enemy with a hatch: as ground_exec it dies, leaves and follows its route; when its
+/// route starts it firing its hatch opens (frame 1 for three frames, then its hurt flag cleared
+/// with its opening's effect, then frame 2); while firing it fires a plain bullet every so often
+/// (by its settings, less each step of difficulty), straight ahead if its route says so, else at
+/// the player.
+const HATCH: u32 = 0x9a;
+const HATCH_OPENS: u32 = 0x0605_dd54;
+const UNHURT: u32 = 0x4_0000;
+const STRAIGHT: u16 = 8;
+
+pub fn hatch_exec(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let (x, y) = (cpu.read32(o + POSITION), cpu.read32(o + POSITION + 4));
+    if nested!(cpu, 0x0605_ef90, super::bg::map_hit(cpu, x, y)) != 0 {
+        cpu.write32(o + LIFE, u32::MAX);
+    }
+    let alive = |cpu: &mut Cpu| cpu.read32(o + LIFE) as i32 > 0;
+    let leaves = alive(cpu)
+        && cpu.read16(o + ROUTE_FLAGS) & ROUTE_1000 != 0
+        && {
+            let [top, bottom, left, right] = GROUND_AREA;
+            cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + SPRITE, top, bottom, left, right)) as u8 != 0
+        };
+    if !alive(cpu) || leaves {
+        if !alive(cpu) {
+            cpu.call(BLOWN_UP, &[o]);
+        }
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    let script = cpu.read32(o + SCRIPT);
+    match nested!(cpu, 0x0605_a000, route_step(cpu, o, script)) & 0xff {
+        START_FIRING => {
+            let fl = cpu.read16(o + ROUTE_FLAGS) | FIRING;
+            cpu.write16(o + ROUTE_FLAGS, fl);
+            cpu.write16(o + HATCH, 1);
+        }
+        STOP_FIRING => {
+            let fl = cpu.read16(o + ROUTE_FLAGS) & !FIRING;
+            cpu.write16(o + ROUTE_FLAGS, fl);
+            cpu.write16(o + FIRE_WAIT, 0);
+        }
+        _ => {}
+    }
+    nested!(cpu, 0x0605_a460, route_move(cpu, o));
+    let mirror = cpu.read8(o + MIRROR) as i8 as i16;
+    let d = cpu.read16(o + DIRECTION) as i16;
+    cpu.write16(o + ANGLE, mirror.wrapping_mul(d) as u16);
+    let hatch = cpu.read16(o + HATCH);
+    let frame = match hatch {
+        1..=4 => {
+            if hatch == 4 {
+                let flags = cpu.read32(o + FLAGS) & !UNHURT;
+                cpu.write32(o + FLAGS, flags);
+                cpu.call(HATCH_OPENS, &[o]);
+            }
+            let h = cpu.read16(o + HATCH).wrapping_add(1);
+            cpu.write16(o + HATCH, h);
+            Some(1)
+        }
+        5 => Some(2),
+        _ => None,
+    };
+    if let Some(frame) = frame {
+        cpu.write8(o + FRAME, frame);
+    }
+    if cpu.read16(o + ROUTE_FLAGS) & FIRING == 0 {
+        return;
+    }
+    let wait = cpu.read16(o + FIRE_WAIT).wrapping_sub(1);
+    cpu.write16(o + FIRE_WAIT, wait);
+    if wait as i16 >= 0 {
+        return;
+    }
+    let n = cpu.read8(o + NUMBER);
+    cpu.write8(f + S_NUMBER, n);
+    let every = (cpu.read8(o + SETTINGS) & FIRE_EVERY) as i16;
+    let d = cpu.read8(DIFFICULTY) as i8 as i16;
+    cpu.write16(o + FIRE_WAIT, every.wrapping_sub(d).wrapping_mul(8).wrapping_add(8) as u16);
+    for k in 0..3 {
+        let v = cpu.read32(o + POSITION + 4 * k);
+        cpu.write32(f + 4 * k, v);
+    }
+    let a = if cpu.read16(o + ROUTE_FLAGS) & STRAIGHT != 0 {
+        cpu.read16(o + ANGLE)
+    } else {
+        nested!(cpu, 0x0605_6ad4, aim::angle_to_target(cpu, o, AIM_DELAY)) as u16
+    };
+    cpu.write16(f + S_ANGLE, a);
+    nested!(cpu, 0x0605_3f48, super::bullets::bullet_set_plain(cpu, f));
+}
+
+/// A shard (a plain actor thrown off a ground enemy): it flies with its speed (x, y), sped by its
+/// acceleration, turning (by the word at +0x42), blinking after 15 frames; ended after 30.
+const SHARD_FRAMES: u32 = 0x3c;
+const SHARD_TURN: u32 = 0x42;
+const SHARD_SPEED: u32 = 0x54;
+const SHARD_ACCEL: u32 = 0x5c;
+const BLINK: u32 = 0x100;
+
+pub fn shard_exec(cpu: &mut Cpu, o: u32) {
+    let t = cpu.read8(o + SHARD_FRAMES).wrapping_add(1);
+    cpu.write8(o + SHARD_FRAMES, t);
+    if t > 30 {
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    if t > 15 {
+        let flags = cpu.read32(o + FLAGS) ^ BLINK;
+        cpu.write32(o + FLAGS, flags);
+    }
+    for k in 0..2 {
+        let p = cpu.read32(o + POSITION + 4 * k).wrapping_add(cpu.read32(o + SHARD_SPEED + 4 * k));
+        cpu.write32(o + POSITION + 4 * k, p);
+    }
+    for k in 0..2 {
+        let v = cpu.read32(o + SHARD_SPEED + 4 * k).wrapping_add(cpu.read32(o + SHARD_ACCEL + 4 * k));
+        cpu.write32(o + SHARD_SPEED + 4 * k, v);
+    }
+    let a = cpu.read16(o + ANGLE).wrapping_add(cpu.read16(o + SHARD_TURN));
+    cpu.write16(o + ANGLE, a);
+}
