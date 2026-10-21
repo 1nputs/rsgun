@@ -22,6 +22,7 @@ mod effects;
 mod explosions;
 mod files;
 mod globals;
+mod gouraud;
 mod ground;
 mod hits;
 mod hud;
@@ -837,6 +838,21 @@ pub fn register(n: &mut Natives) {
         0x0605_6cc8 => parts::part_exec[part] -> (),
         0x0605_6dbc => parts::part_set[kind] -> u32,
         0x0605_6114 => parts::part_look[o, colour] -> (),
+        0x0605_6c20 => parts::body_set[] -> u32,
+        0x0605_6ea4 => parts::parts_set[count, points, state, life; parts, number] -> (),
+        0x0606_32b0 => models::model_gouraud[kind, frame] -> (),
+        0x0606_2f74 => gouraud::models_hss[kind, count] -> (),
+        0x0606_2fe8 => gouraud::light_turned[x, y, z] -> (),
+        0x0606_3060 => gouraud::table_set[colours] -> (),
+        0x0606_30e0 => gouraud::table_floor[r, g, b] -> (),
+        0x0606_3168 => gouraud::table_ramp[r, g, b] -> (),
+        0x0606_320c => gouraud::shading_default[] -> (),
+        0x0606_3248 => gouraud::shading_init[] -> (),
+        0x0606_3294 => gouraud::shading_end[] -> (),
+        0x0606_3380 => gouraud::models_lit[kind, count] -> (),
+        0x0606_3428 => gouraud::model_sort[kind, frame, sort] -> (),
+        0x0606_34e0 => gouraud::point_normals[pd, out] -> (),
+        0x0606_35e8 => gouraud::gouraud_tables[pd, at] -> (),
         0x0605_e6fc => screen::set_offset_a[r, g, b] -> (),
         0x0605_e648 => screen::scroll_next[] -> (),
         0x0606_333c => models::model_lit[kind, frame] -> (),

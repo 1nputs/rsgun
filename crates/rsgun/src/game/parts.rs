@@ -4,7 +4,7 @@
 //! learns from them when one was hit.
 
 use super::nested;
-use super::{hits, objects, sprites, Cpu};
+use super::{aim, hits, objects, sprites, Cpu};
 
 /// The objects' mode byte's ending, and the actor fields a part uses: its flags (NO_HITS), what
 /// hit it last, its own life (one, 16.16, each frame), its hit flags (WAS_HIT), the boss's state
@@ -236,4 +236,75 @@ pub fn part_look(cpu: &mut Cpu, o: u32, colour: u32) {
     cpu.write32(o + BOXES, LOOK_BOXES);
     cpu.write8(o + SIDE, 1);
     cpu.write8(o + TYPE, LOOK_TYPE);
+}
+
+/// Makes a boss's body (body_exec's): numbered, never drawn nor hit, on the enemies' side, its
+/// life 10. It, or 0.
+const BODY_SIZE: u32 = 0x7c;
+const BODY_EXEC: u32 = 0x0605_6b14;
+const BODY_BOXES: u32 = 0x0607_2f9c;
+const BODY_LIFE: u32 = 10;
+const NUMBERED_EXEC: u32 = 0x0604_d600;
+const NUMBERED: u32 = 0x0607_40f0;
+const ENEMY_NUMBERS: u32 = 2;
+
+pub fn body_set(cpu: &mut Cpu) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, ENEMY_NUMBERS)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, BODY_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, PART_LIST, blocks, NUMBERED_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + 0x10));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + BOXES));
+    cpu.write32(o + BEHAVIOUR, BODY_EXEC);
+    cpu.write32(o + FLAGS, PART_FLAGS);
+    cpu.write32(o + POSITION + 8, 0);
+    cpu.write8(o + NUMBER, n as u8);
+    let n = cpu.read8(o + NUMBER) as i8 as i32;
+    cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), o);
+    cpu.write8(o + SIDE, 1);
+    cpu.write32(o + BOXES, BODY_BOXES);
+    cpu.write32(o + LIFE, BODY_LIFE);
+    o
+}
+
+/// Makes a boss's `count` parts (each its kind from the parts' list, 8 bytes each, following its
+/// point of `points`, under the state word at `state` and sharing the life at `life`, given the
+/// number `number`; not hurt while the state word's bit 4 says), and its body unless that bit
+/// says not.
+const NOT_HURT_YET: u16 = 0x10;
+
+pub fn parts_set(cpu: &mut Cpu, count: u32, points: u32, state: u32, life: u32, parts: u32, number: u32) {
+    let count = count as i16 as i32;
+    let number = number as u8;
+    let mut i: i8 = 0;
+    while (i as i32) < count {
+        let kind = cpu.read16(parts.wrapping_add(PART * i as i32 as u32) + PART_DEPTH_AT) as u32;
+        let a = nested!(cpu, 0x0605_6dbc, part_set(cpu, kind));
+        if a != 0 {
+            cpu.write8(a + NUMBER, number);
+            cpu.write32(a + FOLLOWS, points.wrapping_add(POINT * i as i32 as u32));
+            cpu.write32(a + BOSS_STATE, state);
+            cpu.write32(a + SHARED_LIFE, life);
+            if cpu.read16(state) & NOT_HURT_YET != 0 {
+                let flags = cpu.read32(a + FLAGS);
+                cpu.write32(a + FLAGS, flags | UNHURT);
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+    if cpu.read16(state) & NOT_HURT_YET != 0 {
+        return;
+    }
+    let b = nested!(cpu, 0x0605_6c20, body_set(cpu));
+    if b != 0 {
+        cpu.write32(b + BODY_POINTS, points);
+        cpu.write32(b + BODY_PARTS, parts);
+        cpu.write32(b + BOSS_STATE, state);
+        cpu.write8(b + BODY_COUNT, count as u8);
+    }
 }

@@ -462,7 +462,7 @@ const ATTR_SIZE: u32 = 12;
 const ATTR_BITS: u32 = 4;
 const ATTR_COLOUR: u32 = 6;
 
-fn kind_model(cpu: &mut Cpu, kind: u32, frame: u32) -> u32 {
+pub(super) fn kind_model(cpu: &mut Cpu, kind: u32, frame: u32) -> u32 {
     let table = cpu.read32(MODEL_KINDS.wrapping_add(kind << 4));
     let models = cpu.read32(table + KIND_MODELS);
     cpu.read32(models.wrapping_add(frame << 2))
@@ -491,6 +491,25 @@ pub fn model_lit(cpu: &mut Cpu, kind: u32, frame: u32) {
     while (k as i32) < cpu.read32(pd + PD_COUNT) as i32 {
         let a = cpu.read32(pd + PD_ATTRS) + ATTR_SIZE * k + ATTR_SORT;
         let v = cpu.read8(a) | USE_LIGHT;
+        cpu.write8(a, v);
+        k += 1;
+    }
+}
+
+/// The plain model's polygons all Gouraud shaded (SGL's attribute bit and sort byte's UseGouraud).
+const ATTR_GOURAUD: u16 = 4;
+const USE_GOURAUD: u8 = 0x80;
+
+pub fn model_gouraud(cpu: &mut Cpu, kind: u32, frame: u32) {
+    let at = kind_model(cpu, kind, frame);
+    let pd = cpu.read32(at);
+    let mut k = 0;
+    while (k as i32) < cpu.read32(pd + PD_COUNT) as i32 {
+        let a = cpu.read32(pd + PD_ATTRS) + ATTR_SIZE * k;
+        let v = cpu.read16(a + ATTR_BITS) | ATTR_GOURAUD;
+        cpu.write16(a + ATTR_BITS, v);
+        let a = cpu.read32(pd + PD_ATTRS) + ATTR_SIZE * k + ATTR_SORT;
+        let v = cpu.read8(a) | USE_GOURAUD;
         cpu.write8(a, v);
         k += 1;
     }
