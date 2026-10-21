@@ -854,3 +854,206 @@ pub fn turret_exec(cpu: &mut Cpu, o: u32) {
     cpu.write32(o + LIFE, ONE);
     nested!(cpu, 0x0604_666c, super::parts::flash_with(cpu, o, v));
 }
+
+/// A big gun's body check: the gun ends with its body (the numbered object of its number), blown
+/// off once the body is below 2500 life (above difficulty 3 with a parting shot); else it sits on
+/// the body in its colour. 1 when it ends, else 0.
+const GUN_BLOWN_OFF: u32 = 0x0605_9f50;
+const NUMBERED: u32 = 0x0607_40f0;
+const OWN_COLOUR: u32 = 0x2a;
+
+pub fn on_body(cpu: &mut Cpu, o: u32) -> u32 {
+    let n = cpu.read8(o + NUMBER) as i8 as i32;
+    let body = cpu.read32(NUMBERED.wrapping_add((n * 4) as u32));
+    if cpu.read32(body + LIFE) as i32 <= WOUNDED {
+        cpu.call(GUN_BLOWN_OFF, &[o]);
+        cpu.write8(o + OBJ_MODE, ENDING);
+        if cpu.read8(DIFFICULTY) == 4 {
+            cpu.call(PARTING_SHOT, &[o, 0]);
+        }
+        return 1;
+    }
+    if cpu.read8(body + OBJ_MODE) as i8 >= ENDING as i8 {
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return 1;
+    }
+    for k in 0..3 {
+        let v = cpu.read32(body + POSITION + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    let c = cpu.read16(body + OWN_COLOUR);
+    cpu.write16(o + OWN_COLOUR, c);
+    0
+}
+
+/// A big gun on a body (on_body): flashing with it; while the body fires it aims at the nearer
+/// player and fires when its timer passes its wait, by its mode: two rockets 15 pixels out either
+/// side of its aim (mode 0; sound 25; volleys of so many by the difficulty, then a longer wait),
+/// a heavy bullet (mode 1; sound 29; to a side at random, volleys of 8 times its count), or a
+/// laser (mode 2: the gun turning slowly while it lasts). It turns by its aim script if it has one
+/// (with its own offset, mirrored), else toward its aim at a speed easing to its mode's.
+const G_SCRIPT: u32 = 0x6c;
+const G_AIM_OFFSET: u32 = 0x8c;
+const G_MODE: u32 = 0x90;
+const G_COUNT: u32 = 0x92;
+const G_WAIT: u32 = 0x94;
+const G_VOLLEYS: u32 = 0x96;
+const G_TURN: u32 = 0x98;
+const G_TURN_SPEED: u32 = 0x9a;
+const G_SLOW: u32 = 0xa0;
+const G_TIMER: u32 = 0xa2;
+const G_SPEED: u32 = 0xac;
+const G_SPEED_WORD: u32 = 0xae;
+const G_SPEEDS: u32 = 0x0607_34ec;
+const G_SLOW_SPEED: u32 = 0x200;
+const G_SPEED_STEP: u32 = 0x80;
+const G_EASE: u32 = 12;
+const G_ACCEL: u32 = 6;
+const G_MUZZLE: i32 = 12;
+const G_ROCKET_OUT: i32 = 15;
+const G_ROCKET_SPREAD: u16 = 0x2000;
+const G_BULLET_ASIDE: i32 = 5;
+const G_ROCKET_FRAMES: u16 = 10;
+const G_ROCKET_FLAGS: u16 = 0x21;
+const SE_ROCKETS: u32 = 25;
+const SE_HEAVY: u32 = 29;
+const FLASH: u16 = 1;
+/// Not rewritten yet: the heavy bullet and the laser.
+const HEAVY_BULLET: u32 = 0x0605_41d0;
+const LASER: u32 = 0x0605_46ac;
+static BIG_GUN_TURN_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
+
+/// The shot description at `f` placed `out` along `angle` from the gun.
+fn shot_out(cpu: &mut Cpu, o: u32, f: u32, angle: u16, out: i32) {
+    let s = cpu.call(SL_SIN, &[angle as i16 as i32 as u32]) as i32;
+    let x = (s.wrapping_mul(out) as u32).wrapping_add(cpu.read32(o + POSITION));
+    cpu.write32(f, x);
+    let c = cpu.call(SL_COS, &[angle as i16 as i32 as u32]) as i32;
+    let y = (c.wrapping_neg().wrapping_mul(out) as u32).wrapping_add(cpu.read32(o + POSITION + 4));
+    cpu.write32(f + 4, y);
+}
+
+pub fn big_gun_exec(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    if nested!(cpu, 0x0605_b748, on_body(cpu, o)) as u8 != 0 {
+        return;
+    }
+    let n = cpu.read8(o + NUMBER) as i8 as i32;
+    let body = cpu.read32(NUMBERED.wrapping_add((n * 4) as u32));
+    let h = cpu.read16(o + HIT_FLAGS) & !FLASH;
+    cpu.write16(o + HIT_FLAGS, h);
+    let flash = cpu.read16(body + HIT_FLAGS) & FLASH;
+    cpu.write16(o + HIT_FLAGS, h | flash);
+    let aim = if cpu.read16(body + ROUTE_FLAGS) & FIRING != 0 {
+        let t = cpu.read16(o + G_TIMER).wrapping_add(1);
+        cpu.write16(o + G_TIMER, t);
+        let p = nested!(cpu, 0x0605_6a58, aim::nearer_player(cpu, o + SPRITE));
+        nested!(cpu, 0x0604_5e30, aim::angle_to(cpu, o, p))
+    } else {
+        cpu.read16(o + ANGLE) as u32
+    } & 0xffff;
+    cpu.write32(f + 0x40, aim);
+    if cpu.read16(o + G_TIMER) as i16 > cpu.read16(o + G_WAIT) as i16 {
+        let v = cpu.read16(o + G_VOLLEYS).wrapping_add(1);
+        cpu.write16(o + G_VOLLEYS, v);
+        let n = cpu.read8(o + NUMBER);
+        cpu.write8(f + S_NUMBER, n);
+        let a = cpu.read16(o + ANGLE);
+        shot_out(cpu, o, f, a, G_MUZZLE);
+        let z = cpu.read32(o + POSITION + 8);
+        cpu.write32(f + 8, z);
+        let a = cpu.read16(o + ANGLE);
+        cpu.write16(f + S_ANGLE, a);
+        let difficulty = |cpu: &mut Cpu| cpu.read8(DIFFICULTY) as i8 as i16;
+        match cpu.read16(o + G_MODE) as i16 {
+            0 => {
+                cpu.write16(o + G_TIMER, 0);
+                let d = difficulty(cpu);
+                let n = ((cpu.read16(o + G_COUNT) as i16).wrapping_sub(4).wrapping_add(d)).max(1);
+                let wait = if cpu.read16(o + G_VOLLEYS) as i16 >= n {
+                    cpu.write16(o + G_VOLLEYS, 0);
+                    96 - difficulty(cpu) * 8
+                } else {
+                    30 - difficulty(cpu) * 4
+                };
+                cpu.write16(o + G_WAIT, wait as u16);
+                nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_ROCKETS));
+                cpu.write16(f + S_FLAGS, G_ROCKET_FRAMES);
+                cpu.write16(f + S_ROCKET_FLAGS, G_ROCKET_FLAGS);
+                for spread in [G_ROCKET_SPREAD.wrapping_neg(), G_ROCKET_SPREAD] {
+                    let a = cpu.read16(o + ANGLE).wrapping_add(spread);
+                    shot_out(cpu, o, f, a, G_ROCKET_OUT);
+                    nested!(cpu, 0x0605_5b5c, super::bullets::rocket_set(cpu, f));
+                }
+            }
+            1 => {
+                nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_HEAVY));
+                cpu.write16(o + G_TIMER, 0);
+                let wait = if cpu.read16(o + G_VOLLEYS) as i16 >= (cpu.read16(o + G_COUNT) as i16).wrapping_mul(8) {
+                    cpu.write16(o + G_VOLLEYS, 0);
+                    96 - difficulty(cpu) * 8
+                } else {
+                    6
+                };
+                cpu.write16(o + G_WAIT, wait as u16);
+                let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000)) & 3;
+                let aside = match r {
+                    2 => Some(0x4000u16),
+                    3 => Some(0xc000),
+                    _ => None,
+                };
+                if let Some(aside) = aside {
+                    let a = cpu.read16(o + ANGLE).wrapping_add(aside) as i16 as i32 as u32;
+                    let s = cpu.call(SL_SIN, &[a]) as i32;
+                    let x = cpu.read32(f).wrapping_add(s.wrapping_mul(G_BULLET_ASIDE) as u32);
+                    cpu.write32(f, x);
+                    let a = cpu.read16(o + ANGLE).wrapping_add(aside) as i16 as i32 as u32;
+                    let c = cpu.call(SL_COS, &[a]) as i32;
+                    let y = cpu.read32(f + 4).wrapping_sub(c.wrapping_mul(G_BULLET_ASIDE) as u32);
+                    cpu.write32(f + 4, y);
+                }
+                cpu.call(HEAVY_BULLET, &[f]);
+            }
+            2 => {
+                cpu.write16(o + G_TIMER, 0);
+                let lasts = (cpu.read16(o + G_COUNT) as i16).wrapping_mul(30);
+                cpu.write16(o + G_WAIT, lasts.wrapping_add(80) as u16);
+                cpu.write16(o + G_SLOW, lasts.wrapping_add(40) as u16);
+                cpu.write32(f + 0x3c, o);
+                cpu.write16(f + S_ANGLE, 0);
+                cpu.write16(f + S_FLAGS, 8);
+                let w = cpu.read16(o + G_WAIT).wrapping_sub(80);
+                cpu.write16(f + S_ROCKET_FLAGS, w);
+                cpu.write16(f + 0x32, 0);
+                cpu.call(LASER, &[f, o + ANGLE]);
+            }
+            _ => {}
+        }
+    }
+    let script = cpu.read32(o + G_SCRIPT);
+    if script != 0 {
+        nested!(cpu, 0x0605_a340, aim_step(cpu, o, script, 0));
+        let a = cpu.read16(o + AIM).wrapping_add(cpu.read16(o + G_AIM_OFFSET)) as i16 as i32;
+        let mirror = cpu.read8(o + MIRROR) as i8 as i32;
+        cpu.write16(o + ANGLE, a.wrapping_mul(mirror) as u16);
+        return;
+    }
+    let to = if cpu.read16(o + G_SLOW) as i16 != 0 {
+        let s = cpu.read16(o + G_SLOW).wrapping_sub(1);
+        cpu.write16(o + G_SLOW, s);
+        G_SLOW_SPEED
+    } else {
+        let m = cpu.read16(o + G_MODE) as i16 as i32;
+        cpu.read16(G_SPEEDS.wrapping_add((m * 2) as u32)) as u32
+    };
+    let s = cpu.read32(o + G_SPEED);
+    let s = nested!(cpu, 0x0604_6168, actors::approach(cpu, s, to, G_SPEED_STEP));
+    cpu.write32(o + G_SPEED, s);
+    let (turn, speed) = (o + G_TURN, o + G_TURN_SPEED);
+    let from = cpu.read16(o + ANGLE) as u32;
+    let most = cpu.read16(o + G_SPEED_WORD) as u32;
+    let aim = cpu.read32(f + 0x40);
+    cpu.nested_with_stack(&BIG_GUN_TURN_PROLOGUE, TURN_TOWARD, &[most, G_EASE, G_ACCEL], |cpu| aim::turn_toward(cpu, turn, speed, from, aim, most, G_EASE, G_ACCEL));
+    let a = cpu.read16(o + ANGLE).wrapping_add(cpu.read16(o + G_TURN));
+    cpu.write16(o + ANGLE, a);
+}

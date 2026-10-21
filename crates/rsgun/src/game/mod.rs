@@ -524,6 +524,8 @@ pub fn register(n: &mut Natives) {
         0x0605_a4cc => ground::ground_exec[o] -> (),
         0x0605_a970 => ground::gun_exec[o] -> (),
         0x0605_b568 => ground::wounded_exec[o] -> (),
+        0x0605_b748 => ground::on_body[o] -> u32,
+        0x0605_b7d4 => ground::big_gun_exec[o] -> (),
         0x0605_be90 => ground::route_exec[o] -> (),
         0x0605_bf28 => ground::launcher_exec[o] -> (),
         0x0605_c1d4 => ground::turret_exec[o] -> (),
