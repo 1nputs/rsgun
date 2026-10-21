@@ -613,6 +613,14 @@ pub fn plane_picture(cpu: &mut Cpu, picture: u32) {
 }
 
 
+/// VDP2's colour offset A as the mode sets it (r, g, b).
+pub fn set_offset_a(cpu: &mut Cpu, r: u32, g: u32, b: u32) {
+    let s = cpu.read32(SCREEN);
+    for (k, v) in [r, g, b].into_iter().enumerate() {
+        cpu.write16(s + OFFSET_A + 2 * k as u32, v as u16);
+    }
+}
+
 /// VDP2's colour offset B as the mode sets it (r, g, b).
 pub fn set_offset_b(cpu: &mut Cpu, r: u32, g: u32, b: u32) {
     let s = cpu.read32(SCREEN);
@@ -624,4 +632,35 @@ pub fn set_offset_b(cpu: &mut Cpu, r: u32, g: u32, b: u32) {
 /// Sets PLANE_SHARED_NEXT (for the stages' code).
 pub fn set_plane_shared_next(cpu: &mut Cpu, v: u32) {
     cpu.write32(PLANE_SHARED_NEXT, v);
+}
+
+/// The next scroll: its start (the scroll table's +0, given the screen's work), unless there is
+/// none (the index stays). Reaching the next of the screen's marks (a list of scroll indices,
+/// +0x54) moves on to the one after, and past the first asks for the next frame's request.
+const SCROLL_MARK: u32 = 0x52;
+const SCROLL_MARKS: u32 = 0x54;
+
+pub fn scroll_next(cpu: &mut Cpu) {
+    let s = screen(cpu);
+    let i = cpu.read8(s + SCROLL_INDEX).wrapping_add(1);
+    cpu.write8(s + SCROLL_INDEX, i);
+    let s = screen(cpu);
+    let i = cpu.read8(s + SCROLL_INDEX) as i8 as i32;
+    let table = cpu.read32(SCROLL_TABLE);
+    let start = cpu.read32(table.wrapping_add((8 * i) as u32));
+    if start == 0 {
+        cpu.write8(s + SCROLL_INDEX, (i - 1) as u8);
+    } else {
+        cpu.call(start, &[s + 0x10]);
+    }
+    let s = screen(cpu);
+    let n = cpu.read8(s + SCROLL_MARK) as i8;
+    let marks = cpu.read32(s + SCROLL_MARKS);
+    let mark = cpu.read8(marks.wrapping_add(n as i32 as u32));
+    if cpu.read8(s + SCROLL_INDEX) == mark {
+        cpu.write8(s + SCROLL_MARK, (n as u8).wrapping_add(1));
+        if n > 0 {
+            cpu.write32(REQUEST, 1);
+        }
+    }
 }

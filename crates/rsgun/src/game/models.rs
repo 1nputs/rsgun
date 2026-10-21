@@ -480,6 +480,22 @@ pub fn model_colour(cpu: &mut Cpu, kind: u32, frame: u32, colour: u32) {
     }
 }
 
+/// The plain model's polygons all lit (SGL's attribute sort byte's UseLight).
+const ATTR_SORT: u32 = 1;
+const USE_LIGHT: u8 = 8;
+
+pub fn model_lit(cpu: &mut Cpu, kind: u32, frame: u32) {
+    let at = kind_model(cpu, kind, frame);
+    let pd = cpu.read32(at);
+    let mut k = 0;
+    while (k as i32) < cpu.read32(pd + PD_COUNT) as i32 {
+        let a = cpu.read32(pd + PD_ATTRS) + ATTR_SIZE * k + ATTR_SORT;
+        let v = cpu.read8(a) | USE_LIGHT;
+        cpu.write8(a, v);
+        k += 1;
+    }
+}
+
 /// Both models' polygons' attribute bits xored with `bits`.
 pub fn model_flip_bits(cpu: &mut Cpu, kind: u32, frame: u32, bits: u32) {
     let at = kind_model(cpu, kind, frame);

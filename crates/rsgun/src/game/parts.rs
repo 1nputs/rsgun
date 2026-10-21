@@ -211,3 +211,29 @@ pub fn part_set(cpu: &mut Cpu, kind: u32) -> u32 {
     }
     o
 }
+
+/// A part's look: never culled, kind 0's frame 0x81 in colour `colour` (kind 0's colours from
+/// 0x50), its boxes, on the enemies' side of type 5.
+const UNCULLED: u32 = 0x2000_0000;
+const KIND: u32 = 0x2e;
+const FRAME: u32 = 0x2f;
+const COLOUR: u32 = 0x28;
+const OWN_COLOUR: u32 = 0x2a;
+const LOOK_FRAME: u8 = 0x81;
+const CHAR_BASE: u32 = 0x0607_41fc;
+const LOOK_COLOURS: u16 = 0x50;
+const LOOK_BOXES: u32 = 0x0607_2f52;
+const LOOK_TYPE: u8 = 5;
+
+pub fn part_look(cpu: &mut Cpu, o: u32, colour: u32) {
+    let flags = cpu.read32(o + FLAGS);
+    cpu.write32(o + FLAGS, flags | UNCULLED);
+    cpu.write8(o + FRAME, LOOK_FRAME);
+    cpu.write8(o + KIND, 0);
+    let c = cpu.read16(CHAR_BASE).wrapping_add((colour & 0xff) as u16 + LOOK_COLOURS);
+    cpu.write16(o + OWN_COLOUR, c);
+    cpu.write16(o + COLOUR, c);
+    cpu.write32(o + BOXES, LOOK_BOXES);
+    cpu.write8(o + SIDE, 1);
+    cpu.write8(o + TYPE, LOOK_TYPE);
+}

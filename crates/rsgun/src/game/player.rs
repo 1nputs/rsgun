@@ -1303,3 +1303,113 @@ pub fn start_pressed(cpu: &mut Cpu) -> u32 {
     }
     pressed as u32
 }
+
+/// An aura's fields: its scales (x, y), its angle, its step (a byte), its spin (a word), its
+/// growth, its link (effects.rs's); it follows its ship (AURA_OF) and ends with it.
+const AU_SCALES: u32 = 0x20;
+const AU_ANGLE: u32 = 0x30;
+const AU_STEP: u32 = 0x3c;
+const AU_SPIN: u32 = 0x42;
+const AU_GROWTH: u32 = 0x54;
+const AU_LINK: u32 = 0x70;
+const SHIP_LIVES: i8 = 0x6f;
+
+/// The aura follows its ship (ending with it): its place, its step.
+fn aura_follow(cpu: &mut Cpu, o: u32) -> u8 {
+    let ship = cpu.read32(o + AURA_OF);
+    if cpu.read8(ship + OBJ_MODE) as i8 > SHIP_LIVES {
+        cpu.write8(o + OBJ_MODE, ENDING);
+    }
+    for k in 0..3 {
+        let v = cpu.read32(ship + POSITION + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    cpu.read8(o + AU_STEP)
+}
+
+/// The hyper sword's readiness flash: it grows a 4th of one a frame (from a 16th) past one,
+/// then slows to shrinking a 4th a frame, spinning ever slower; it ends once it would vanish.
+const AU_START: u32 = 0x1000;
+const AU_GROW: u32 = 0x4000;
+const AU_SHRINK: u32 = 0xffff_c000;
+const AU_GROWTH_STEP: u32 = 0x800;
+const AU_SPIN_START: u16 = 0x800;
+const AU_SPIN_END: u32 = 16;
+const AU_SPIN_STEP: u32 = 32;
+
+pub fn aura_exec(cpu: &mut Cpu, o: u32) {
+    match aura_follow(cpu, o) as i8 {
+        0 => {
+            cpu.write32(o + AU_SCALES, AU_START);
+            cpu.write32(o + AU_GROWTH, AU_GROW);
+            cpu.write16(o + AU_SPIN, AU_SPIN_START);
+            cpu.write8(o + AU_STEP, 1);
+        }
+        1 => {
+            if cpu.read32(o + AU_SCALES) as i32 > 0xffff {
+                cpu.write8(o + AU_STEP, 2);
+            }
+        }
+        2 => {
+            let g = cpu.read32(o + AU_GROWTH);
+            let g = nested!(cpu, 0x0604_6168, super::actors::approach(cpu, g, AU_SHRINK, AU_GROWTH_STEP));
+            cpu.write32(o + AU_GROWTH, g);
+            let spin = cpu.read16(o + AU_SPIN) as i16 as i32 as u32;
+            let spin = nested!(cpu, 0x0604_6168, super::actors::approach(cpu, spin, AU_SPIN_END, AU_SPIN_STEP));
+            cpu.write16(o + AU_SPIN, spin as u16);
+            let left = cpu.read32(o + AU_SCALES).wrapping_add(cpu.read32(o + AU_GROWTH));
+            if left as i32 <= 0 {
+                cpu.write8(o + OBJ_MODE, ENDING);
+                cpu.write8(o + AU_STEP, 3);
+            }
+        }
+        _ => {}
+    }
+    let a = cpu.read16(o + AU_ANGLE).wrapping_add(cpu.read16(o + AU_SPIN));
+    cpu.write16(o + AU_ANGLE, a);
+    let s = cpu.read32(o + AU_SCALES).wrapping_add(cpu.read32(o + AU_GROWTH));
+    cpu.write32(o + AU_SCALES, s);
+    cpu.write32(o + AU_SCALES + 4, s);
+}
+
+/// The hyper sword's aura: it grows an 8th of the way to one a frame (by at most a 16th), until
+/// the ship is hurt again or has 10 or fewer frames of being hurt left; then it shrinks away by a
+/// 16th a frame. Linked to its effect (the link at AU_LINK, from a table).
+const HYPER_AURA_LINK: u32 = 0x0607_2760;
+const HA_MOST: u32 = 0x1000;
+const HA_LAST_HURT: i16 = 10;
+
+pub fn hyper_aura_exec(cpu: &mut Cpu, o: u32) {
+    match aura_follow(cpu, o) as i8 {
+        0 => {
+            nested!(cpu, 0x0604_6530, effects::link_init(cpu, o + AU_LINK, HYPER_AURA_LINK));
+            cpu.write16(o + AU_ANGLE, 0);
+            cpu.write32(o + AU_SCALES, AU_START);
+            cpu.write8(o + AU_STEP, 1);
+        }
+        1 => {
+            let s = cpu.read32(o + AU_SCALES) as i32;
+            let d = 0x1_0000i32.wrapping_sub(s) / 8;
+            let d = nested!(cpu, 0x0606_4f3c, super::math::clamp(cpu, d as u32, HA_MOST));
+            let s = cpu.read32(o + AU_SCALES).wrapping_add(d);
+            cpu.write32(o + AU_SCALES, s);
+            let ship = cpu.read32(o + AURA_OF);
+            if cpu.read32(ship + FLAGS) & UNHURT == 0 && cpu.read16(ship + HURT) as i16 <= HA_LAST_HURT {
+                cpu.write8(o + AU_STEP, 2);
+            }
+        }
+        2 => {
+            let s = cpu.read32(o + AU_SCALES);
+            let s = nested!(cpu, 0x0604_6168, super::actors::approach(cpu, s, 0, HA_MOST));
+            cpu.write32(o + AU_SCALES, s);
+            if s == 0 {
+                cpu.write8(o + OBJ_MODE, ENDING);
+                cpu.write8(o + AU_STEP, 3);
+            }
+        }
+        _ => {}
+    }
+    let s = cpu.read32(o + AU_SCALES);
+    cpu.write32(o + AU_SCALES + 4, s);
+    nested!(cpu, 0x0604_6558, effects::link_step(cpu, o + 0x10, o + AU_LINK));
+}

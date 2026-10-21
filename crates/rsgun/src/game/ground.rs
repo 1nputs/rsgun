@@ -1645,7 +1645,7 @@ pub fn hatch_exec(cpu: &mut Cpu, o: u32) {
             if hatch == 4 {
                 let flags = cpu.read32(o + FLAGS) & !UNHURT;
                 cpu.write32(o + FLAGS, flags);
-                cpu.call(HATCH_OPENS, &[o]);
+                nested!(cpu, HATCH_OPENS, hatch_opens(cpu, o));
             }
             let h = cpu.read16(o + HATCH).wrapping_add(1);
             cpu.write16(o + HATCH, h);
@@ -2619,4 +2619,90 @@ pub fn shard_set(cpu: &mut Cpu, d: u32, from: u32) {
     cpu.write8(o + LIFT, lift);
     let turn = if cpu.read8(from + MIRROR) as i8 > 0 { SHARD_TURN_BY } else { SHARD_TURN_BY.wrapping_neg() };
     cpu.write32(o + SHARD_TURN_LONG, turn);
+}
+
+/// The hatch opening: three shards (frames 5, 3, 4: straight back, and 10 pixels out a quarter
+/// turn either side of ahead, each thrown that way) and a glow (half size) at the enemy.
+const HO_ANGLE: u32 = 0x18;
+const HO_DIRECTION: u32 = 0x2c;
+const HO_FRAME: u32 = 0x2e;
+const HO_SIDE_SHARDS: [(u16, u16); 2] = [(3, 0xe000), (4, 0x2000)];
+const HO_OUT: i32 = 10;
+const HO_GLOW_SIZE: u32 = 0x8000;
+const HO_GLOW_SIZE_AT: u32 = 0x2c;
+
+pub fn hatch_opens(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let a = cpu.read16(o + ANGLE);
+    cpu.write16(f + HO_ANGLE, a);
+    cpu.write16(f + HO_FRAME, 5);
+    cpu.write16(f + HO_DIRECTION, a.wrapping_add(0x8000));
+    for k in 0..2 {
+        let v = cpu.read32(o + POSITION + 4 * k);
+        cpu.write32(f + 4 * k, v);
+    }
+    nested!(cpu, 0x0605_dc18, shard_set(cpu, f, o));
+    for (frame, turn) in HO_SIDE_SHARDS {
+        cpu.write16(f + HO_FRAME, frame);
+        let d = cpu.read16(f + HO_ANGLE).wrapping_add(turn);
+        cpu.write16(f + HO_DIRECTION, d);
+        let d = cpu.read16(f + HO_DIRECTION) as i16 as i32 as u32;
+        let s = nested!(cpu, 0x0606_9a0c, super::math::sl_sin(cpu, d)) as i32;
+        let x = cpu.read32(o + POSITION).wrapping_add(s.wrapping_mul(HO_OUT) as u32);
+        cpu.write32(f, x);
+        let d = cpu.read16(f + HO_DIRECTION) as i16 as i32 as u32;
+        let c = nested!(cpu, 0x0606_9a30, super::math::sl_cos(cpu, d)) as i32;
+        let y = cpu.read32(o + POSITION + 4).wrapping_sub(c.wrapping_mul(HO_OUT) as u32);
+        cpu.write32(f + 4, y);
+        nested!(cpu, 0x0605_dc18, shard_set(cpu, f, o));
+    }
+    for k in 0..3 {
+        let v = cpu.read32(o + POSITION + 4 * k);
+        cpu.write32(f + 4 * k, v);
+    }
+    cpu.write32(f + HO_GLOW_SIZE_AT, HO_GLOW_SIZE);
+    nested!(cpu, 0x0605_8f34, super::explosions::glow_set(cpu, f));
+}
+
+/// Makes a hatch enemy (hatch_exec's) from description `d` with its script: numbered, not hit
+/// nor hurt at first, kind 27's sprite in kind 12's colours (16 a step by the description's
+/// colour), below the ships, its life 200; its place, kind, mirror, type, base direction and
+/// settings. It, or 0.
+const HATCH_EXEC: u32 = 0x0605_de54;
+const HATCH_FLAGS: u32 = 0xc_0000;
+const HATCH_KIND: u8 = 27;
+const HATCH_LIFT: u8 = 0xf8;
+const HATCH_BOXES: u32 = 0x0607_3278;
+const HATCH_LIFE: u32 = 200;
+
+pub fn hatch_set(cpu: &mut Cpu, d: u32, script: u32) -> u32 {
+    let o = numbered_enemy(cpu, HATCH_EXEC, HATCH_FLAGS);
+    if o == 0 {
+        return 0;
+    }
+    cpu.write8(o + KIND, HATCH_KIND);
+    cpu.write8(o + FRAME, 0);
+    let colour = cpu.read16(KIND_COLOURS[0]).wrapping_add(cpu.read16(d + D_COLOUR) << 4);
+    cpu.write16(o + COLOUR, colour);
+    cpu.write16(o + OWN_COLOUR, colour);
+    cpu.write8(o + LIFT, HATCH_LIFT);
+    cpu.write32(o + BOXES, HATCH_BOXES);
+    cpu.write32(o + LIFE, HATCH_LIFE);
+    cpu.write8(o + SIDE, ENEMIES);
+    let t = cpu.read8(d + D_TYPE);
+    cpu.write8(o + TYPE, t);
+    for k in 0..3 {
+        let v = cpu.read32(d + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    let kind = cpu.read16(d + D_KIND);
+    cpu.write16(o + KIND_OF, kind);
+    let mirror = cpu.read8(d + D_MIRROR);
+    cpu.write8(o + MIRROR, mirror);
+    cpu.write32(o + SCRIPT, script);
+    let direction = cpu.read16(d + D_DIRECTION);
+    cpu.write16(o + BASE_DIRECTION, direction);
+    let settings = cpu.read8(d + D_SETTINGS);
+    cpu.write8(o + SETTINGS, settings);
+    o
 }
