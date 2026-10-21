@@ -607,11 +607,11 @@ pub fn sl_put_polygon(cpu: &mut Cpu, pd: u32) -> u32 {
 /// The polygon (a sprite counts as one) about to be put counted, and its depth `z` checked: the
 /// polygons put (the counts' high half) against their limit, the depth past the window's near
 /// (its depth over 2 to the window's flag) and short of the far limit (whole units, FAR). The
-/// depth past the near, and the near; or none, the registers left as the SH-2 code's check
+/// depth past the near, the near and the count after; or none, the registers left as the SH-2 code's check
 /// (0x0607170c) leaves them, which then returns 0 from the put (it pops the put's PR).
 const FAR: u32 = 0x70;
 
-fn put_check(cpu: &mut Cpu, z: u32) -> Option<(u32, u32)> {
+fn put_check(cpu: &mut Cpu, z: u32) -> Option<(u32, u32, u32)> {
     let w = cpu.gbr();
     cpu.write8(w + PUT_FLAG, 1);
     let n = cpu.read16(w + POLYGONS_PUT).wrapping_add(1);
@@ -636,7 +636,7 @@ fn put_check(cpu: &mut Cpu, z: u32) -> Option<(u32, u32)> {
         return fail(cpu, &[(2, past), (3, near), (7, count + 1)]);
     }
     cpu.write16(w + COUNTS, (count + 1) as u16);
-    Some((past, near))
+    Some((past, near, count + 1))
 }
 
 /// slPutSprite: the sprite at `pos` (x, y, z and a scale: one below 0 is the scale at the
@@ -650,7 +650,7 @@ const SPRITE_QUADRANTS: u32 = 0x0606_7694;
 
 pub fn sl_put_sprite(cpu: &mut Cpu, pos: u32, attr: u32, angle: u32) -> u32 {
     let z = cpu.read32(pos + 8);
-    let Some((past, near)) = put_check(cpu, z) else {
+    let Some((past, near, _)) = put_check(cpu, z) else {
         return 0;
     };
     let w = cpu.gbr();
@@ -716,6 +716,787 @@ pub fn sl_put_sprite(cpu: &mut Cpu, pos: u32, attr: u32, angle: u32) -> u32 {
     next
 }
 
+/// The sprite put with two scales (slPutSprite's form for a sprite scaled differently across and
+/// down): counted and checked as a polygon is (put_check), its size from the character's (the
+/// sprite's table at the work area's +0x3c) times its two scales, sent as a polygon (command 40,
+/// the corners in the polygon buffer's slot) rather than as a sprite. Unturned, a rectangle about
+/// its place (its flips in the corners' signs). Turned, its corners turned by the angle's sine and
+/// cosine (SGL's table, by quadrant) and stepped from its place by a handler chosen by its flips
+/// (a jump table), each step checked against the window's edges (off them: nothing, 0); then,
+/// unless the sprite says not to, the first corner the one furthest up and left. 1, or 0.
+/// Written step for step from the SH-2 code (tools/port/asm2rs.py), each step with its address,
+/// its registers left as it leaves them.
+fn hv_off(cpu: &mut Cpu, regs: [u32; 7], mac: i64, t: bool) -> u32 {
+    let regs: Vec<(usize, u32)> = regs.into_iter().enumerate().map(|(k, v)| (k + 1, v)).collect();
+    cpu.leave(&regs);
+    cpu.leave_mac(mac);
+    cpu.leave_t(t);
+    0
+}
+
+#[allow(unused_assignments, unused_variables, unused_mut, clippy::all)]
+pub fn sl_put_sprite_hv(cpu: &mut Cpu, pos: u32, attr: u32, angle: u32) -> u32 {
+    let w = cpu.gbr();
+    let z = cpu.read32(pos + 8);
+    let Some((past, near, n)) = put_check(cpu, z) else {
+        return 0;
+    };
+    let [_, mut r1, _, _, mut r4, mut r5, mut r6, _, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, _] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let (mut r0, mut r2, mut r3, mut r7): (u32, u32, u32, u32);
+    let mut mac = (((cpu.sh2.mach as u64) << 32) | cpu.sh2.macl as u64) as i64;
+    let mut t: bool;
+    (r4, r5, r6) = (pos, attr, angle);
+    // after the check: the count in r0 and r7, the depth past the near in r2, the near in r3
+    r0 = n;
+    r2 = past;
+    r3 = near;
+    r7 = n;
+    t = false;
+    // the slot of the polygon buffer and the projected sizes
+    r0 = cpu.read32(w.wrapping_add(48)); // 060676b6 mov.l @(48,gbr),r0
+    r1 = cpu.read16(r5) as i16 as i32 as u32; r5 = r5.wrapping_add(2); // 060676b8 mov.w @r5+,r1
+    r7 = r0; // 060676ba mov r0,r7
+    r0 = cpu.read16(r5.wrapping_add(4)) as i16 as i32 as u32; // 060676bc mov.w @(4,r5),r0
+    r1 <<= 2; // 060676be shll2 r1
+    r2 = (r0 << 16) | (r2 >> 16); // 060676c0 xtrct r0,r2
+    cpu.write32(r7.wrapping_add(28), r2); // 060676c2 mov.l r2,@(28,r7)
+    r0 = cpu.read32(w.wrapping_add(60)); // 060676c4 mov.l @(60,gbr),r0
+    t = r1 >> 31 != 0; r1 <<= 1; // 060676c6 shll r1
+    r1 = r1.wrapping_add(r0); // 060676c8 add r0,r1
+    r2 = cpu.read16(r1) as i16 as i32 as u32; r1 = r1.wrapping_add(2); // 060676ca mov.w @r1+,r2
+    r0 = cpu.read32(r4.wrapping_add(12)); // 060676cc mov.l @(12,r4),r0
+    r3 = cpu.read16(r1) as i16 as i32 as u32; r1 = r1.wrapping_add(2); // 060676ce mov.w @r1+,r3
+    mac = (mac & !0xffff_ffff) | (r2.wrapping_mul(r0) as i64 & 0xffff_ffff); // 060676d0 mul.l r0,r2
+    r0 = cpu.read32(r4.wrapping_add(16)); // 060676d2 mov.l @(16,r4),r0
+    r1 = cpu.read32(r1); // 060676d4 mov.l @r1,r1
+    r2 = mac as u32; // 060676d6 sts macl,r2
+    mac = (mac & !0xffff_ffff) | (r3.wrapping_mul(r0) as i64 & 0xffff_ffff); // 060676d8 mul.l r0,r3
+    r0 = cpu.read16(r5) as i16 as i32 as u32; r5 = r5.wrapping_add(2); // 060676da mov.w @r5+,r0
+    cpu.write32(r7.wrapping_add(8), r1); // 060676dc mov.l r1,@(8,r7)
+    r3 = mac as u32; // 060676de sts macl,r3
+    r1 = cpu.read16(r5) as i16 as i32 as u32; r5 = r5.wrapping_add(2); // 060676e0 mov.w @r5+,r1
+    r5 = r5.wrapping_add(2i32 as u32); // 060676e2 add #2,r5
+    r1 <<= 16; // 060676e4 shll16 r1
+    r1 = (r0 << 16) | (r1 >> 16); // 060676e6 xtrct r0,r1
+    r0 = 0x060717d4; // 060676e8 mov.l 0x60676f8,r0
+    r5 = cpu.read16(r5) as i16 as i32 as u32; // 060676ea mov.w @r5,r5
+    cpu.write32(r7.wrapping_add(4), r1); // 060676ec mov.l r1,@(4,r7)
+    r1 >>= 16;
+    let r1_pushed = r1;
+    // the turn (0x060717d4)
+    t = r6 & r6 == 0;
+    r0 = (r6 & 0xffff_0000) | ((r6 & 0xff) << 8) | ((r6 >> 8) & 0xff);
+    if t {
+        // unturned: a rectangle about the place, off the window's edges nothing
+        r6 = cpu.read16(r4) as i16 as i32 as u32; // 0607174c mov.w @r4,r6
+        r0 = cpu.read16(w.wrapping_add(152)) as i16 as i32 as u32; // 0607174e mov.w @(152,gbr),r0
+        r1 = r6; // 06071750 mov r6,r1
+        r1 = r1.wrapping_add(r0); // 06071752 add r0,r1
+        r0 = cpu.read16(w.wrapping_add(140)) as i16 as i32 as u32; // 06071754 mov.w @(140,gbr),r0
+        r4 = cpu.read32(r4.wrapping_add(4)); // 06071756 mov.l @(4,r4),r4
+        t = r1 > r0; // 06071758 cmp/hi r0,r1
+        r0 = cpu.read16(w.wrapping_add(154)) as i16 as i32 as u32;
+        if t {
+            return hv_off(cpu, [r1, r2, r3, r4, r5, r6, r7], mac, t);
+        }
+        r1 = r4; // 0607175e mov r4,r1
+        r0 <<= 16; // 06071760 shll16 r0
+        r1 = r1.wrapping_add(r0); // 06071762 add r0,r1
+        r0 = cpu.read16(w.wrapping_add(142)) as i16 as i32 as u32; // 06071764 mov.w @(142,gbr),r0
+        r0 <<= 16; // 06071766 shll16 r0
+        t = r1 > r0; // 06071768 cmp/hi r0,r1
+        r0 = 3;
+        if t {
+            return hv_off(cpu, [r1, r2, r3, r4, r5, r6, r7], mac, t);
+        }
+        r5 ^= r0;
+        t = r2 as i32 >= 0;
+        r1 = 1;
+        if !t {
+            r2 = r2.wrapping_neg();
+            r0 = 16;
+            r5 ^= r0;
+        }
+        t = r3 as i32 >= 0;
+        r1 <<= 16;
+        if !t {
+            r3 = r3.wrapping_neg();
+            r0 = 32;
+            r5 ^= r0;
+        }
+        t = r2 as i32 >= r1 as i32;
+        r2 = r2.wrapping_sub(r1);
+        if !t {
+            r2 = 0;
+        }
+        t = r3 as i32 >= r1 as i32;
+        r3 = r3.wrapping_sub(r1);
+        if !t {
+            r3 = 0;
+        }
+        r2 = r2.rotate_left(16); // 06071798 swap.w r2,r2
+        r3 = (r2 << 16) | (r3 >> 16); // 0607179a xtrct r2,r3
+        cpu.write32(r7.wrapping_add(16), r3); // 0607179c mov.l r3,@(16,r7)
+        r0 = (r5 & 0xffff_0000) | ((r5 & 0xff) << 8) | ((r5 >> 8) & 0xff); // 0607179e swap.b r5,r0
+        t = r0 & 15 == 0; // 060717a0 tst #15,r0
+        if t {
+            r0 |= 10;
+        }
+        r0 = (r0 & 0xffff_0000) | ((r0 & 0xff) << 8) | ((r0 >> 8) & 0xff); // 060717a6 swap.b r0,r0
+        cpu.write16(r7.wrapping_add(0), r0 as u16); // 060717a8 mov.w r0,@(0,r7)
+        r4 = (r6 << 16) | (r4 >> 16); // 060717aa xtrct r6,r4
+        cpu.write32(r7.wrapping_add(12), r4); // 060717ac mov.l r4,@(12,r7)
+        r0 = cpu.read32(w.wrapping_add(72)); // 060717ae mov.l @(72,gbr),r0
+        r1 = 40i32 as u32; // 060717b0 mov #40,r1
+        cpu.write32(r0.wrapping_add(0), r1); // 060717b2 mov.l r1,@(0,r0)
+        cpu.write32(r0.wrapping_add(4), r7); // 060717b4 mov.l r7,@(4,r0)
+        r1 = 1i32 as u32; // 060717b6 mov #1,r1
+        cpu.write32(r0.wrapping_add(8), r1); // 060717b8 mov.l r1,@(8,r0)
+        r1 = 0i32 as u32; // 060717ba mov #0,r1
+        cpu.write32(r0.wrapping_add(12), r1); // 060717bc mov.l r1,@(12,r0)
+        r0 = r0.wrapping_add(16i32 as u32); // 060717be add #16,r0
+        r1 = 0x21000000; // 060717c0 mov.l 0x60719bc,r1
+        cpu.write32(w.wrapping_add(72), r0); // 060717c2 mov.l r0,@(72,gbr)
+        cpu.write16(r1, r0 as u16); // 060717c4 mov.w r0,@r1
+        r7 = r7.wrapping_add(-36i32 as u32); // 060717c6 add #-36,r7
+        r0 = r7; // 060717c8 mov r7,r0
+        cpu.write32(w.wrapping_add(48), r0); // 060717ca mov.l r0,@(48,gbr)
+        cpu.leave(&[(1, r1), (2, r2), (3, r3), (4, r4), (5, r5), (6, r6), (7, r7)]);
+        cpu.leave_mac(mac);
+        cpu.leave_t(t);
+        return 1;
+    }
+    // turned: the four corners turned and scaled, stepped by the sprite's flips (a handler each)
+    let mut r15 = cpu.stack() + 4;
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r14); // 060717da mov.l r14,@-r15
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r13); // 060717dc mov.l r13,@-r15
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r12); // 060717de mov.l r12,@-r15
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r11); // 060717e0 mov.l r11,@-r15
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r10); // 060717e2 mov.l r10,@-r15
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r9); // 060717e4 mov.l r9,@-r15
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r8); // 060717e6 mov.l r8,@-r15
+    r0 >>= 2; // 060717e8 shlr2 r0
+    r0 >>= 2; // 060717ea shlr2 r0
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r1); // 060717ec mov.l r1,@-r15
+    r8 = 12i32 as u32; // 060717ee mov #12,r8
+    r8 &= r0; // 060717f0 and r0,r8
+    r0 = 0x060719ac; // 060717f2 mova 0x60719ac,r0
+    r8 = r8.wrapping_add(r0); // 060717f4 add r0,r8
+    r1 = cpu.read8(r8) as i8 as i32 as u32; r8 = r8.wrapping_add(1); // 060717f6 mov.b @r8+,r1
+    r0 = cpu.read8(r8) as i8 as i32 as u32; r8 = r8.wrapping_add(1); // 060717f8 mov.b @r8+,r0
+    r13 = r6; // 060717fa mov r6,r13
+    r6 ^= r1; // 060717fc xor r1,r6
+    r1 = 0x00003ffe; // 060717fe mov.w 0x60719a4,r1
+    r13 ^= r0; // 06071800 xor r0,r13
+    r0 = 0x06069b28; // 06071802 mov.l 0x60719a8,r0
+    r6 &= r1; // 06071804 and r1,r6
+    r13 &= r1; // 06071806 and r1,r13
+    r1 = cpu.read8(r8) as i8 as i32 as u32; r8 = r8.wrapping_add(1); // 06071808 mov.b @r8+,r1
+    r6 = cpu.read16(r0.wrapping_add(r6)) as i16 as i32 as u32; // 0607180a mov.w @(r0,r6),r6
+    r13 = cpu.read16(r0.wrapping_add(r13)) as i16 as i32 as u32; // 0607180c mov.w @(r0,r13),r13
+    r0 = cpu.read8(r8) as i8 as i32 as u32; // 0607180e mov.b @r8,r0
+    r6 = r6 & 0xffff; // 06071810 extu.w r6,r6
+    r6 = r6.wrapping_add(2i32 as u32); // 06071812 add #2,r6
+    r6 ^= r1; // 06071814 xor r1,r6
+    mac = r2 as i32 as i64 * r6 as i32 as i64; // 06071816 dmuls.l r2,r6
+    r13 = r13 & 0xffff; // 06071818 extu.w r13,r13
+    r13 = r13.wrapping_add(2i32 as u32); // 0607181a add #2,r13
+    r13 ^= r0; // 0607181c xor r0,r13
+    r1 = (mac >> 32) as u32; // 0607181e sts mach,r1
+    r8 = mac as u32; // 06071820 sts macl,r8
+    mac = r3 as i32 as i64 * r6 as i32 as i64; // 06071822 dmuls.l r3,r6
+    r0 = cpu.read32(w.wrapping_add(152)); // 06071824 mov.l @(152,gbr),r0
+    r8 = (r1 << 16) | (r8 >> 16); // 06071826 xtrct r1,r8
+    r11 = r0; // 06071828 mov r0,r11
+    r11 <<= 16; // 0607182a shll16 r11
+    r1 = (mac >> 32) as u32; // 0607182c sts mach,r1
+    r9 = mac as u32; // 0607182e sts macl,r9
+    mac = r2 as i32 as i64 * r13 as i32 as i64; // 06071830 dmuls.l r2,r13
+    r9 = (r1 << 16) | (r9 >> 16); // 06071832 xtrct r1,r9
+    r10 = r0.rotate_left(16); // 06071834 swap.w r0,r10
+    r10 <<= 16; // 06071836 shll16 r10
+    r1 = (mac >> 32) as u32; // 06071838 sts mach,r1
+    r2 = mac as u32; // 0607183a sts macl,r2
+    mac = r3 as i32 as i64 * r13 as i32 as i64; // 0607183c dmuls.l r3,r13
+    r0 = cpu.read32(w.wrapping_add(140)); // 0607183e mov.l @(140,gbr),r0
+    r2 = (r1 << 16) | (r2 >> 16); // 06071840 xtrct r1,r2
+    r13 = r0; // 06071842 mov r0,r13
+    r13 <<= 16; // 06071844 shll16 r13
+    r1 = (mac >> 32) as u32; // 06071846 sts mach,r1
+    r3 = mac as u32; // 06071848 sts macl,r3
+    r12 = r0.rotate_left(16); // 0607184a swap.w r0,r12
+    r12 <<= 16; // 0607184c shll16 r12
+    r0 = (r5 & 0xffff_0000) | ((r5 & 0xff) << 8) | ((r5 >> 8) & 0xff); // 0607184e swap.b r5,r0
+    r3 = (r1 << 16) | (r3 >> 16); // 06071850 xtrct r1,r3
+    r0 &= 15; // 06071852 and #15,r0
+    r0 <<= 2; // 06071854 shll2 r0
+    r1 = r0; // 06071856 mov r0,r1
+    r0 = 0x060719c0; // 06071858 mova 0x60719c0,r0
+    r1 = cpu.read32(r0.wrapping_add(r1)); // 0607185a mov.l @(r0,r1),r1
+    r6 = cpu.read32(r4.wrapping_add(4)); // 0607185c mov.l @(4,r4),r6
+    let handler = r1;
+    r4 = cpu.read32(r4);
+    let mut bail;
+    match handler {
+        0x0607_1a00 | 0x0607_1a0a => {
+            if handler == 0x0607_1a00 {
+                r5 = (r5 & 0xffff_0000) | ((r5 & 0xff) << 8) | ((r5 >> 8) & 0xff); // 06071a00 swap.b r5,r5
+                r0 = -16i32 as u32; // 06071a02 mov #-16,r0
+                r0 &= r5; // 06071a04 and r5,r0
+                r0 |= 10; // 06071a06 or #10,r0
+                r5 = (r0 & 0xffff_0000) | ((r0 & 0xff) << 8) | ((r0 >> 8) & 0xff); // 06071a08 swap.b r0,r5
+            }
+            r0 = r2; // 06071a0a mov r2,r0
+            t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 06071a0c shar r0
+            r4 = r4.wrapping_sub(r0); // 06071a0e sub r0,r4
+            r0 = r9; // 06071a10 mov r9,r0
+            t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 06071a12 shar r0
+            r4 = r4.wrapping_add(r0); // 06071a14 add r0,r4
+            r0 = r4; // 06071a16 mov r4,r0
+            r0 = r0.wrapping_add(r10); // 06071a18 add r10,r0
+            t = r0 > r12; // 06071a1a cmp/hi r12,r0
+            bail = t;
+            r0 = r3; // 06071a1e mov r3,r0
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 06071a20 shar r0
+            r6 = r6.wrapping_sub(r0); // 06071a22 sub r0,r6
+            r0 = r8; // 06071a24 mov r8,r0
+            t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 06071a26 shar r0
+            r6 = r6.wrapping_sub(r0); // 06071a28 sub r0,r6
+            r0 = r6; // 06071a2a mov r6,r0
+            r0 = r0.wrapping_add(r11); // 06071a2c add r11,r0
+            t = r0 > r13; // 06071a2e cmp/hi r13,r0
+            bail = t;
+            r1 = r4.rotate_left(16); // 06071a32 swap.w r4,r1
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r4 = r4.wrapping_add(r2); // 06071a34 add r2,r4
+            r0 = r4; // 06071a36 mov r4,r0
+            r0 = r0.wrapping_add(r10); // 06071a38 add r10,r0
+            t = r0 > r12; // 06071a3a cmp/hi r12,r0
+            bail = t;
+            cpu.write16(r7, r5 as u16); // 06071a3e mov.w r5,@r7
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r5 = r6; // 06071a40 mov r6,r5
+            r6 = r6.wrapping_add(r8); // 06071a42 add r8,r6
+            r0 = r6; // 06071a44 mov r6,r0
+            r0 = r0.wrapping_add(r11); // 06071a46 add r11,r0
+            t = r0 > r13; // 06071a48 cmp/hi r13,r0
+            bail = t;
+            r5 = (r1 << 16) | (r5 >> 16); // 06071a4c xtrct r1,r5
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r0 = r4.rotate_left(16); // 06071a4e swap.w r4,r0
+            r1 = r6; // 06071a50 mov r6,r1
+            r1 = (r0 << 16) | (r1 >> 16); // 06071a52 xtrct r0,r1
+            r4 = r4.wrapping_sub(r9); // 06071a54 sub r9,r4
+            r0 = r4; // 06071a56 mov r4,r0
+            r0 = r0.wrapping_add(r10); // 06071a58 add r10,r0
+            t = r0 > r12; // 06071a5a cmp/hi r12,r0
+            bail = t;
+            r6 = r6.wrapping_add(r3); // 06071a5e add r3,r6
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r0 = r6; // 06071a60 mov r6,r0
+            r0 = r0.wrapping_add(r11); // 06071a62 add r11,r0
+            t = r0 > r13; // 06071a64 cmp/hi r13,r0
+            bail = t;
+            r3 = r4.rotate_left(16); // 06071a68 swap.w r4,r3
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r4 = r4.wrapping_sub(r2); // 06071a6a sub r2,r4
+            r10 = r10.wrapping_add(r4); // 06071a6c add r4,r10
+            t = r10 > r12; // 06071a6e cmp/hi r12,r10
+            bail = t;
+            r9 = r6; // 06071a72 mov r6,r9
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r6 = r6.wrapping_sub(r8); // 06071a74 sub r8,r6
+            r11 = r11.wrapping_add(r6); // 06071a76 add r6,r11
+            t = r11 > r13; // 06071a78 cmp/hi r13,r11
+            bail = t;
+            r4 = r4.rotate_left(16); // 06071a7c swap.w r4,r4
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r6 = (r4 << 16) | (r6 >> 16);
+        }
+        0x0607_1a82 | 0x0607_1a8a | 0x0607_1a92 | 0x0607_1a9a => {
+            match handler {
+                0x0607_1a82 => {
+                    r1 = 32;
+                    r3 = r3.wrapping_neg();
+                    r9 = r9.wrapping_neg();
+                    r5 ^= r1;
+                }
+                0x0607_1a8a => {
+                    r1 = 48;
+                    r3 = r3.wrapping_neg();
+                    r9 = r9.wrapping_neg();
+                    r2 = r2.wrapping_neg();
+                    r8 = r8.wrapping_neg();
+                    r5 ^= r1;
+                }
+                0x0607_1a92 => {
+                    r1 = 16;
+                    r2 = r2.wrapping_neg();
+                    r8 = r8.wrapping_neg();
+                    r5 ^= r1;
+                }
+                _ => {}
+            }
+            r0 = r4; // 06071a9a mov r4,r0
+            r0 = r0.wrapping_add(r10); // 06071a9c add r10,r0
+            t = r0 > r12; // 06071a9e cmp/hi r12,r0
+            bail = t;
+            r0 = r6; // 06071aa2 mov r6,r0
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r0 = r0.wrapping_add(r11); // 06071aa4 add r11,r0
+            t = r0 > r13; // 06071aa6 cmp/hi r13,r0
+            bail = t;
+            r1 = r4.rotate_left(16); // 06071aaa swap.w r4,r1
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r4 = r4.wrapping_add(r2); // 06071aac add r2,r4
+            r0 = r4; // 06071aae mov r4,r0
+            r0 = r0.wrapping_add(r10); // 06071ab0 add r10,r0
+            t = r0 > r12; // 06071ab2 cmp/hi r12,r0
+            bail = t;
+            cpu.write16(r7, r5 as u16); // 06071ab6 mov.w r5,@r7
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r5 = r6; // 06071ab8 mov r6,r5
+            r6 = r6.wrapping_add(r8); // 06071aba add r8,r6
+            r0 = r6; // 06071abc mov r6,r0
+            r0 = r0.wrapping_add(r11); // 06071abe add r11,r0
+            t = r0 > r13; // 06071ac0 cmp/hi r13,r0
+            bail = t;
+            r0 = r4.rotate_left(16); // 06071ac4 swap.w r4,r0
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r5 = (r1 << 16) | (r5 >> 16); // 06071ac6 xtrct r1,r5
+            r1 = r6; // 06071ac8 mov r6,r1
+            r1 = (r0 << 16) | (r1 >> 16); // 06071aca xtrct r0,r1
+            r4 = r4.wrapping_sub(r9); // 06071acc sub r9,r4
+            r0 = r4; // 06071ace mov r4,r0
+            r0 = r0.wrapping_add(r10); // 06071ad0 add r10,r0
+            t = r0 > r12; // 06071ad2 cmp/hi r12,r0
+            bail = t;
+            r6 = r6.wrapping_add(r3); // 06071ad6 add r3,r6
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r0 = r6; // 06071ad8 mov r6,r0
+            r0 = r0.wrapping_add(r11); // 06071ada add r11,r0
+            t = r0 > r13; // 06071adc cmp/hi r13,r0
+            bail = t;
+            r3 = r4.rotate_left(16); // 06071ae0 swap.w r4,r3
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r4 = r4.wrapping_sub(r2); // 06071ae2 sub r2,r4
+            r10 = r10.wrapping_add(r4); // 06071ae4 add r4,r10
+            t = r10 > r12; // 06071ae6 cmp/hi r12,r10
+            bail = t;
+            r9 = r6; // 06071aea mov r6,r9
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r6 = r6.wrapping_sub(r8); // 06071aec sub r8,r6
+            r11 = r11.wrapping_add(r6); // 06071aee add r6,r11
+            t = r11 > r13; // 06071af0 cmp/hi r13,r11
+            bail = t;
+            r4 = r4.rotate_left(16); // 06071af4 swap.w r4,r4
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r6 = (r4 << 16) | (r6 >> 16);
+        }
+        0x0607_1b0e | 0x0607_1b16 => {
+            if handler == 0x0607_1b0e {
+                r1 = 16i32 as u32; // 06071b0e mov #16,r1
+                r5 ^= r1; // 06071b10 xor r1,r5
+                r2 = r2.wrapping_neg(); // 06071b12 neg r2,r2
+                r8 = r8.wrapping_neg(); // 06071b14 neg r8,r8
+            }
+            r0 = r9; // 06071b16 mov r9,r0
+            t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 06071b18 shar r0
+            r4 = r4.wrapping_add(r0); // 06071b1a add r0,r4
+            r0 = r4; // 06071b1c mov r4,r0
+            r0 = r0.wrapping_add(r10); // 06071b1e add r10,r0
+            t = r0 > r12; // 06071b20 cmp/hi r12,r0
+            bail = t;
+            r0 = r3; // 06071b24 mov r3,r0
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 06071b26 shar r0
+            r6 = r6.wrapping_sub(r0); // 06071b28 sub r0,r6
+            r0 = r6; // 06071b2a mov r6,r0
+            r0 = r0.wrapping_add(r11); // 06071b2c add r11,r0
+            t = r0 > r13; // 06071b2e cmp/hi r13,r0
+            bail = t;
+            r1 = r4.rotate_left(16); // 06071b32 swap.w r4,r1
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r4 = r4.wrapping_add(r2); // 06071b34 add r2,r4
+            r0 = r4; // 06071b36 mov r4,r0
+            r0 = r0.wrapping_add(r10); // 06071b38 add r10,r0
+            t = r0 > r12; // 06071b3a cmp/hi r12,r0
+            bail = t;
+            cpu.write16(r7, r5 as u16); // 06071b3e mov.w r5,@r7
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r5 = r6; // 06071b40 mov r6,r5
+            r6 = r6.wrapping_add(r8); // 06071b42 add r8,r6
+            r0 = r6; // 06071b44 mov r6,r0
+            r0 = r0.wrapping_add(r11); // 06071b46 add r11,r0
+            t = r0 > r13; // 06071b48 cmp/hi r13,r0
+            bail = t;
+            r0 = r4.rotate_left(16); // 06071b4c swap.w r4,r0
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r5 = (r1 << 16) | (r5 >> 16); // 06071b4e xtrct r1,r5
+            r1 = r6; // 06071b50 mov r6,r1
+            r1 = (r0 << 16) | (r1 >> 16); // 06071b52 xtrct r0,r1
+            r4 = r4.wrapping_sub(r9); // 06071b54 sub r9,r4
+            r0 = r4; // 06071b56 mov r4,r0
+            r0 = r0.wrapping_add(r10); // 06071b58 add r10,r0
+            t = r0 > r12; // 06071b5a cmp/hi r12,r0
+            bail = t;
+            r6 = r6.wrapping_add(r3); // 06071b5e add r3,r6
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r0 = r6; // 06071b60 mov r6,r0
+            r0 = r0.wrapping_add(r11); // 06071b62 add r11,r0
+            t = r0 > r13; // 06071b64 cmp/hi r13,r0
+            bail = t;
+            r3 = r4.rotate_left(16); // 06071b68 swap.w r4,r3
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r4 = r4.wrapping_sub(r2); // 06071b6a sub r2,r4
+            r10 = r10.wrapping_add(r4); // 06071b6c add r4,r10
+            t = r10 > r12; // 06071b6e cmp/hi r12,r10
+            bail = t;
+            r9 = r6; // 06071b72 mov r6,r9
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r6 = r6.wrapping_sub(r8); // 06071b74 sub r8,r6
+            r11 = r11.wrapping_add(r6); // 06071b76 add r6,r11
+            t = r11 > r13; // 06071b78 cmp/hi r13,r11
+            bail = t;
+            r4 = r4.rotate_left(16); // 06071b7c swap.w r4,r4
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r6 = (r4 << 16) | (r6 >> 16);
+        }
+        0x0607_1b82 | 0x0607_1b8a => {
+            if handler == 0x0607_1b82 {
+                r1 = 32i32 as u32; // 06071b82 mov #32,r1
+                r5 ^= r1; // 06071b84 xor r1,r5
+                r3 = r3.wrapping_neg(); // 06071b86 neg r3,r3
+                r9 = r9.wrapping_neg(); // 06071b88 neg r9,r9
+            }
+            r0 = r2; // 06071b8a mov r2,r0
+            t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 06071b8c shar r0
+            r4 = r4.wrapping_sub(r0); // 06071b8e sub r0,r4
+            r0 = r4; // 06071b90 mov r4,r0
+            r0 = r0.wrapping_add(r10); // 06071b92 add r10,r0
+            t = r0 > r12; // 06071b94 cmp/hi r12,r0
+            bail = t;
+            r0 = r8; // 06071b98 mov r8,r0
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            t = r0 & 1 != 0; r0 = (r0 as i32 >> 1) as u32; // 06071b9a shar r0
+            r6 = r6.wrapping_sub(r0); // 06071b9c sub r0,r6
+            r0 = r6; // 06071b9e mov r6,r0
+            r0 = r0.wrapping_add(r11); // 06071ba0 add r11,r0
+            t = r0 > r13; // 06071ba2 cmp/hi r13,r0
+            bail = t;
+            r1 = r4.rotate_left(16); // 06071ba6 swap.w r4,r1
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r4 = r4.wrapping_add(r2); // 06071ba8 add r2,r4
+            r0 = r4; // 06071baa mov r4,r0
+            r0 = r0.wrapping_add(r10); // 06071bac add r10,r0
+            t = r0 > r12; // 06071bae cmp/hi r12,r0
+            bail = t;
+            cpu.write16(r7, r5 as u16); // 06071bb2 mov.w r5,@r7
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r5 = r6; // 06071bb4 mov r6,r5
+            r6 = r6.wrapping_add(r8); // 06071bb6 add r8,r6
+            r0 = r6; // 06071bb8 mov r6,r0
+            r0 = r0.wrapping_add(r11); // 06071bba add r11,r0
+            t = r0 > r13; // 06071bbc cmp/hi r13,r0
+            bail = t;
+            r0 = r4.rotate_left(16); // 06071bc0 swap.w r4,r0
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r5 = (r1 << 16) | (r5 >> 16); // 06071bc2 xtrct r1,r5
+            r1 = r6; // 06071bc4 mov r6,r1
+            r1 = (r0 << 16) | (r1 >> 16); // 06071bc6 xtrct r0,r1
+            r4 = r4.wrapping_sub(r9); // 06071bc8 sub r9,r4
+            r0 = r4; // 06071bca mov r4,r0
+            r0 = r0.wrapping_add(r10); // 06071bcc add r10,r0
+            t = r0 > r12; // 06071bce cmp/hi r12,r0
+            bail = t;
+            r6 = r6.wrapping_add(r3); // 06071bd2 add r3,r6
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r0 = r6; // 06071bd4 mov r6,r0
+            r0 = r0.wrapping_add(r11); // 06071bd6 add r11,r0
+            t = r0 > r13; // 06071bd8 cmp/hi r13,r0
+            bail = t;
+            r3 = r4.rotate_left(16); // 06071bdc swap.w r4,r3
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r4 = r4.wrapping_sub(r2); // 06071bde sub r2,r4
+            r10 = r10.wrapping_add(r4); // 06071be0 add r4,r10
+            t = r10 > r12; // 06071be2 cmp/hi r12,r10
+            bail = t;
+            r9 = r6; // 06071be6 mov r6,r9
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r6 = r6.wrapping_sub(r8); // 06071be8 sub r8,r6
+            r11 = r11.wrapping_add(r6); // 06071bea add r6,r11
+            t = r11 > r13; // 06071bec cmp/hi r13,r11
+            bail = t;
+            r4 = r4.rotate_left(16); // 06071bf0 swap.w r4,r4
+            if bail {
+                return hv_off(cpu, [r1_pushed, r2, r3, r4, r5, r6, r7], mac, t);
+            }
+            r6 = (r4 << 16) | (r6 >> 16);
+        }
+        _ => unreachable!("the sprite's handler"),
+    }
+    // the corners on screen (unless the sprite says not to look): the first corner the one
+    // furthest up and left, by the corners' words
+    r9 = (r3 << 16) | (r9 >> 16); // 06071862 xtrct r3,r9
+    r0 = cpu.read32(w.wrapping_add(144)); // 06071864 mov.l @(144,gbr),r0
+    r3 = r0 as i16 as i32 as u32; // 06071866 exts.w r0,r3
+    r2 = r0.rotate_left(16); // 06071868 swap.w r0,r2
+    r0 = cpu.read32(w.wrapping_add(132)); // 0607186a mov.l @(132,gbr),r0
+    r2 = r2 as i16 as i32 as u32; // 0607186c exts.w r2,r2
+    r13 = r0 & 0xffff; // 0607186e extu.w r0,r13
+    r12 = r0.rotate_left(16); // 06071870 swap.w r0,r12
+    r0 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06071872 mov.l @r15+,r0
+    r0 &= 4; // 06071874 and #4,r0
+    t = r0 & r0 == 0; // 06071876 tst r0,r0
+    let mut order = 0x0607_196c;
+    if t {
+        r0 = r5 as i16 as i32 as u32; // 0607187a exts.w r5,r0
+        r0 = r0.wrapping_add(r3); // 0607187c add r3,r0
+        t = r0 >= r13; // 0607187e cmp/hs r13,r0
+        r12 = r12 & 0xffff;
+        let mut first_ok = t;
+        if !t {
+            r0 = r5.rotate_left(16); // 06071884 swap.w r5,r0
+            r0 = r0 as i16 as i32 as u32; // 06071886 exts.w r0,r0
+            r0 = r0.wrapping_add(r2); // 06071888 add r2,r0
+            t = r12 > r0; // 0607188a cmp/hi r0,r12
+            first_ok = !t;
+        }
+        if first_ok {
+            order = 0;
+            r0 = r1 as i16 as i32 as u32; // 0607188e exts.w r1,r0
+            r0 = r0.wrapping_add(r3); // 06071890 add r3,r0
+            t = r0 >= r13; // 06071892 cmp/hs r13,r0
+            r0 = r1.rotate_left(16);
+            if !t {
+                r0 = r0 as i16 as i32 as u32; // 06071898 exts.w r0,r0
+                r0 = r0.wrapping_add(r2); // 0607189a add r2,r0
+                t = r12 > r0; // 0607189c cmp/hi r0,r12
+                if t {
+                    order = 0x0607_193c;
+                }
+            }
+            if order == 0 {
+                r0 = r9 as i16 as i32 as u32; // 060718a0 exts.w r9,r0
+                r0 = r0.wrapping_add(r3); // 060718a2 add r3,r0
+                t = r0 >= r13; // 060718a4 cmp/hs r13,r0
+                r0 = r9.rotate_left(16);
+                if !t {
+                    r0 = r0 as i16 as i32 as u32; // 060718aa exts.w r0,r0
+                    r0 = r0.wrapping_add(r2); // 060718ac add r2,r0
+                    t = r12 > r0; // 060718ae cmp/hi r0,r12
+                    if t {
+                        order = 0x0607_194c;
+                    }
+                }
+            }
+            if order == 0 {
+                r0 = r6 as i16 as i32 as u32; // 060718b2 exts.w r6,r0
+                r0 = r0.wrapping_add(r3); // 060718b4 add r3,r0
+                t = r0 >= r13; // 060718b6 cmp/hs r13,r0
+                r0 = r6.rotate_left(16);
+                if !t {
+                    r0 = r0 as i16 as i32 as u32; // 060718bc exts.w r0,r0
+                    r0 = r0.wrapping_add(r2); // 060718be add r2,r0
+                    t = r12 > r0; // 060718c0 cmp/hi r0,r12
+                    if t {
+                        order = 0x0607_195c;
+                    }
+                }
+            }
+            if order == 0 {
+                r8 = 1i32 as u32; // 060718c4 mov #1,r8
+                r8 <<= 16; // 060718c6 shll16 r8
+                t = r8 & 1 != 0; r8 >>= 1; // 060718c8 shlr r8
+                r2 = r6.rotate_left(16); // 060718ca swap.w r6,r2
+                t = r8 & r2 == 0; // 060718cc tst r8,r2
+                { let (x, b1) = r13.overflowing_sub(r13); let (y, b2) = x.overflowing_sub(t as u32); r13 = y; t = b1 || b2; } // 060718ce subc r13,r13
+                r13 = !r13; // 060718d0 not r13,r13
+                r13 ^= r2; // 060718d2 xor r2,r13
+                t = r8 & r6 == 0; // 060718d4 tst r8,r6
+                { let (x, b1) = r2.overflowing_sub(r2); let (y, b2) = x.overflowing_sub(t as u32); r2 = y; t = b1 || b2; } // 060718d6 subc r2,r2
+                r2 = !r2; // 060718d8 not r2,r2
+                r2 ^= r6; // 060718da xor r6,r2
+                r13 = r13.wrapping_add(r2); // 060718dc add r2,r13
+                r13 = r13 & 0xffff; // 060718de extu.w r13,r13
+                r0 = 0x0607195c; // 060718e0 mova 0x607195c,r0
+                r2 = r9.rotate_left(16); // 060718e2 swap.w r9,r2
+                t = r8 & r2 == 0; // 060718e4 tst r8,r2
+                { let (x, b1) = r12.overflowing_sub(r12); let (y, b2) = x.overflowing_sub(t as u32); r12 = y; t = b1 || b2; } // 060718e6 subc r12,r12
+                r12 = !r12; // 060718e8 not r12,r12
+                r12 ^= r2; // 060718ea xor r2,r12
+                t = r8 & r9 == 0; // 060718ec tst r8,r9
+                { let (x, b1) = r2.overflowing_sub(r2); let (y, b2) = x.overflowing_sub(t as u32); r2 = y; t = b1 || b2; } // 060718ee subc r2,r2
+                r2 = !r2; // 060718f0 not r2,r2
+                r2 ^= r9; // 060718f2 xor r9,r2
+                r12 = r12.wrapping_add(r2); // 060718f4 add r2,r12
+                r12 = r12 & 0xffff; // 060718f6 extu.w r12,r12
+                t = r12 as i32 > r13 as i32; // 060718f8 cmp/gt r13,r12
+                r2 = r1.rotate_left(16);
+                if !t {
+                    r13 = r12;
+                    r0 = 0x0607_194c;
+                }
+                t = r8 & r2 == 0; // 06071902 tst r8,r2
+                { let (x, b1) = r12.overflowing_sub(r12); let (y, b2) = x.overflowing_sub(t as u32); r12 = y; t = b1 || b2; } // 06071904 subc r12,r12
+                r12 = !r12; // 06071906 not r12,r12
+                r12 ^= r2; // 06071908 xor r2,r12
+                t = r8 & r1 == 0; // 0607190a tst r8,r1
+                { let (x, b1) = r2.overflowing_sub(r2); let (y, b2) = x.overflowing_sub(t as u32); r2 = y; t = b1 || b2; } // 0607190c subc r2,r2
+                r2 = !r2; // 0607190e not r2,r2
+                r2 ^= r1; // 06071910 xor r1,r2
+                r12 = r12.wrapping_add(r2); // 06071912 add r2,r12
+                r12 = r12 & 0xffff; // 06071914 extu.w r12,r12
+                t = r12 as i32 > r13 as i32; // 06071916 cmp/gt r13,r12
+                r2 = r5.rotate_left(16);
+                if !t {
+                    r13 = r12;
+                    r0 = 0x0607_193c;
+                }
+                t = r8 & r2 == 0; // 06071920 tst r8,r2
+                { let (x, b1) = r12.overflowing_sub(r12); let (y, b2) = x.overflowing_sub(t as u32); r12 = y; t = b1 || b2; } // 06071922 subc r12,r12
+                r12 = !r12; // 06071924 not r12,r12
+                r12 ^= r2; // 06071926 xor r2,r12
+                t = r8 & r5 == 0; // 06071928 tst r8,r5
+                { let (x, b1) = r2.overflowing_sub(r2); let (y, b2) = x.overflowing_sub(t as u32); r2 = y; t = b1 || b2; } // 0607192a subc r2,r2
+                r2 = !r2; // 0607192c not r2,r2
+                r2 ^= r5; // 0607192e xor r5,r2
+                r12 = r12.wrapping_add(r2); // 06071930 add r2,r12
+                t = r13 as i32 >= r12 as i32; // 06071932 cmp/ge r12,r13
+                order = if t { 0x0607_196c } else { r0 };
+            }
+        }
+    }
+    match order {
+        0x0607_193c => {
+            r0 = cpu.read16(r7.wrapping_add(0)) as i16 as i32 as u32; // 0607193c mov.w @(0,r7),r0
+            cpu.write32(r7.wrapping_add(16), r5); // 0607193e mov.l r5,@(16,r7)
+            r0 ^= 16; // 06071940 xor #16,r0
+            cpu.write16(r7.wrapping_add(0), r0 as u16); // 06071942 mov.w r0,@(0,r7)
+            cpu.write32(r7.wrapping_add(12), r1); // 06071944 mov.l r1,@(12,r7)
+            cpu.write32(r7.wrapping_add(24), r9); // 06071946 mov.l r9,@(24,r7)
+            cpu.write32(r7.wrapping_add(20), r6); // 0607194a mov.l r6,@(20,r7)
+        }
+        0x0607_194c => {
+            r0 = cpu.read16(r7.wrapping_add(0)) as i16 as i32 as u32; // 0607194c mov.w @(0,r7),r0
+            cpu.write32(r7.wrapping_add(20), r5); // 0607194e mov.l r5,@(20,r7)
+            r0 ^= 48; // 06071950 xor #48,r0
+            cpu.write16(r7.wrapping_add(0), r0 as u16); // 06071952 mov.w r0,@(0,r7)
+            cpu.write32(r7.wrapping_add(24), r1); // 06071954 mov.l r1,@(24,r7)
+            cpu.write32(r7.wrapping_add(12), r9); // 06071956 mov.l r9,@(12,r7)
+            cpu.write32(r7.wrapping_add(16), r6); // 0607195a mov.l r6,@(16,r7)
+        }
+        0x0607_195c => {
+            r0 = cpu.read16(r7.wrapping_add(0)) as i16 as i32 as u32; // 0607195c mov.w @(0,r7),r0
+            cpu.write32(r7.wrapping_add(24), r5); // 0607195e mov.l r5,@(24,r7)
+            r0 ^= 32; // 06071960 xor #32,r0
+            cpu.write16(r7.wrapping_add(0), r0 as u16); // 06071962 mov.w r0,@(0,r7)
+            cpu.write32(r7.wrapping_add(20), r1); // 06071964 mov.l r1,@(20,r7)
+            cpu.write32(r7.wrapping_add(16), r9); // 06071966 mov.l r9,@(16,r7)
+            cpu.write32(r7.wrapping_add(12), r6); // 0607196a mov.l r6,@(12,r7)
+        }
+        _ => {
+            cpu.write32(r7.wrapping_add(12), r5); // 0607196c mov.l r5,@(12,r7)
+            cpu.write32(r7.wrapping_add(16), r1); // 0607196e mov.l r1,@(16,r7)
+            cpu.write32(r7.wrapping_add(20), r9); // 06071970 mov.l r9,@(20,r7)
+            cpu.write32(r7.wrapping_add(24), r6); // 06071972 mov.l r6,@(24,r7)
+        }
+    }
+    // the command for the slot, the pushes popped
+    r0 = cpu.read32(w.wrapping_add(72)); // 06071974 mov.l @(72,gbr),r0
+    r1 = 40i32 as u32; // 06071976 mov #40,r1
+    cpu.write32(r0.wrapping_add(0), r1); // 06071978 mov.l r1,@(0,r0)
+    cpu.write32(r0.wrapping_add(4), r7); // 0607197a mov.l r7,@(4,r0)
+    r1 = 1i32 as u32; // 0607197c mov #1,r1
+    cpu.write32(r0.wrapping_add(8), r1); // 0607197e mov.l r1,@(8,r0)
+    r1 = 0i32 as u32; // 06071980 mov #0,r1
+    cpu.write32(r0.wrapping_add(12), r1); // 06071982 mov.l r1,@(12,r0)
+    r0 = r0.wrapping_add(16i32 as u32); // 06071984 add #16,r0
+    r1 = 0x21000000; // 06071986 mov.l 0x60719bc,r1
+    cpu.write32(w.wrapping_add(72), r0); // 06071988 mov.l r0,@(72,gbr)
+    cpu.write16(r1, r0 as u16); // 0607198a mov.w r0,@r1
+    r8 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 0607198c mov.l @r15+,r8
+    r9 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 0607198e mov.l @r15+,r9
+    r10 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06071990 mov.l @r15+,r10
+    r11 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06071992 mov.l @r15+,r11
+    r12 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06071994 mov.l @r15+,r12
+    r13 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06071996 mov.l @r15+,r13
+    r14 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06071998 mov.l @r15+,r14
+    r7 = r7.wrapping_add(-36i32 as u32); // 0607199a add #-36,r7
+    r0 = r7; // 0607199c mov r7,r0
+    cpu.write32(w.wrapping_add(48), r0); // 0607199e mov.l r0,@(48,gbr)
+    let _ = r15;
+    cpu.leave(&[(1, r1), (2, r2), (3, r3), (4, r4), (5, r5), (6, r6), (7, r7)]);
+    cpu.leave_mac(mac);
+    cpu.leave_t(t);
+    1
+
+}
+
 /// A polygon command of the caller's (`cmd`: 15 words, as VDP1's command as far as can be told)
 /// put at depth `z`: counted and checked as a polygon is (put_check), copied by DMA channel 0
 /// (after any copy before it ends, and waited for) into the polygon buffer's next slot (36 bytes
@@ -745,7 +1526,7 @@ fn dma0_wait(cpu: &mut Cpu, at: u32) {
 }
 
 pub fn sl_put_quad(cpu: &mut Cpu, cmd: u32, z: u32) -> u32 {
-    let Some((past, _)) = put_check(cpu, z) else {
+    let Some((past, _, _)) = put_check(cpu, z) else {
         return 0;
     };
     let w = cpu.gbr();
@@ -954,6 +1735,561 @@ pub fn sl_disp_sprite(cpu: &mut Cpu, pos: u32, attr: u32, angle: u32) -> u32 {
     cpu.leave_t(angle == 0);
     cpu.write8(w + PUT_FLAG, 1);
     1
+}
+
+/// slTan: the tangent of `a` (16.16), from a table of steps: the angle's 32nd of a turn picks an
+/// entry (8 bytes: a handler, a mask for the index, two bytes added to the step and xored into
+/// the result); each handler shifts the step left by its own amount (the further from the axis,
+/// the more), the one-bit shift leaving T the bit shifted out.
+const TAN_ENTRIES: u32 = 0x0606_eb04;
+const TAN_STEPS: u32 = 0x0606_ec38;
+const TAN_INDEX: u32 = 0x3ffc;
+const TAN_HANDLERS: [(u32, u32); 5] = [(0x0606_ec04, 0), (0x0606_ec0c, 1), (0x0606_ec16, 2), (0x0606_ec20, 4), (0x0606_ec2c, 8)];
+
+pub fn sl_tan(cpu: &mut Cpu, a: u32) -> u32 {
+    let a = a.wrapping_add(2);
+    let e = TAN_ENTRIES + ((a >> 10) & 0x1f) * 8;
+    let handler = cpu.read32(e);
+    let mask = cpu.read16(e + 4) as i16 as i32 as u32;
+    let xor = cpu.read8(e + 6) as i8 as i32 as u32;
+    let add = cpu.read8(e + 7) as i8 as i32 as u32;
+    let i = ((a ^ mask) & TAN_INDEX) >> 1;
+    let v = (cpu.read16(TAN_STEPS + i) as u32).wrapping_add(add);
+    let shift = TAN_HANDLERS.iter().find(|(h, _)| *h == handler).map(|&(_, s)| s).expect("slTan's handler");
+    if shift == 1 {
+        cpu.leave_t(v >> 31 != 0);
+    }
+    cpu.leave(&[(1, handler), (2, add), (3, xor), (4, i), (5, TAN_INDEX)]);
+    (v << shift) ^ xor
+}
+
+/// The current matrix inverted in place (Gauss-Jordan, as SGL's asm does it): at each of the
+/// first two steps the row with the biggest pivot swapped up (its first columns kept in
+/// registers, the swap noted in a code byte), the other rows reduced by it with the quotients on
+/// the divide unit (each started one step before it is read; the place's products a byte lower),
+/// the pivot row divided through; the swaps undone at the end. Written step for step from the
+/// SH-2 code (tools/port/asm2rs.py), each step with its address, and its registers left as it
+/// leaves them.
+#[allow(unused_assignments, clippy::all)]
+pub fn sl_inverse(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, ..] = cpu.sh2.r;
+    let mut mac: i64;
+    let mut t: bool;
+    r0 = cpu.read32(w + MATRIX);
+    // the first pivot: the biggest of the first column
+    r6 = r0; // 06071d34 mov r0,r6
+    r0 = cpu.read32(r6.wrapping_add(0)); // 06071d36 mov.l @(0,r6),r0
+    r9 = 0i32 as u32; // 06071d38 mov #0,r9
+    r3 = r0; // 06071d3a mov r0,r3
+    t = r0 as i32 >= 0; // 06071d3c cmp/pz r0
+    r1 = cpu.read32(r6.wrapping_add(16));
+    if !t {
+        r3 = r0.wrapping_neg();
+    }
+    r4 = r1; // 06071d44 mov r1,r4
+    t = r1 as i32 >= 0; // 06071d46 cmp/pz r1
+    r2 = cpu.read32(r6.wrapping_add(32));
+    if !t {
+        r4 = r1.wrapping_neg();
+    }
+    t = r3 >= r4;
+    r5 = r2;
+    if !t {
+        r3 = r4;
+        r9 = 1;
+    }
+    t = r2 as i32 >= 0;
+    if !t {
+        r5 = r2.wrapping_neg();
+    }
+    t = r3 >= r5;
+    r8 = cpu.read32(r6.wrapping_add(4));
+    let swapped = if !t {
+        // the third row's: rows 0 and 2 swapped (their first column kept in registers)
+        r9 = cpu.read32(r6.wrapping_add(8)); // 06071d64 mov.l @(8,r6),r9
+        r3 = cpu.read32(r6.wrapping_add(12)); // 06071d66 mov.l @(12,r6),r3
+        r4 = cpu.read32(r6.wrapping_add(44)); // 06071d68 mov.l @(44,r6),r4
+        r7 = cpu.read32(r6.wrapping_add(40)); // 06071d6a mov.l @(40,r6),r7
+        r5 = cpu.read32(r6.wrapping_add(36)); // 06071d6c mov.l @(36,r6),r5
+        cpu.write32(r6.wrapping_add(44), r3); // 06071d6e mov.l r3,@(44,r6)
+        cpu.write32(r6.wrapping_add(12), r4); // 06071d70 mov.l r4,@(12,r6)
+        cpu.write32(r6.wrapping_add(40), r9); // 06071d72 mov.l r9,@(40,r6)
+        cpu.write32(r6.wrapping_add(8), r7); // 06071d74 mov.l r7,@(8,r6)
+        cpu.write32(r6.wrapping_add(36), r8); // 06071d76 mov.l r8,@(36,r6)
+        r3 = r2; // 06071d78 mov r2,r3
+        r2 = r0; // 06071d7a mov r0,r2
+        r9 = 2;
+        true
+    } else {
+        t = r9 == 0;
+        if !t {
+            // the second row's: rows 0 and 1 swapped
+            r9 = cpu.read32(r6.wrapping_add(8)); // 06071d84 mov.l @(8,r6),r9
+            r3 = cpu.read32(r6.wrapping_add(12)); // 06071d86 mov.l @(12,r6),r3
+            r4 = cpu.read32(r6.wrapping_add(28)); // 06071d88 mov.l @(28,r6),r4
+            r7 = cpu.read32(r6.wrapping_add(24)); // 06071d8a mov.l @(24,r6),r7
+            r5 = cpu.read32(r6.wrapping_add(20)); // 06071d8c mov.l @(20,r6),r5
+            cpu.write32(r6.wrapping_add(28), r3); // 06071d8e mov.l r3,@(28,r6)
+            cpu.write32(r6.wrapping_add(12), r4); // 06071d90 mov.l r4,@(12,r6)
+            cpu.write32(r6.wrapping_add(24), r9); // 06071d92 mov.l r9,@(24,r6)
+            cpu.write32(r6.wrapping_add(8), r7); // 06071d94 mov.l r7,@(8,r6)
+            cpu.write32(r6.wrapping_add(20), r8); // 06071d96 mov.l r8,@(20,r6)
+            r3 = r1; // 06071d98 mov r1,r3
+            r1 = r0; // 06071d9a mov r0,r1
+            r9 = 1i32 as u32; // 06071d9c mov #1,r9
+            true
+        } else {
+            false
+        }
+    };
+    if swapped {
+        r8 = r5;
+        r0 = r3;
+    }
+    // the first elimination (pivot row 0), the quotients on the divide unit one step behind
+    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071da2 dmuls.l r1,r8
+    r10 = -1i32 as u32; // 06071da4 mov #-1,r10
+    r10 <<= 8; // 06071da6 shll8 r10
+    cpu.write32(r10.wrapping_add(0), r0); // 06071da8 mov.l r0,@(0,r10)
+    r4 = (mac >> 32) as u32; // 06071daa sts mach,r4
+    r5 = mac as u32; // 06071dac sts macl,r5
+    cpu.write32(r10.wrapping_add(16), r4); // 06071dae mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r5); // 06071db0 mov.l r5,@(20,r10)
+    r5 = cpu.read32(r6.wrapping_add(20)); // 06071db2 mov.l @(20,r6),r5
+    r4 = cpu.read32(r10.wrapping_add(28)); // 06071db4 mov.l @(28,r10),r4
+    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071db6 dmuls.l r2,r8
+    r5 = r5.wrapping_sub(r4); // 06071db8 sub r4,r5
+    cpu.write32(r6.wrapping_add(20), r5); // 06071dba mov.l r5,@(20,r6)
+    cpu.write32(r10.wrapping_add(0), r0); // 06071dbc mov.l r0,@(0,r10)
+    r4 = (mac >> 32) as u32; // 06071dbe sts mach,r4
+    r5 = mac as u32; // 06071dc0 sts macl,r5
+    cpu.write32(r10.wrapping_add(16), r4); // 06071dc2 mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r5); // 06071dc4 mov.l r5,@(20,r10)
+    r5 = cpu.read32(r6.wrapping_add(36)); // 06071dc6 mov.l @(36,r6),r5
+    r3 = r8.rotate_left(16); // 06071dc8 swap.w r8,r3
+    r3 = r3 as i16 as i32 as u32; // 06071dca exts.w r3,r3
+    r8 <<= 16; // 06071dcc shll16 r8
+    r4 = cpu.read32(r10.wrapping_add(28)); // 06071dce mov.l @(28,r10),r4
+    cpu.write32(r10.wrapping_add(0), r0); // 06071dd0 mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r3); // 06071dd2 mov.l r3,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r8); // 06071dd4 mov.l r8,@(20,r10)
+    r5 = r5.wrapping_sub(r4); // 06071dd6 sub r4,r5
+    cpu.write32(r6.wrapping_add(36), r5); // 06071dd8 mov.l r5,@(36,r6)
+    r8 = cpu.read32(r6.wrapping_add(8)); // 06071dda mov.l @(8,r6),r8
+    r3 = cpu.read32(r10.wrapping_add(28)); // 06071ddc mov.l @(28,r10),r3
+    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071dde dmuls.l r1,r8
+    r3 = r3.wrapping_neg(); // 06071de0 neg r3,r3
+    cpu.write32(r6.wrapping_add(4), r3); // 06071de2 mov.l r3,@(4,r6)
+    cpu.write32(r10.wrapping_add(0), r0); // 06071de4 mov.l r0,@(0,r10)
+    r4 = (mac >> 32) as u32; // 06071de6 sts mach,r4
+    r5 = mac as u32; // 06071de8 sts macl,r5
+    cpu.write32(r10.wrapping_add(16), r4); // 06071dea mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r5); // 06071dec mov.l r5,@(20,r10)
+    r5 = cpu.read32(r6.wrapping_add(24)); // 06071dee mov.l @(24,r6),r5
+    r4 = cpu.read32(r10.wrapping_add(28)); // 06071df0 mov.l @(28,r10),r4
+    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071df2 dmuls.l r2,r8
+    r5 = r5.wrapping_sub(r4); // 06071df4 sub r4,r5
+    cpu.write32(r6.wrapping_add(24), r5); // 06071df6 mov.l r5,@(24,r6)
+    cpu.write32(r10.wrapping_add(0), r0); // 06071df8 mov.l r0,@(0,r10)
+    r4 = (mac >> 32) as u32; // 06071dfa sts mach,r4
+    r5 = mac as u32; // 06071dfc sts macl,r5
+    cpu.write32(r10.wrapping_add(16), r4); // 06071dfe mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r5); // 06071e00 mov.l r5,@(20,r10)
+    r3 = r8.rotate_left(16); // 06071e02 swap.w r8,r3
+    r3 = r3 as i16 as i32 as u32; // 06071e04 exts.w r3,r3
+    r8 <<= 16; // 06071e06 shll16 r8
+    r5 = cpu.read32(r6.wrapping_add(40)); // 06071e08 mov.l @(40,r6),r5
+    r4 = cpu.read32(r10.wrapping_add(28)); // 06071e0a mov.l @(28,r10),r4
+    cpu.write32(r10.wrapping_add(0), r0); // 06071e0c mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r3); // 06071e0e mov.l r3,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r8); // 06071e10 mov.l r8,@(20,r10)
+    r5 = r5.wrapping_sub(r4); // 06071e12 sub r4,r5
+    cpu.write32(r6.wrapping_add(40), r5); // 06071e14 mov.l r5,@(40,r6)
+    r8 = cpu.read32(r6.wrapping_add(12)); // 06071e16 mov.l @(12,r6),r8
+    r3 = cpu.read32(r10.wrapping_add(28)); // 06071e18 mov.l @(28,r10),r3
+    r4 = r8.rotate_left(16); // 06071e1a swap.w r8,r4
+    r4 = (r4 & 0xffff_0000) | ((r4 & 0xff) << 8) | ((r4 >> 8) & 0xff); // 06071e1c swap.b r4,r4
+    r4 = r4 as i8 as i32 as u32; // 06071e1e exts.b r4,r4
+    r8 <<= 8; // 06071e20 shll8 r8
+    cpu.write32(r10.wrapping_add(0), r0); // 06071e22 mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r4); // 06071e24 mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r8); // 06071e26 mov.l r8,@(20,r10)
+    r3 = r3.wrapping_neg(); // 06071e28 neg r3,r3
+    cpu.write32(r6.wrapping_add(8), r3); // 06071e2a mov.l r3,@(8,r6)
+    r8 = cpu.read32(r10.wrapping_add(28)); // 06071e2c mov.l @(28,r10),r8
+    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071e2e dmuls.l r1,r8
+    r5 = cpu.read32(r6.wrapping_add(28)); // 06071e30 mov.l @(28,r6),r5
+    r3 = (mac >> 32) as u32; // 06071e32 sts mach,r3
+    r4 = mac as u32; // 06071e34 sts macl,r4
+    r3 <<= 8; // 06071e36 shll8 r3
+    r3 <<= 16; // 06071e38 shll16 r3
+    r4 >>= 8; // 06071e3a shlr8 r4
+    r4 |= r3; // 06071e3c or r3,r4
+    r5 = r5.wrapping_sub(r4); // 06071e3e sub r4,r5
+    cpu.write32(r6.wrapping_add(28), r5); // 06071e40 mov.l r5,@(28,r6)
+    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071e42 dmuls.l r2,r8
+    r5 = cpu.read32(r6.wrapping_add(44)); // 06071e44 mov.l @(44,r6),r5
+    r3 = (mac >> 32) as u32; // 06071e46 sts mach,r3
+    r4 = mac as u32; // 06071e48 sts macl,r4
+    r3 <<= 8; // 06071e4a shll8 r3
+    r3 <<= 16; // 06071e4c shll16 r3
+    r4 >>= 8; // 06071e4e shlr8 r4
+    r4 |= r3; // 06071e50 or r3,r4
+    r5 = r5.wrapping_sub(r4); // 06071e52 sub r4,r5
+    cpu.write32(r6.wrapping_add(44), r5); // 06071e54 mov.l r5,@(44,r6)
+    r8 = r8.wrapping_neg(); // 06071e56 neg r8,r8
+    r8 <<= 8; // 06071e58 shll8 r8
+    cpu.write32(r6.wrapping_add(12), r8); // 06071e5a mov.l r8,@(12,r6)
+    r3 = r1.rotate_left(16); // 06071e5c swap.w r1,r3
+    r3 = r3 as i16 as i32 as u32; // 06071e5e exts.w r3,r3
+    r1 <<= 16; // 06071e60 shll16 r1
+    cpu.write32(r10.wrapping_add(0), r0); // 06071e62 mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r3); // 06071e64 mov.l r3,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r1); // 06071e66 mov.l r1,@(20,r10)
+    r3 = r2.rotate_left(16); // 06071e68 swap.w r2,r3
+    r3 = r3 as i16 as i32 as u32; // 06071e6a exts.w r3,r3
+    r2 <<= 16; // 06071e6c shll16 r2
+    r8 = cpu.read32(r10.wrapping_add(28)); // 06071e6e mov.l @(28,r10),r8
+    cpu.write32(r10.wrapping_add(0), r0); // 06071e70 mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r3); // 06071e72 mov.l r3,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r2); // 06071e74 mov.l r2,@(20,r10)
+    cpu.write32(r6.wrapping_add(16), r8); // 06071e76 mov.l r8,@(16,r6)
+    r1 = 1i32 as u32; // 06071e78 mov #1,r1
+    r3 = 0i32 as u32; // 06071e7a mov #0,r3
+    r5 = cpu.read32(r10.wrapping_add(28)); // 06071e7c mov.l @(28,r10),r5
+    cpu.write32(r10.wrapping_add(0), r0); // 06071e7e mov.l r0,@(0,r10)
+    cpu.write32(r6.wrapping_add(32), r5); // 06071e80 mov.l r5,@(32,r6)
+    cpu.write32(r10.wrapping_add(16), r1); // 06071e82 mov.l r1,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r3); // 06071e84 mov.l r3,@(20,r10)
+    r0 = cpu.read32(r6.wrapping_add(20)); // 06071e86 mov.l @(20,r6),r0
+    r3 = 0i32 as u32; // 06071e88 mov #0,r3
+    r4 = r0; // 06071e8a mov r0,r4
+    t = r0 as i32 >= 0; // 06071e8c cmp/pz r0
+    r2 = cpu.read32(r6.wrapping_add(36));
+    if !t {
+        r4 = r0.wrapping_neg();
+    }
+    t = r2 as i32 >= 0;
+    r1 = r2;
+    if !t {
+        r1 = r2.wrapping_neg();
+    }
+    // the second pivot: the bigger of rows 1 and 2 in the second column
+    t = r4 >= r1;
+    r8 = cpu.read32(r6.wrapping_add(16));
+    if !t {
+        r3 = cpu.read32(r6.wrapping_add(28)); // 06071ea2 mov.l @(28,r6),r3
+        r4 = cpu.read32(r6.wrapping_add(44)); // 06071ea4 mov.l @(44,r6),r4
+        r5 = cpu.read32(r6.wrapping_add(24)); // 06071ea6 mov.l @(24,r6),r5
+        r1 = cpu.read32(r6.wrapping_add(40)); // 06071ea8 mov.l @(40,r6),r1
+        cpu.write32(r6.wrapping_add(44), r3); // 06071eaa mov.l r3,@(44,r6)
+        cpu.write32(r6.wrapping_add(28), r4); // 06071eac mov.l r4,@(28,r6)
+        cpu.write32(r6.wrapping_add(40), r5); // 06071eae mov.l r5,@(40,r6)
+        cpu.write32(r6.wrapping_add(24), r1); // 06071eb0 mov.l r1,@(24,r6)
+        r5 = cpu.read32(r6.wrapping_add(32)); // 06071eb2 mov.l @(32,r6),r5
+        cpu.write32(r6.wrapping_add(32), r8); // 06071eb4 mov.l r8,@(32,r6)
+        r8 = r5; // 06071eb6 mov r5,r8
+        r3 = r2; // 06071eb8 mov r2,r3
+        r2 = r0; // 06071eba mov r0,r2
+        r0 = r3; // 06071ebc mov r3,r0
+        r3 = 2i32 as u32; // 06071ebe mov #2,r3
+    }
+    // the second and third eliminations
+    r1 = cpu.read32(r6.wrapping_add(4)); // 06071ec0 mov.l @(4,r6),r1
+    r9 <<= 8; // 06071ec2 shll8 r9
+    r9 |= r3; // 06071ec4 or r3,r9
+    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071ec6 dmuls.l r1,r8
+    r3 = cpu.read32(r10.wrapping_add(28)); // 06071ec8 mov.l @(28,r10),r3
+    cpu.write32(r10.wrapping_add(0), r0); // 06071eca mov.l r0,@(0,r10)
+    cpu.write32(r6.wrapping_add(0), r3); // 06071ecc mov.l r3,@(0,r6)
+    r4 = (mac >> 32) as u32; // 06071ece sts mach,r4
+    r5 = mac as u32; // 06071ed0 sts macl,r5
+    cpu.write32(r10.wrapping_add(16), r4); // 06071ed2 mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r5); // 06071ed4 mov.l r5,@(20,r10)
+    r4 = cpu.read32(r10.wrapping_add(28)); // 06071ed6 mov.l @(28,r10),r4
+    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071ed8 dmuls.l r2,r8
+    r3 = r3.wrapping_sub(r4); // 06071eda sub r4,r3
+    cpu.write32(r6.wrapping_add(0), r3); // 06071edc mov.l r3,@(0,r6)
+    cpu.write32(r10.wrapping_add(0), r0); // 06071ede mov.l r0,@(0,r10)
+    r4 = (mac >> 32) as u32; // 06071ee0 sts mach,r4
+    r5 = mac as u32; // 06071ee2 sts macl,r5
+    cpu.write32(r10.wrapping_add(16), r4); // 06071ee4 mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r5); // 06071ee6 mov.l r5,@(20,r10)
+    r3 = r8.rotate_left(16); // 06071ee8 swap.w r8,r3
+    r3 = r3 as i16 as i32 as u32; // 06071eea exts.w r3,r3
+    r8 <<= 16; // 06071eec shll16 r8
+    r5 = cpu.read32(r6.wrapping_add(32)); // 06071eee mov.l @(32,r6),r5
+    r4 = cpu.read32(r10.wrapping_add(28)); // 06071ef0 mov.l @(28,r10),r4
+    cpu.write32(r10.wrapping_add(0), r0); // 06071ef2 mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r3); // 06071ef4 mov.l r3,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r8); // 06071ef6 mov.l r8,@(20,r10)
+    r5 = r5.wrapping_sub(r4); // 06071ef8 sub r4,r5
+    cpu.write32(r6.wrapping_add(32), r5); // 06071efa mov.l r5,@(32,r6)
+    r8 = cpu.read32(r6.wrapping_add(24)); // 06071efc mov.l @(24,r6),r8
+    r3 = cpu.read32(r10.wrapping_add(28)); // 06071efe mov.l @(28,r10),r3
+    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071f00 dmuls.l r1,r8
+    r3 = r3.wrapping_neg(); // 06071f02 neg r3,r3
+    cpu.write32(r6.wrapping_add(16), r3); // 06071f04 mov.l r3,@(16,r6)
+    cpu.write32(r10.wrapping_add(0), r0); // 06071f06 mov.l r0,@(0,r10)
+    r4 = (mac >> 32) as u32; // 06071f08 sts mach,r4
+    r5 = mac as u32; // 06071f0a sts macl,r5
+    cpu.write32(r10.wrapping_add(16), r4); // 06071f0c mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r5); // 06071f0e mov.l r5,@(20,r10)
+    r5 = cpu.read32(r6.wrapping_add(8)); // 06071f10 mov.l @(8,r6),r5
+    r4 = cpu.read32(r10.wrapping_add(28)); // 06071f12 mov.l @(28,r10),r4
+    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071f14 dmuls.l r2,r8
+    r5 = r5.wrapping_sub(r4); // 06071f16 sub r4,r5
+    cpu.write32(r6.wrapping_add(8), r5); // 06071f18 mov.l r5,@(8,r6)
+    cpu.write32(r10.wrapping_add(0), r0); // 06071f1a mov.l r0,@(0,r10)
+    r4 = (mac >> 32) as u32; // 06071f1c sts mach,r4
+    r5 = mac as u32; // 06071f1e sts macl,r5
+    cpu.write32(r10.wrapping_add(16), r4); // 06071f20 mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r5); // 06071f22 mov.l r5,@(20,r10)
+    r3 = r8.rotate_left(16); // 06071f24 swap.w r8,r3
+    r3 = r3 as i16 as i32 as u32; // 06071f26 exts.w r3,r3
+    r8 <<= 16; // 06071f28 shll16 r8
+    r5 = cpu.read32(r6.wrapping_add(40)); // 06071f2a mov.l @(40,r6),r5
+    r4 = cpu.read32(r10.wrapping_add(28)); // 06071f2c mov.l @(28,r10),r4
+    cpu.write32(r10.wrapping_add(0), r0); // 06071f2e mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r3); // 06071f30 mov.l r3,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r8); // 06071f32 mov.l r8,@(20,r10)
+    r5 = r5.wrapping_sub(r4); // 06071f34 sub r4,r5
+    cpu.write32(r6.wrapping_add(40), r5); // 06071f36 mov.l r5,@(40,r6)
+    r8 = cpu.read32(r6.wrapping_add(28)); // 06071f38 mov.l @(28,r6),r8
+    r3 = cpu.read32(r10.wrapping_add(28)); // 06071f3a mov.l @(28,r10),r3
+    r4 = r8.rotate_left(16); // 06071f3c swap.w r8,r4
+    r4 = (r4 & 0xffff_0000) | ((r4 & 0xff) << 8) | ((r4 >> 8) & 0xff); // 06071f3e swap.b r4,r4
+    r4 = r4 as i8 as i32 as u32; // 06071f40 exts.b r4,r4
+    r8 <<= 8; // 06071f42 shll8 r8
+    cpu.write32(r10.wrapping_add(0), r0); // 06071f44 mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r4); // 06071f46 mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r8); // 06071f48 mov.l r8,@(20,r10)
+    r3 = r3.wrapping_neg(); // 06071f4a neg r3,r3
+    cpu.write32(r6.wrapping_add(24), r3); // 06071f4c mov.l r3,@(24,r6)
+    r8 = cpu.read32(r10.wrapping_add(28)); // 06071f4e mov.l @(28,r10),r8
+    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071f50 dmuls.l r1,r8
+    r5 = cpu.read32(r6.wrapping_add(12)); // 06071f52 mov.l @(12,r6),r5
+    r3 = (mac >> 32) as u32; // 06071f54 sts mach,r3
+    r4 = mac as u32; // 06071f56 sts macl,r4
+    r3 <<= 8; // 06071f58 shll8 r3
+    r3 <<= 16; // 06071f5a shll16 r3
+    r4 >>= 8; // 06071f5c shlr8 r4
+    r4 |= r3; // 06071f5e or r3,r4
+    r5 = r5.wrapping_sub(r4); // 06071f60 sub r4,r5
+    cpu.write32(r6.wrapping_add(12), r5); // 06071f62 mov.l r5,@(12,r6)
+    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071f64 dmuls.l r2,r8
+    r5 = cpu.read32(r6.wrapping_add(44)); // 06071f66 mov.l @(44,r6),r5
+    r3 = (mac >> 32) as u32; // 06071f68 sts mach,r3
+    r4 = mac as u32; // 06071f6a sts macl,r4
+    r3 <<= 8; // 06071f6c shll8 r3
+    r3 <<= 16; // 06071f6e shll16 r3
+    r4 >>= 8; // 06071f70 shlr8 r4
+    r4 |= r3; // 06071f72 or r3,r4
+    r5 = r5.wrapping_sub(r4); // 06071f74 sub r4,r5
+    cpu.write32(r6.wrapping_add(44), r5); // 06071f76 mov.l r5,@(44,r6)
+    cpu.write32(r10.wrapping_add(0), r0); // 06071f78 mov.l r0,@(0,r10)
+    r3 = r1.rotate_left(16); // 06071f7a swap.w r1,r3
+    r3 = r3 as i16 as i32 as u32; // 06071f7c exts.w r3,r3
+    cpu.write32(r10.wrapping_add(16), r3); // 06071f7e mov.l r3,@(16,r10)
+    r1 <<= 16; // 06071f80 shll16 r1
+    cpu.write32(r10.wrapping_add(20), r1); // 06071f82 mov.l r1,@(20,r10)
+    r8 = r8.wrapping_neg(); // 06071f84 neg r8,r8
+    r8 <<= 8; // 06071f86 shll8 r8
+    cpu.write32(r6.wrapping_add(28), r8); // 06071f88 mov.l r8,@(28,r6)
+    r1 = cpu.read32(r10.wrapping_add(28)); // 06071f8a mov.l @(28,r10),r1
+    cpu.write32(r10.wrapping_add(0), r0); // 06071f8c mov.l r0,@(0,r10)
+    cpu.write32(r6.wrapping_add(4), r1); // 06071f8e mov.l r1,@(4,r6)
+    r3 = r2.rotate_left(16); // 06071f90 swap.w r2,r3
+    r3 = r3 as i16 as i32 as u32; // 06071f92 exts.w r3,r3
+    cpu.write32(r10.wrapping_add(16), r3); // 06071f94 mov.l r3,@(16,r10)
+    r2 <<= 16; // 06071f96 shll16 r2
+    cpu.write32(r10.wrapping_add(20), r2); // 06071f98 mov.l r2,@(20,r10)
+    r1 = 1i32 as u32; // 06071f9a mov #1,r1
+    r3 = 0i32 as u32; // 06071f9c mov #0,r3
+    r2 = cpu.read32(r10.wrapping_add(28)); // 06071f9e mov.l @(28,r10),r2
+    cpu.write32(r10.wrapping_add(0), r0); // 06071fa0 mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r1); // 06071fa2 mov.l r1,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r3); // 06071fa4 mov.l r3,@(20,r10)
+    cpu.write32(r6.wrapping_add(36), r2); // 06071fa6 mov.l r2,@(36,r6)
+    r0 = cpu.read32(r6.wrapping_add(40)); // 06071fa8 mov.l @(40,r6),r0
+    r8 = cpu.read32(r6.wrapping_add(32)); // 06071faa mov.l @(32,r6),r8
+    r1 = cpu.read32(r6.wrapping_add(8)); // 06071fac mov.l @(8,r6),r1
+    r2 = cpu.read32(r6.wrapping_add(24)); // 06071fae mov.l @(24,r6),r2
+    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071fb0 dmuls.l r1,r8
+    r3 = cpu.read32(r10.wrapping_add(28)); // 06071fb2 mov.l @(28,r10),r3
+    cpu.write32(r6.wrapping_add(20), r3); // 06071fb4 mov.l r3,@(20,r6)
+    cpu.write32(r10.wrapping_add(0), r0); // 06071fb6 mov.l r0,@(0,r10)
+    r4 = (mac >> 32) as u32; // 06071fb8 sts mach,r4
+    r5 = mac as u32; // 06071fba sts macl,r5
+    cpu.write32(r10.wrapping_add(16), r4); // 06071fbc mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r5); // 06071fbe mov.l r5,@(20,r10)
+    r5 = cpu.read32(r6.wrapping_add(0)); // 06071fc0 mov.l @(0,r6),r5
+    r4 = cpu.read32(r10.wrapping_add(28)); // 06071fc2 mov.l @(28,r10),r4
+    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071fc4 dmuls.l r2,r8
+    r5 = r5.wrapping_sub(r4); // 06071fc6 sub r4,r5
+    cpu.write32(r6.wrapping_add(0), r5); // 06071fc8 mov.l r5,@(0,r6)
+    cpu.write32(r10.wrapping_add(0), r0); // 06071fca mov.l r0,@(0,r10)
+    r4 = (mac >> 32) as u32; // 06071fcc sts mach,r4
+    r5 = mac as u32; // 06071fce sts macl,r5
+    cpu.write32(r10.wrapping_add(16), r4); // 06071fd0 mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r5); // 06071fd2 mov.l r5,@(20,r10)
+    r3 = r8.rotate_left(16); // 06071fd4 swap.w r8,r3
+    r3 = r3 as i16 as i32 as u32; // 06071fd6 exts.w r3,r3
+    r8 <<= 16; // 06071fd8 shll16 r8
+    r5 = cpu.read32(r6.wrapping_add(16)); // 06071fda mov.l @(16,r6),r5
+    r4 = cpu.read32(r10.wrapping_add(28)); // 06071fdc mov.l @(28,r10),r4
+    cpu.write32(r10.wrapping_add(0), r0); // 06071fde mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r3); // 06071fe0 mov.l r3,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r8); // 06071fe2 mov.l r8,@(20,r10)
+    r5 = r5.wrapping_sub(r4); // 06071fe4 sub r4,r5
+    cpu.write32(r6.wrapping_add(16), r5); // 06071fe6 mov.l r5,@(16,r6)
+    r8 = cpu.read32(r6.wrapping_add(36)); // 06071fe8 mov.l @(36,r6),r8
+    r3 = cpu.read32(r10.wrapping_add(28)); // 06071fea mov.l @(28,r10),r3
+    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071fec dmuls.l r1,r8
+    r3 = r3.wrapping_neg(); // 06071fee neg r3,r3
+    cpu.write32(r6.wrapping_add(32), r3); // 06071ff0 mov.l r3,@(32,r6)
+    cpu.write32(r10.wrapping_add(0), r0); // 06071ff2 mov.l r0,@(0,r10)
+    r4 = (mac >> 32) as u32; // 06071ff4 sts mach,r4
+    r5 = mac as u32; // 06071ff6 sts macl,r5
+    cpu.write32(r10.wrapping_add(16), r4); // 06071ff8 mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r5); // 06071ffa mov.l r5,@(20,r10)
+    r5 = cpu.read32(r6.wrapping_add(4)); // 06071ffc mov.l @(4,r6),r5
+    r4 = cpu.read32(r10.wrapping_add(28)); // 06071ffe mov.l @(28,r10),r4
+    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06072000 dmuls.l r2,r8
+    r5 = r5.wrapping_sub(r4); // 06072002 sub r4,r5
+    cpu.write32(r6.wrapping_add(4), r5); // 06072004 mov.l r5,@(4,r6)
+    cpu.write32(r10.wrapping_add(0), r0); // 06072006 mov.l r0,@(0,r10)
+    r4 = (mac >> 32) as u32; // 06072008 sts mach,r4
+    r5 = mac as u32; // 0607200a sts macl,r5
+    cpu.write32(r10.wrapping_add(16), r4); // 0607200c mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r5); // 0607200e mov.l r5,@(20,r10)
+    r3 = r8.rotate_left(16); // 06072010 swap.w r8,r3
+    r3 = r3 as i16 as i32 as u32; // 06072012 exts.w r3,r3
+    r8 <<= 16; // 06072014 shll16 r8
+    r5 = cpu.read32(r6.wrapping_add(20)); // 06072016 mov.l @(20,r6),r5
+    r4 = cpu.read32(r10.wrapping_add(28)); // 06072018 mov.l @(28,r10),r4
+    cpu.write32(r10.wrapping_add(0), r0); // 0607201a mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r3); // 0607201c mov.l r3,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r8); // 0607201e mov.l r8,@(20,r10)
+    r5 = r5.wrapping_sub(r4); // 06072020 sub r4,r5
+    cpu.write32(r6.wrapping_add(20), r5); // 06072022 mov.l r5,@(20,r6)
+    r8 = cpu.read32(r6.wrapping_add(44)); // 06072024 mov.l @(44,r6),r8
+    r3 = cpu.read32(r10.wrapping_add(28)); // 06072026 mov.l @(28,r10),r3
+    r4 = r8.rotate_left(16); // 06072028 swap.w r8,r4
+    r4 = (r4 & 0xffff_0000) | ((r4 & 0xff) << 8) | ((r4 >> 8) & 0xff); // 0607202a swap.b r4,r4
+    r4 = r4 as i8 as i32 as u32; // 0607202c exts.b r4,r4
+    r8 <<= 8; // 0607202e shll8 r8
+    cpu.write32(r10.wrapping_add(0), r0); // 06072030 mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r4); // 06072032 mov.l r4,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r8); // 06072034 mov.l r8,@(20,r10)
+    r3 = r3.wrapping_neg(); // 06072036 neg r3,r3
+    cpu.write32(r6.wrapping_add(36), r3); // 06072038 mov.l r3,@(36,r6)
+    r8 = cpu.read32(r10.wrapping_add(28)); // 0607203a mov.l @(28,r10),r8
+    mac = r1 as i32 as i64 * r8 as i32 as i64; // 0607203c dmuls.l r1,r8
+    r5 = cpu.read32(r6.wrapping_add(12)); // 0607203e mov.l @(12,r6),r5
+    r3 = (mac >> 32) as u32; // 06072040 sts mach,r3
+    r4 = mac as u32; // 06072042 sts macl,r4
+    r3 <<= 8; // 06072044 shll8 r3
+    r3 <<= 16; // 06072046 shll16 r3
+    r4 >>= 8; // 06072048 shlr8 r4
+    r4 |= r3; // 0607204a or r3,r4
+    r5 = r5.wrapping_sub(r4); // 0607204c sub r4,r5
+    mac = r2 as i32 as i64 * r8 as i32 as i64; // 0607204e dmuls.l r2,r8
+    cpu.write32(r6.wrapping_add(12), r5); // 06072050 mov.l r5,@(12,r6)
+    r5 = cpu.read32(r6.wrapping_add(28)); // 06072052 mov.l @(28,r6),r5
+    r3 = (mac >> 32) as u32; // 06072054 sts mach,r3
+    r4 = mac as u32; // 06072056 sts macl,r4
+    r3 <<= 8; // 06072058 shll8 r3
+    r3 <<= 16; // 0607205a shll16 r3
+    r4 >>= 8; // 0607205c shlr8 r4
+    r4 |= r3; // 0607205e or r3,r4
+    r5 = r5.wrapping_sub(r4); // 06072060 sub r4,r5
+    cpu.write32(r6.wrapping_add(28), r5); // 06072062 mov.l r5,@(28,r6)
+    r3 = r1.rotate_left(16); // 06072064 swap.w r1,r3
+    r3 = r3 as i16 as i32 as u32; // 06072066 exts.w r3,r3
+    r1 <<= 16; // 06072068 shll16 r1
+    cpu.write32(r10.wrapping_add(0), r0); // 0607206a mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r3); // 0607206c mov.l r3,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r1); // 0607206e mov.l r1,@(20,r10)
+    r8 = r8.wrapping_neg(); // 06072070 neg r8,r8
+    r8 <<= 8; // 06072072 shll8 r8
+    cpu.write32(r6.wrapping_add(44), r8); // 06072074 mov.l r8,@(44,r6)
+    r3 = r2.rotate_left(16); // 06072076 swap.w r2,r3
+    r3 = r3 as i16 as i32 as u32; // 06072078 exts.w r3,r3
+    r2 <<= 16; // 0607207a shll16 r2
+    r1 = cpu.read32(r10.wrapping_add(28)); // 0607207c mov.l @(28,r10),r1
+    cpu.write32(r10.wrapping_add(0), r0); // 0607207e mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r3); // 06072080 mov.l r3,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r2); // 06072082 mov.l r2,@(20,r10)
+    cpu.write32(r6.wrapping_add(8), r1); // 06072084 mov.l r1,@(8,r6)
+    r1 = 1i32 as u32; // 06072086 mov #1,r1
+    r3 = 0i32 as u32; // 06072088 mov #0,r3
+    r2 = cpu.read32(r10.wrapping_add(28)); // 0607208a mov.l @(28,r10),r2
+    cpu.write32(r10.wrapping_add(0), r0); // 0607208c mov.l r0,@(0,r10)
+    cpu.write32(r10.wrapping_add(16), r1); // 0607208e mov.l r1,@(16,r10)
+    cpu.write32(r10.wrapping_add(20), r3); // 06072090 mov.l r3,@(20,r10)
+    cpu.write32(r6.wrapping_add(24), r2); // 06072092 mov.l r2,@(24,r6)
+    r0 = r9 & 0xff; // 06072094 extu.b r9,r0
+    t = r0 & r0 == 0; // 06072096 tst r0,r0
+    r8 = cpu.read32(r10.wrapping_add(28));
+    // the swaps undone, by the codes kept in r9
+    if !t {
+        r0 = cpu.read32(r6.wrapping_add(4)); // 0607209c mov.l @(4,r6),r0
+        r1 = cpu.read32(r6.wrapping_add(8)); // 0607209e mov.l @(8,r6),r1
+        r2 = cpu.read32(r6.wrapping_add(20)); // 060720a0 mov.l @(20,r6),r2
+        r3 = cpu.read32(r6.wrapping_add(24)); // 060720a2 mov.l @(24,r6),r3
+        r4 = cpu.read32(r6.wrapping_add(36)); // 060720a4 mov.l @(36,r6),r4
+        cpu.write32(r6.wrapping_add(8), r0); // 060720a6 mov.l r0,@(8,r6)
+        cpu.write32(r6.wrapping_add(4), r1); // 060720a8 mov.l r1,@(4,r6)
+        cpu.write32(r6.wrapping_add(24), r2); // 060720aa mov.l r2,@(24,r6)
+        cpu.write32(r6.wrapping_add(20), r3); // 060720ac mov.l r3,@(20,r6)
+        cpu.write32(r6.wrapping_add(36), r8); // 060720ae mov.l r8,@(36,r6)
+        r8 = r4; // 060720b0 mov r4,r8
+    }
+    r9 >>= 8;
+    t = r9 == 0;
+    r9 = r9.wrapping_sub(1);
+    if !t {
+        r0 = cpu.read32(r6);
+        r1 = cpu.read32(r6.wrapping_add(16));
+        t = r9 == 0;
+        r2 = cpu.read32(r6.wrapping_add(32));
+        if !t {
+            r3 = cpu.read32(r6.wrapping_add(8)); // 060720c4 mov.l @(8,r6),r3
+            r4 = cpu.read32(r6.wrapping_add(24)); // 060720c6 mov.l @(24,r6),r4
+            r5 = r8; // 060720c8 mov r8,r5
+            cpu.write32(r6.wrapping_add(8), r0); // 060720ca mov.l r0,@(8,r6)
+            cpu.write32(r6.wrapping_add(24), r1); // 060720cc mov.l r1,@(24,r6)
+            r8 = r2;
+        } else {
+            r3 = cpu.read32(r6.wrapping_add(4)); // 060720d2 mov.l @(4,r6),r3
+            r4 = cpu.read32(r6.wrapping_add(20)); // 060720d4 mov.l @(20,r6),r4
+            r5 = cpu.read32(r6.wrapping_add(36)); // 060720d6 mov.l @(36,r6),r5
+            cpu.write32(r6.wrapping_add(4), r0); // 060720d8 mov.l r0,@(4,r6)
+            cpu.write32(r6.wrapping_add(20), r1); // 060720da mov.l r1,@(20,r6)
+            cpu.write32(r6.wrapping_add(36), r2); // 060720dc mov.l r2,@(36,r6)
+        }
+        cpu.write32(r6.wrapping_add(0), r3); // 060720de mov.l r3,@(0,r6)
+        cpu.write32(r6.wrapping_add(16), r4); // 060720e0 mov.l r4,@(16,r6)
+        cpu.write32(r6.wrapping_add(32), r5); // 060720e2 mov.l r5,@(32,r6)
+    }
+    cpu.write32(r6.wrapping_add(40), r8);
+    let _ = (r9, r10);
+    cpu.leave(&[(0, r0), (1, r1), (2, r2), (3, r3), (4, r4), (5, r5), (6, r6), (7, r7)]);
+    cpu.leave_mac(mac);
+    cpu.leave_t(t);
+}
+
+/// slInversMatrix: the current matrix inverted (sl_inverse), its third column negated.
+pub fn sl_invers_matrix(cpu: &mut Cpu) {
+    nested!(cpu, 0x0607_1d2c, sl_inverse(cpu));
+    let m = matrix(cpu);
+    let v = [8, 24, 40].map(|k| cpu.read32(m + k).wrapping_neg());
+    for (k, x) in [8, 24, 40].into_iter().zip(v) {
+        cpu.write32(m + k, x);
+    }
+    cpu.leave(&[(0, m), (1, v[0]), (2, v[1]), (3, v[2])]);
 }
 
 /// slAtan: the angle of (x, y): the smaller part over the larger (on the divide unit, 64 by 32,

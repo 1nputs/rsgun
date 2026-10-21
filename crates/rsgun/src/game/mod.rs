@@ -58,6 +58,9 @@ use stv::sh2::{Bus, Sh2};
 pub struct Cpu<'a> {
     pub sh2: &'a mut Sh2,
     pub bus: &'a mut dyn Bus,
+    /// The r14 the rewrite was called with (the registration sets r14 to the rewrite's frame;
+    /// SGL's assembly that pushes r14 pushes this).
+    pub caller_r14: u32,
 }
 
 impl Cpu<'_> {
@@ -351,7 +354,7 @@ macro_rules! rewrites {
                     sh2.r[15] = prologue.enter(sh2, &mut *bus);
                     let fp = sh2.r[14];
                     sh2.r[14] = sh2.r[15];
-                    let result = $f(&mut Cpu { sh2: &mut *sh2, bus }, $($arg),* $(, $($sarg),+)?);
+                    let result = $f(&mut Cpu { sh2: &mut *sh2, bus, caller_r14: fp }, $($arg),* $(, $($sarg),+)?);
                     rewrites!(@result sh2, result, $ret);
                     sh2.r[15] = sp;
                     sh2.r[14] = fp;
@@ -921,6 +924,7 @@ pub fn register(n: &mut Natives) {
         0x0606_db9c => sgl::sl_get_matrix[dst] -> (),
         0x0606_9a54 => sgl::sl_sin_cos[a] -> (),
         0x0606_75ac => sgl::sl_put_sprite[pos, attr, angle] -> u32,
+        0x0606_76ac => sgl::sl_put_sprite_hv[pos, attr, angle] -> u32,
         0x0607_0e22 => sgl::sl_disp_sprite[pos, attr, angle] -> u32,
         0x0606_778c => sgl::sl_put_quad[cmd, z] -> u32,
         0x0606_e9fc => sgl::sl_check_on_screen[p, size] -> u32,
@@ -942,6 +946,9 @@ pub fn register(n: &mut Natives) {
         0x0607_147c => sgl::sl_isqrt[v] -> u32,
         0x0607_14a8 => sgl::sl_sqrt[v] -> u32,
         0x0607_14bc => sgl::sl_div_fx[a, b] -> u32,
+        0x0606_eadc => sgl::sl_tan[a] -> u32,
+        0x0607_1d2c => sgl::sl_inverse[] -> (),
+        0x0606_e4dc => sgl::sl_invers_matrix[] -> (),
         0x0606_98ec => sgl::sl_col_offset_a[r, g, b] -> (),
         0x0606_98fc => sgl::sl_col_offset_b[r, g, b] -> (),
         0x0607_1c0c => sgl::sl_sqrt64[hi, lo] -> u32,
