@@ -330,3 +330,73 @@ pub fn model_draw(cpu: &mut Cpu, s: u32) {
     part_draw(cpu, s);
     cpu.call(SL_POP_MATRIX, &[]);
 }
+
+/// A model's pose script (the struct at `p`): the joints' count (a word), their angles and turns
+/// a frame (word arrays), the poses (each an array of the joints' angles), the script (words,
+/// three a step: the pose, the frames to reach it, the frames held after it; a negative word is
+/// flags: SCRIPT_AGAIN starts the script over, SCRIPT_STOP stops it), the step (in words), its
+/// frames left, and the flags. Each frame the joints turn; a new step sets each joint's turn to
+/// reach its pose over the step's frames.
+const P_COUNT: u32 = 0x10;
+const P_ANGLES: u32 = 0x14;
+const P_TURNS: u32 = 0x18;
+const P_POSES: u32 = 0x1c;
+const P_SCRIPT: u32 = 0x20;
+const P_AT: u32 = 0x24;
+const P_LEFT: u32 = 0x26;
+const P_FLAGS: u32 = 0x28;
+const STEP: u16 = 3;
+const SCRIPT_AGAIN: u16 = 0x2000;
+const SCRIPT_STOP: u16 = 0x4000;
+
+pub fn pose_step(cpu: &mut Cpu, p: u32) {
+    if cpu.read16(p + P_FLAGS) & SCRIPT_STOP != 0 {
+        return;
+    }
+    cpu.write16(p + P_FLAGS, 0);
+    let (angles, turns) = (cpu.read32(p + P_ANGLES), cpu.read32(p + P_TURNS));
+    for i in 0..cpu.read16(p + P_COUNT) as u32 {
+        let a = cpu.read16(angles + 2 * i).wrapping_add(cpu.read16(turns + 2 * i));
+        cpu.write16(angles + 2 * i, a);
+    }
+    if cpu.read16(p + P_LEFT) == 0 {
+        let script = cpu.read32(p + P_SCRIPT);
+        let word = |cpu: &mut Cpu, k: u32| {
+            let at = cpu.read16(p + P_AT) as u32;
+            cpu.read16(script + 2 * (at + k))
+        };
+        let at = cpu.read16(p + P_AT).wrapping_add(STEP);
+        cpu.write16(p + P_AT, at);
+        let w = word(cpu, 0);
+        if (w as i16) < 0 {
+            cpu.write16(p + P_FLAGS, w);
+            cpu.write16(p + P_AT, at.wrapping_add(1));
+            if w & SCRIPT_AGAIN != 0 {
+                cpu.write16(p + P_AT, 0);
+            }
+            if w & SCRIPT_STOP != 0 {
+                return;
+            }
+        }
+        let frames = word(cpu, 1);
+        cpu.write16(p + P_LEFT, frames);
+        let pose = word(cpu, 0) as i16 as i32;
+        let poses = cpu.read32(p + P_POSES);
+        let mut target = cpu.read32(poses.wrapping_add((4 * pose) as u32));
+        let (angles, turns) = (cpu.read32(p + P_ANGLES), cpu.read32(p + P_TURNS));
+        for i in 0..cpu.read16(p + P_COUNT) as u32 {
+            let frames = cpu.read16(p + P_LEFT) as i16 as i32 as u32;
+            let to = cpu.read16(target) as u32;
+            target += 2;
+            let from = cpu.read16(angles + 2 * i) as u32;
+            let d = nested!(cpu, 0x0605_6580, super::aim::angle_between(cpu, from, to)) as i16 as i32 as u32;
+            let turn = nested!(cpu, 0x0600_6a78, super::math::quotient(cpu, d, frames));
+            cpu.write16(turns + 2 * i, turn as u16);
+        }
+        let held = word(cpu, 2);
+        let left = cpu.read16(p + P_LEFT).wrapping_add(held);
+        cpu.write16(p + P_LEFT, left);
+    }
+    let left = cpu.read16(p + P_LEFT).wrapping_sub(1);
+    cpu.write16(p + P_LEFT, left);
+}

@@ -34,6 +34,7 @@ mod player;
 mod play;
 mod palette;
 mod parts;
+mod ribbons;
 mod screen;
 mod shots;
 mod sound;
@@ -597,6 +598,20 @@ pub fn register(n: &mut Natives) {
         0x0605_29ac => models::model_boxes[obj] -> (),
         0x0605_2b08 => models::beam_boxes[obj, src] -> (),
         0x0605_2b88 => models::beam_length[obj, length] -> (),
+        0x0606_3620 => ribbons::ribbon_init[o, d, mover] -> u32,
+        0x0606_3884 => ribbons::ribbon_draw[s] -> (),
+        0x0606_3940 => ribbons::ribbon_end[o] -> (),
+        0x0606_39e0 => ribbons::ribbon_exec[o] -> (),
+        0x0606_3b94 => ribbons::ribbon_fade[o] -> (),
+        0x0606_3c20 => ribbons::ribbon_move[o] -> (),
+        0x0606_3cec => ribbons::ribbon_straight[o] -> (),
+        0x0606_3dc0 => ribbons::ribbon_homing[o] -> (),
+        0x0606_3e30 => ribbons::ribbon_wave[o] -> (),
+        0x0606_3ef4 => ribbons::ribbon_home[o] -> (),
+        0x0606_3f70 => ribbons::ribbon_edges[o, i] -> (),
+        0x0606_4194 => ribbons::ribbon_edge[o, x0, y0, x1; y1, width, quad] -> (),
+        0x0606_4244 => ribbons::ribbon_boxes[o, i] -> (),
+        0x0606_42e0 => ribbons::ribbon_set[kind, d, flags] -> (),
         0x0605_2c44 => models::model_point[obj, p] -> (),
         0x0605_2ca0 => models::model_screen_point[obj, p] -> (),
         0x0605_2d04 => models::group_draw[s] -> (),
@@ -704,6 +719,7 @@ pub fn register(n: &mut Natives) {
         0x0604_deb4 => effects::effect_exec[obj] -> (),
         0x0604_d780 => actors::actor_exec[actor] -> (),
         0x0604_3d38 => hits::hits_exec[hits] -> (),
+        0x0605_6644 => models::pose_step[p] -> (),
         0x0604_5d78 => math::random_seed[seed] -> (),
         0x0604_5d90 => math::random[n] -> u32,
         0x0604_5dcc => math::by_difficulty[x] -> u32,
