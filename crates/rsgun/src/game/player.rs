@@ -5,7 +5,7 @@
 //! state in its PLAY_DATA. While hurt it blinks.
 
 use super::globals::{LOOPS, PLAY_DATA, PLAY_DATA_SIZE, SCORE};
-use super::{bg, effects, hits, math, nested, objects, sound, Cpu};
+use super::{actors, bg, effects, hits, math, nested, objects, sound, sprites, Cpu};
 
 /// A player ship's fields: its flags, position, colours, kind, frame, number (0, 1), lift, type
 /// (its weapon), hit flags, gauge (its life field: up to 20000), state (a word: its low byte the
@@ -908,7 +908,7 @@ pub fn ship_entry(cpu: &mut Cpu, p: u32) {
             cpu.write32(p + BANK_Y, ENTRY_BANK_Y);
             let z = cpu.read32(p + POSITION + 8) as i32;
             cpu.write32(p + CLIMB, (z.wrapping_neg() / ENTRY_FRAMES as i32) as u32);
-            cpu.call(ENTRY_JET, &[p, ENTRY_FRAMES]);
+            nested!(cpu, ENTRY_JET, jet_set(cpu, p, ENTRY_FRAMES));
             cpu.write16(p + ENTRY_LEFT, ENTRY_FRAMES as u16);
             cpu.write16(p + HURT, 0);
             cpu.write8(p + STATE_LOW, 1);
@@ -952,6 +952,236 @@ pub fn ship_entry(cpu: &mut Cpu, p: u32) {
             }
         }
         _ => {}
+    }
+}
+
+/// The jet a ship comes in on: a flame (list 2) kept 12 pixels behind the ship along its angle. On
+/// odd frames it takes its next stage: it grows over six (a puff of smoke at the sixth), then
+/// flickers among three frames, narrowing to half and lengthening, trailing smoke; on even frames
+/// only its colour is 16 on. It ends with the ship, when the ship is not drawn, or after its frames.
+const JET_SIZE: u32 = 0x48;
+const JET_LIST: u32 = 2;
+const JET_EXEC: u32 = 0x0606_21f4;
+const JET_FOLLOW: u32 = 0x0606_216c;
+const JET_KIND: u8 = 3;
+const JET_BEHIND: u32 = 0xc_0000;
+const JET_LIT: u16 = 0x10;
+/// SGL's slSin, slCos and slMulFX.
+const SL_SIN: u32 = 0x0606_9a0c;
+const SL_COS: u32 = 0x0606_9a30;
+const SL_MUL_FX: u32 = 0x0606_e26c;
+/// The jet's fields: the ship, its stage, its frames left.
+const JET_SHIP: u32 = 0x3c;
+const JET_STAGE: u32 = 0x40;
+const JET_LEFT: u32 = 0x44;
+/// The sprite's fields (sprite_init's, from 0x10): its colour and own colour, kind, scales.
+const SPRITE: u32 = 0x10;
+const BEHAVIOUR: u32 = 0x38;
+const COLOUR: u32 = 0x28;
+const OWN_COLOUR: u32 = 0x2a;
+const KIND: u32 = 0x2e;
+const SCALES: u32 = 0x20;
+/// Each stage's frame and scales (x, y); from stage 8 on the flicker goes round 8, 9, 10; past the
+/// grown stage (7) the scales are its own, x narrowing to half.
+const JET_STAGES: [(u8, u32, u32); 11] = [
+    (0x2b, 0x4000, 0x4000), (0x2b, 0x8000, 0x4000), (0x2b, 0xc000, 0x4000), (0x2b, 0x1_0000, 0x4000),
+    (0x2b, 0x1_8000, 0x4000), (0x2b, 0x2_0000, 0x4000), (0x2b, 0x2_0000, 0x2_0000), (0x27, 0x1_0000, 0x1_0000),
+    (0x25, 0x1_0000, 0x1_0000), (0x26, 0x1_0000, 0x1_0000), (0x27, 0x1_0000, 0x1_0000),
+];
+const JET_LAST: i32 = 10;
+const JET_FLICKER: i32 = 8;
+const JET_GROWN: i32 = 7;
+const JET_PUFFS: i32 = 6;
+const JET_NARROWEST: i32 = 0x8000;
+const JET_NARROWING: u32 = 0x400;
+/// The puff at the sixth stage: 8 pixels below the jet, wide and flat.
+const PUFF_BELOW: u32 = 0x8_0000;
+const PUFF_SCALES: [u32; 2] = [0x1_8000, 0x2000];
+const PUFF_SET: u32 = 0x0606_20c0;
+/// The trailing smoke (actors.rs's drift_effect): 8 pixels a frame backward, in one of two
+/// animations and colours by the frame count; it lies one below the ship's lift, or two on
+/// every other pair of frames of the second.
+const SMOKE_SPEED: u32 = 0xfff8_0000;
+const SMOKE_SCALE: u32 = 0x1_0000;
+const SMOKES: [(u32, u16); 2] = [(0x0607_3128, 0x8090), (0x0607_310c, 0x80d0)];
+
+/// Makes the jet of ship `ship`, lasting `frames` frames, in place behind it. The jet, or 0 when
+/// there is no room.
+pub fn jet_set(cpu: &mut Cpu, ship: u32, frames: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, JET_SIZE)) as i8 as i32 as u32;
+    let j = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, JET_LIST, blocks, PLAIN_EXEC));
+    if j == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, j + SPRITE));
+    cpu.write8(j + NUMBER, 0);
+    cpu.write32(j + BEHAVIOUR, JET_EXEC);
+    let (frame, x, y) = JET_STAGES[0];
+    cpu.write8(j + FRAME, frame);
+    cpu.write32(j + SCALES, x);
+    cpu.write32(j + SCALES + 4, y);
+    cpu.write8(j + KIND, JET_KIND);
+    let colour = cpu.read16(CHAR_BASE);
+    cpu.write16(j + OWN_COLOUR, colour);
+    cpu.write16(j + COLOUR, colour);
+    let lift = cpu.read8(ship + LIFT);
+    cpu.write8(j + LIFT, lift);
+    cpu.write32(j + JET_STAGE, 0);
+    cpu.write32(j + JET_SHIP, ship);
+    cpu.write32(j + JET_LEFT, frames);
+    nested!(cpu, JET_FOLLOW, jet_follow(cpu, j));
+    j
+}
+
+/// Puts the jet behind its ship: 12 pixels back along the ship's angle (taken when not 0), level.
+pub fn jet_follow(cpu: &mut Cpu, j: u32) {
+    let ship = cpu.read32(j + JET_SHIP);
+    let a = cpu.read16(ship + ANGLE);
+    if a != 0 {
+        cpu.write16(j + ANGLE, a);
+        let a = a as i16 as i32 as u32;
+        let sin = cpu.call(SL_SIN, &[a]);
+        let back = cpu.call(SL_MUL_FX, &[JET_BEHIND, sin]);
+        let x = cpu.read32(ship + POSITION).wrapping_sub(back);
+        cpu.write32(j + POSITION, x);
+        let cos = cpu.call(SL_COS, &[a]);
+        let back = cpu.call(SL_MUL_FX, &[JET_BEHIND, cos]);
+        let y = cpu.read32(ship + POSITION + 4).wrapping_add(back);
+        cpu.write32(j + POSITION + 4, y);
+    } else {
+        let x = cpu.read32(ship + POSITION);
+        cpu.write32(j + POSITION, x);
+        let y = cpu.read32(ship + POSITION + 4).wrapping_add(JET_BEHIND);
+        cpu.write32(j + POSITION + 4, y);
+    }
+    let z = cpu.read32(ship + POSITION + 8);
+    cpu.write32(j + POSITION + 8, z);
+}
+
+/// The jet's behaviour.
+pub fn jet_exec(cpu: &mut Cpu, j: u32) {
+    let ship = cpu.read32(j + JET_SHIP);
+    if cpu.read8(ship + OBJ_MODE) as i8 >= ENDING as i8 || cpu.read32(ship + FLAGS) & NO_DRAW != 0 {
+        cpu.write8(j + OBJ_MODE, ENDING);
+        return;
+    }
+    let left = cpu.read32(j + JET_LEFT).wrapping_sub(1);
+    cpu.write32(j + JET_LEFT, left);
+    if left == 0 {
+        cpu.write8(j + OBJ_MODE, ENDING);
+        return;
+    }
+    nested!(cpu, JET_FOLLOW, jet_follow(cpu, j));
+    if cpu.read32(GAME_FRAMES) & 1 == 0 {
+        let colour = cpu.read16(CHAR_BASE).wrapping_add(JET_LIT);
+        cpu.write16(j + OWN_COLOUR, colour);
+        cpu.write16(j + COLOUR, colour);
+        return;
+    }
+    let mut stage = cpu.read32(j + JET_STAGE) as i32 + 1;
+    if stage > JET_LAST {
+        stage = JET_FLICKER;
+    }
+    cpu.write32(j + JET_STAGE, stage as u32);
+    let (frame, x, y) = JET_STAGES[stage as usize];
+    cpu.write8(j + FRAME, frame);
+    if stage <= JET_GROWN {
+        cpu.write32(j + SCALES, x);
+        cpu.write32(j + SCALES + 4, y);
+    } else if cpu.read32(j + SCALES) as i32 > JET_NARROWEST {
+        let x = cpu.read32(j + SCALES).wrapping_sub(JET_NARROWING);
+        cpu.write32(j + SCALES, x);
+        let y = cpu.read32(j + SCALES + 4).wrapping_add(JET_NARROWING);
+        cpu.write32(j + SCALES + 4, y);
+    }
+    if stage >= JET_PUFFS {
+        let f = cpu.stack();
+        let below = if stage == JET_PUFFS { PUFF_BELOW } else { 0 };
+        for k in 0..3 {
+            let v = cpu.read32(j + POSITION + 4 * k).wrapping_add(if k == 1 { below } else { 0 });
+            cpu.write32(f + actors::E_POSITION + 4 * k, v);
+        }
+        let a = cpu.read16(j + ANGLE);
+        cpu.write16(f + actors::E_ANGLE, a);
+        if stage == JET_PUFFS {
+            cpu.write32(f + actors::E_SCALES, PUFF_SCALES[0]);
+            cpu.write32(f + actors::E_SCALES + 4, PUFF_SCALES[1]);
+            nested!(cpu, PUFF_SET, puff_set(cpu, f));
+        } else {
+            cpu.write32(f + actors::E_SPEED, SMOKE_SPEED);
+            cpu.write32(f + actors::E_SCALES, SMOKE_SCALE);
+            cpu.write32(f + actors::E_SCALES + 4, SMOKE_SCALE);
+            let second = cpu.read32(GAME_FRAMES) & 2 != 0;
+            let (script, colour) = SMOKES[second as usize];
+            cpu.write32(f + actors::E_SCRIPT, script);
+            cpu.write16(f + actors::E_COLOUR, colour);
+            let e = nested!(cpu, 0x0605_7454, actors::drift_effect(cpu, f));
+            if e != 0 {
+                let down = if !second && cpu.read32(GAME_FRAMES) & 4 != 0 { 2 } else { 1 };
+                let lift = cpu.read8(e + LIFT).wrapping_sub(down);
+                cpu.write8(e + LIFT, lift);
+            }
+        }
+    }
+    let colour = cpu.read16(CHAR_BASE);
+    cpu.write16(j + OWN_COLOUR, colour);
+    cpu.write16(j + COLOUR, colour);
+}
+
+/// The puff: frames 0xcb on (one every other frame) until 0xff, widening by an eighth a frame.
+const PUFF_SIZE: u32 = 0x40;
+const PUFF_EXEC: u32 = 0x0606_2074;
+const PUFF_LIFT: u8 = 0x7f;
+const PUFF_FRAME: u8 = 0xcb;
+const PUFF_FRAMES: u32 = 0x0607_3958;
+const PUFF_LAST: u8 = 0xff;
+const PUFF_WIDENING: u32 = 0x2000;
+/// The puff's field: how far along its frames it is.
+const PUFF_AT: u32 = 0x3c;
+
+/// Makes a puff from the description at `f` (actors.rs's E_ layout: position, scales, angle, the
+/// puff facing the other way).
+pub fn puff_set(cpu: &mut Cpu, f: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, PUFF_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, JET_LIST, blocks, PLAIN_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    cpu.write32(o + BEHAVIOUR, PUFF_EXEC);
+    cpu.write8(o + NUMBER, 0);
+    cpu.write8(o + LIFT, PUFF_LIFT);
+    for k in 0..2 {
+        let v = cpu.read32(f + actors::E_SCALES + 4 * k);
+        cpu.write32(o + SCALES + 4 * k, v);
+    }
+    for k in 0..3 {
+        let v = cpu.read32(f + actors::E_POSITION + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    let a = cpu.read16(f + actors::E_ANGLE).wrapping_add(0x8000);
+    cpu.write16(o + ANGLE, a);
+    cpu.write8(o + FRAME, PUFF_FRAME);
+    cpu.write8(o + KIND, 0);
+    let colour = cpu.read16(CHAR_BASE);
+    cpu.write16(o + OWN_COLOUR, colour);
+    cpu.write16(o + COLOUR, colour);
+    cpu.write32(o + PUFF_AT, 0);
+}
+
+/// The puff's behaviour.
+pub fn puff_exec(cpu: &mut Cpu, o: u32) {
+    let at = cpu.read32(o + PUFF_AT);
+    let frame = cpu.read8(PUFF_FRAMES.wrapping_add(at));
+    cpu.write8(o + FRAME, frame);
+    if frame == PUFF_LAST {
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    let x = cpu.read32(o + SCALES).wrapping_add(PUFF_WIDENING);
+    cpu.write32(o + SCALES, x);
+    if cpu.read32(GAME_FRAMES) & 1 != 0 {
+        cpu.write32(o + PUFF_AT, at.wrapping_add(1));
     }
 }
 
