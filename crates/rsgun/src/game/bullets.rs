@@ -381,11 +381,11 @@ pub fn aimed_exec(cpu: &mut Cpu, b: u32) {
 
 /// An aimed shot's description (the shooter's): its position (x, y), its flags (a long: bit 0
 /// aims at the player), its direction (a word), its speed, the shooter.
-const AS_POSITION: u32 = 0x00;
-const AS_FLAGS: u32 = 0x14;
-const AS_ANGLE: u32 = 0x18;
-const AS_SPEED: u32 = 0x30;
-const AS_SHOOTER: u32 = 0x3c;
+pub const AS_POSITION: u32 = 0x00;
+pub const AS_FLAGS: u32 = 0x14;
+pub const AS_ANGLE: u32 = 0x18;
+pub const AS_SPEED: u32 = 0x30;
+pub const AS_SHOOTER: u32 = 0x3c;
 const AIMS: u32 = 1;
 /// How far back the aim looks (aim.rs's delay).
 const AIM_DELAY: u32 = 20;

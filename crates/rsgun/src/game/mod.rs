@@ -51,6 +51,7 @@ mod sprites;
 mod start;
 mod states;
 mod stg00;
+mod stg01;
 mod system;
 mod text;
 mod timeline;
@@ -1359,5 +1360,42 @@ pub fn register(n: &mut Natives) {
         0x0608_1164 => sgl::sl_sprite_type[t] -> (),
         0x0608_1174 => sgl::sl_sprite_cc_condition[condition] -> (),
         0x0608_1194 => sgl::sl_sprite_cc_number[n] -> (),
+    }
+    // STG01.BIN's code (stage 3's)
+    rewrites! { n; overlay "STG01";
+        0x0608_0000 => stg01::stg01_mode[game] -> u32,
+        0x0608_0478 => stg01::scenery_point[p] -> (),
+        0x0608_04e0 => stg01::scenery_model_draw[s] -> (),
+        0x0608_05c0 => stg01::debris_behaviour[actor] -> (),
+        0x0608_08b0 => stg01::debris_set[parent] -> u32,
+        0x0608_09a0 => stg01::falling_polygon[obj] -> (),
+        0x0608_0a0c => stg01::easing_polygon[obj] -> (),
+        0x0608_0a78 => stg01::riser_behaviour[obj] -> (),
+        0x0608_1024 => stg01::smoking_part[obj] -> (),
+        0x0608_11a0 => stg01::flashing_part[obj] -> (),
+        0x0608_11d4 => stg01::spinning_draw[s] -> (),
+        0x0608_12cc => stg01::beam_behaviour[obj] -> (),
+        0x0608_15b8 => stg01::beam_set[parent] -> u32,
+        0x0608_1648 => stg01::turret_behaviour[obj] -> (),
+        0x0608_1d60 => stg01::twin_turret_behaviour[obj] -> (),
+        0x0608_273c => stg01::laser_glow[obj] -> (),
+        0x0608_28d8 => stg01::laser_behaviour[obj] -> (),
+        0x0608_2bbc => stg01::laser_set[parent, y] -> u32,
+        0x0608_2cbc => stg01::laser_cannon_behaviour[obj] -> (),
+        0x0608_36f0 => stg01::spinner_behaviour[obj] -> (),
+        0x0608_3954 => stg01::arc_draw[p] -> (),
+        0x0608_3d68 => stg01::arc_square_behaviour[obj] -> (),
+        0x0608_3f70 => stg01::aiming_gun_behaviour[obj] -> (),
+        0x0608_5344 => stg01::burst_seed_behaviour[obj] -> (),
+        0x0608_55e8 => stg01::tether_behaviour[obj] -> (),
+        0x0608_57b4 => stg01::tethered_drone_behaviour[obj] -> (),
+        0x0608_5c84 => stg01::drone_launcher_behaviour[obj] -> (),
+        0x0608_60e8 => stg01::ring_part_behaviour[obj] -> (),
+        0x0608_6198 => stg01::glow_behaviour[obj] -> (),
+        0x0608_6208 => stg01::link_beam_behaviour[obj] -> (),
+        0x0608_64fc => stg01::link_beam_set[parent] -> u32,
+        0x0608_65c4 => stg01::laser_head_behaviour[obj] -> (),
+        0x0608_6a6c => stg01::laser_head_set[parent, count] -> u32,
+        0x0608_6b40 => stg01::head_launcher_behaviour[obj] -> (),
     }
 }

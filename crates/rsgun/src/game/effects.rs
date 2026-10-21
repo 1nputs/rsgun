@@ -8,19 +8,21 @@ use super::{objects, sprites, Cpu};
 /// The struct: x, y, z (16.16), the scales, a long whose low byte is the flags (FX_*), the angle (a
 /// word), the sprite's kind and frame, the player (0, 1; -1 none), the colour (a word), the frames
 /// it lasts (a word) and a byte with them, what it is linked to, a long more for the relative.
-const X: u32 = 0;
-const SCALE_X: u32 = 0xc;
-const SCALE_Y: u32 = 0x10;
-const FLAGS: u32 = 0x17;
-const ANGLE: u32 = 0x18;
-const KIND: u32 = 0x1c;
-const FRAME: u32 = 0x1d;
-const PLAYER: u32 = 0x1e;
-const COLOUR: u32 = 0x20;
-const FRAMES: u32 = 0x24;
-const FRAMES_2: u32 = 0x26;
-const LINK: u32 = 0x28;
-const RELATIVE_3C: u32 = 0x3c;
+pub const X: u32 = 0;
+pub const SCALE_X: u32 = 0xc;
+pub const SCALE_Y: u32 = 0x10;
+/// (the flags byte is the low byte of the long at FLAGS_LONG, which the makers write whole)
+pub const FLAGS_LONG: u32 = 0x14;
+pub const FLAGS: u32 = 0x17;
+pub const ANGLE: u32 = 0x18;
+pub const KIND: u32 = 0x1c;
+pub const FRAME: u32 = 0x1d;
+pub const PLAYER: u32 = 0x1e;
+pub const COLOUR: u32 = 0x20;
+pub const FRAMES: u32 = 0x24;
+pub const FRAMES_2: u32 = 0x26;
+pub const LINK: u32 = 0x28;
+pub const RELATIVE_3C: u32 = 0x3c;
 /// The flags: placed relative to something (x, y and the angle kept apart), linked.
 const RELATIVE: u8 = 0x80;
 const LINKED: u8 = 1;

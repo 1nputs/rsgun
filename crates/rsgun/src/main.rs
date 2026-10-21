@@ -81,6 +81,8 @@ struct Options {
     load_state: Option<PathBuf>,
     save_state: Option<PathBuf>,
     states: Vec<u64>,
+    /// `--reach ADDR`: the frame the master first reaches ADDR is printed (development).
+    reach: Option<u32>,
 }
 
 fn default_save_dir() -> PathBuf {
@@ -115,6 +117,7 @@ fn parse_args() -> Result<Options, String> {
         load_state: None,
         save_state: None,
         states: Vec::new(),
+        reach: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut it = args.iter();
@@ -143,6 +146,7 @@ fn parse_args() -> Result<Options, String> {
             "--load-state" => o.load_state = Some(PathBuf::from(value()?)),
             "--save-state" => o.save_state = Some(PathBuf::from(value()?)),
             "--states" => o.states = value()?.split(',').filter_map(|f| f.parse().ok()).collect(),
+            "--reach" => o.reach = Some(u32::from_str_radix(value()?.trim_start_matches("0x"), 16).map_err(|_| "--reach: a hex address")?),
             "--cpu-speed" => o.cpu_speed = value()?.parse().map_err(|_| "--cpu-speed: a number")?,
             "--mute" => o.mute = true,
             "-h" | "--help" => return Err(String::new()),
@@ -228,6 +232,9 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
     if o.compare.is_some() {
         m.compare = Some(Default::default());
     }
+    if let Some(a) = o.reach {
+        m.breakpoint = Some((0, a));
+    }
     if o.evidence.is_some() {
         m.evidence = Some(Box::new(stv::evidence::Evidence { overlay: Some(overlay()), ..Default::default() }));
     }
@@ -263,6 +270,12 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
         let data = m.save_state()?;
         fs::write(p, data).map_err(|e| format!("{}: {e}", p.display()))?;
         println!("state at frame {} written to {}", m.sys.frame, p.display());
+    }
+    if let Some(a) = o.reach {
+        match m.reached {
+            Some(f) => println!("{a:08x} first reached in frame {f}"),
+            None => println!("{a:08x} not reached"),
+        }
     }
     let run = frames.saturating_sub(first);
     let ms = t.elapsed().as_secs_f64() * 1000.0 / run.max(1) as f64;
