@@ -35,6 +35,7 @@ mod play;
 mod palette;
 mod parts;
 mod ribbons;
+mod rings;
 mod screen;
 mod shots;
 mod sound;
@@ -87,6 +88,20 @@ impl Cpu<'_> {
         self.sh2.r[0]
     }
 
+    /// `call` with PR `pr`, the SH-2 call's return address, instead of RETURN, so the callee's
+    /// pushes of it leave what the SH-2 code's do (the game reads stale stack; the interpreter
+    /// knows the return by PR and the stack pointer both). Used where such a read was seen.
+    pub fn call_returning(&mut self, pr: u32, f: u32, args: &[u32]) -> u32 {
+        for (r, &a) in self.sh2.r[4..8].iter_mut().zip(args) {
+            *r = a;
+        }
+        let kept = self.sh2.pr;
+        self.sh2.pr = pr;
+        stv::native::call(self.sh2, self.bus, f);
+        self.sh2.pr = kept;
+        self.sh2.r[0]
+    }
+
     /// `call` with arguments past the fourth on the stack (the fifth at the stack pointer, as the
     /// SH-2 code pushes them just before the call).
     #[allow(dead_code)]
@@ -132,6 +147,16 @@ impl Cpu<'_> {
             self.bus.write32(top.wrapping_add(4 * i as u32), v);
         }
         self.sh2.r[15] = top;
+    }
+
+    /// Register `n`'s value (r0-r15), and PR's: for SH-2 code that pushes them where the rewrite
+    /// does not otherwise know them.
+    pub fn reg(&self, n: usize) -> u32 {
+        self.sh2.r[n]
+    }
+
+    pub fn pr(&self) -> u32 {
+        self.sh2.pr
     }
 
     /// Takes `bytes` of pushed arguments off the stack.
@@ -527,11 +552,21 @@ pub fn register(n: &mut Natives) {
         0x0604_66d4 => player::ship_start[p] -> (),
         0x0604_673c => player::ship_entry[p] -> (),
         0x0604_74dc => player::ship_dead[p] -> (),
+        0x0606_16b8 => player::ships_still[] -> (),
+        0x0606_1704 => player::ships_hidden[] -> (),
+        0x0606_1738 => player::scene_on[] -> (),
+        0x0606_175c => player::scene_off[] -> (),
+        0x0606_1780 => player::start_pressed[] -> u32,
         0x0606_23d4 => player::jet_set[ship, frames] -> u32,
         0x0606_216c => player::jet_follow[j] -> (),
         0x0606_21f4 => player::jet_exec[j] -> (),
         0x0606_20c0 => player::puff_set[f] -> (),
         0x0606_2074 => player::puff_exec[o] -> (),
+        0x0606_248c => rings::ring_draw[o] -> (),
+        0x0606_254c => rings::ring_points[o] -> (),
+        0x0606_25fc => rings::ring_step[o] -> (),
+        0x0606_26bc => rings::ring_exec[o] -> (),
+        0x0606_2738 => rings::ring_set[d] -> u32,
         0x0605_72ec => timeline::timeline_exec[t] -> (),
         0x0605_7210 => timeline::timeline_run[t] -> (),
         0x0605_6b14 => parts::body_exec[body] -> (),
@@ -549,8 +584,24 @@ pub fn register(n: &mut Natives) {
         0x0605_933c => orbits::frame_2[o] -> u32,
         0x0605_93c0 => orbits::frame_4[o] -> u32,
         0x0605_3b10 => bullets::bullet_ends[b, back] -> u32,
+        0x0605_3f70 => bullets::heavy_exec[o] -> (),
+        0x0605_4050 => bullets::heavy_set[d] -> u32,
+        0x0605_41d0 => bullets::heavy_bullet[d] -> u32,
+        0x0605_41f0 => bullets::laser_segment_exec[o] -> (),
+        0x0605_4354 => bullets::laser_segment_set[d, muzzle, hits, angle_at; from] -> (),
+        0x0605_4504 => bullets::muzzle_exec[o] -> (),
+        0x0605_46ac => bullets::laser_set[d, angle_at] -> (),
+        0x0605_47ec => bullets::missile_exec[o] -> (),
+        0x0605_49f8 => bullets::missile_set[d] -> u32,
+        0x0605_4b60 => bullets::missile_set_plain[d] -> u32,
         0x0605_4b9c => bullets::pulse_exec[b] -> (),
         0x0605_4c8c => bullets::pulse_set[shot] -> u32,
+        0x0605_4e28 => bullets::burst_exec[o] -> (),
+        0x0605_4f64 => bullets::burst_ball_draw[s] -> (),
+        0x0605_5154 => bullets::burst_star_draw[s] -> (),
+        0x0605_5310 => bullets::burst_set[d] -> u32,
+        0x0605_547c => bullets::shell_exec[o] -> (),
+        0x0605_587c => bullets::shell_set[d] -> u32,
         0x0605_5a68 => bullets::rocket_exec[b] -> (),
         0x0605_5b5c => bullets::rocket_set[shot] -> u32,
         0x0605_5d84 => bullets::rocket_set_plain[shot] -> u32,
@@ -571,16 +622,32 @@ pub fn register(n: &mut Natives) {
         0x0605_c1d4 => ground::turret_exec[o] -> (),
         0x0605_c464 => ground::launcher_set[d, carrier] -> u32,
         0x0605_cc54 => ground::spreader_exec[o] -> (),
+        0x0605_cee8 => ground::spreader_set[d, script] -> u32,
         0x0605_d028 => ground::side_laser_exec[o] -> (),
         0x0605_d228 => ground::side_laser_set[d, carrier] -> u32,
         0x0605_d35c => ground::carrier_exec[o] -> (),
         0x0605_d51c => ground::carrier_set[d, script, kind] -> u32,
         0x0605_d780 => ground::burster_exec[o] -> (),
         0x0605_d988 => ground::burster_draw[s] -> (),
+        0x0605_da58 => ground::burster_set[d, script] -> u32,
         0x0605_dba4 => ground::shard_exec[o] -> (),
         0x0605_de54 => ground::hatch_exec[o] -> (),
         0x0605_c700 => ground::ride[o] -> (),
         0x0606_38c0 => aim::point_area_wide[p] -> u32,
+        0x0606_3620 => ribbons::ribbon_init[o, d, mover] -> u32,
+        0x0606_3884 => ribbons::ribbon_draw[s] -> (),
+        0x0606_3940 => ribbons::ribbon_end[o] -> (),
+        0x0606_39e0 => ribbons::ribbon_exec[o] -> (),
+        0x0606_3b94 => ribbons::ribbon_fade[o] -> (),
+        0x0606_3c20 => ribbons::ribbon_move[o] -> (),
+        0x0606_3cec => ribbons::ribbon_straight[o] -> (),
+        0x0606_3dc0 => ribbons::ribbon_homing[o] -> (),
+        0x0606_3e30 => ribbons::ribbon_wave[o] -> (),
+        0x0606_3ef4 => ribbons::ribbon_home[o] -> (),
+        0x0606_3f70 => ribbons::ribbon_edges[o, i] -> (),
+        0x0606_4194 => ribbons::ribbon_edge[o, x0, y0, x1; y1, width, quad] -> (),
+        0x0606_4244 => ribbons::ribbon_boxes[o, i] -> (),
+        0x0606_42e0 => ribbons::ribbon_set[kind, d, flags] -> (),
         0x0606_3900 => aim::point_area[p] -> u32,
         0x0605_3bfc => bullets::bullet_frame[b] -> (),
         0x0605_3ccc => bullets::bullet_move[b] -> (),
@@ -598,20 +665,6 @@ pub fn register(n: &mut Natives) {
         0x0605_29ac => models::model_boxes[obj] -> (),
         0x0605_2b08 => models::beam_boxes[obj, src] -> (),
         0x0605_2b88 => models::beam_length[obj, length] -> (),
-        0x0606_3620 => ribbons::ribbon_init[o, d, mover] -> u32,
-        0x0606_3884 => ribbons::ribbon_draw[s] -> (),
-        0x0606_3940 => ribbons::ribbon_end[o] -> (),
-        0x0606_39e0 => ribbons::ribbon_exec[o] -> (),
-        0x0606_3b94 => ribbons::ribbon_fade[o] -> (),
-        0x0606_3c20 => ribbons::ribbon_move[o] -> (),
-        0x0606_3cec => ribbons::ribbon_straight[o] -> (),
-        0x0606_3dc0 => ribbons::ribbon_homing[o] -> (),
-        0x0606_3e30 => ribbons::ribbon_wave[o] -> (),
-        0x0606_3ef4 => ribbons::ribbon_home[o] -> (),
-        0x0606_3f70 => ribbons::ribbon_edges[o, i] -> (),
-        0x0606_4194 => ribbons::ribbon_edge[o, x0, y0, x1; y1, width, quad] -> (),
-        0x0606_4244 => ribbons::ribbon_boxes[o, i] -> (),
-        0x0606_42e0 => ribbons::ribbon_set[kind, d, flags] -> (),
         0x0605_2c44 => models::model_point[obj, p] -> (),
         0x0605_2ca0 => models::model_screen_point[obj, p] -> (),
         0x0605_2d04 => models::group_draw[s] -> (),
@@ -688,6 +741,32 @@ pub fn register(n: &mut Natives) {
         0x0604_5e30 => aim::angle_to[a, b] -> u32,
         0x0604_5e60 => aim::length[dx, dy] -> u32,
         0x0604_5ee4 => aim::distance[a, b] -> u32,
+        0x0604_5f70 => aim::nearer_player_to[obj] -> u32,
+        0x0604_5b1c => models::model_colour[kind, frame, colour] -> (),
+        0x0604_5cdc => models::model_flip_bits[kind, frame, bits] -> (),
+        0x0604_61cc => camera::angle_ahead[a, b] -> u32,
+        0x0604_61f0 => camera::angle_behind[a, b] -> u32,
+        0x0605_6294 => actors::fill_bytes[at, v, n] -> (),
+        0x0605_6628 => actors::script_start[s, script] -> (),
+        0x0605_fdd8 => screen::set_plane_shared_next[v] -> (),
+        0x0605_e71c => screen::set_offset_b[r, g, b] -> (),
+        0x0605_6f7c => actors::depth_box_exec[o] -> (),
+        0x0605_9d24 => ground::thrust[o, s, behind, scale] -> (),
+        0x0605_9e4c => ground::blown_up[o] -> (),
+        0x0605_9e9c => ground::blown_up_1[o] -> (),
+        0x0605_9ee4 => ground::blown_up_wounded[o] -> (),
+        0x0605_9f50 => ground::gun_blown_off[o] -> (),
+        0x0605_9fc4 => ground::blown_up_burster[o] -> (),
+        0x0605_9a84 => actors::bonus_exec[o] -> (),
+        0x0605_9bd8 => actors::bonus_set[d] -> u32,
+        0x0605_6ff4 => actors::depth_box_set[kind] -> u32,
+        0x0606_2e40 => math::unwrap_angles[a, b] -> (),
+        0x0606_9a0c => math::sl_sin[a] -> u32,
+        0x0606_9a30 => math::sl_cos[a] -> u32,
+        0x0606_e26c => math::sl_mul_fx[a, b] -> u32,
+        0x0606_4eac => math::turn_point[t] -> (),
+        0x0606_29fc => models::spinner_draw[s] -> (),
+        0x0606_2aa0 => models::spinner_turn[o] -> (),
         0x0604_0ccc => aim::target[obj, delay, out] -> u32,
         0x0604_0df0 => aim::aim[obj, delay] -> u32,
         0x0604_5df8 => aim::free_number[from] -> u32,
@@ -702,6 +781,7 @@ pub fn register(n: &mut Natives) {
         0x0604_6264 => sprites::sprite_init[s] -> (),
         0x0605_6554 => aim::turn_sign[a, b] -> u32,
         0x0605_6580 => aim::angle_between[a, b] -> u32,
+        0x0605_6644 => models::pose_step[p] -> (),
         0x0605_69f8 => aim::area_flags[s, top, bottom, left; right] -> u32,
         0x0605_6a24 => aim::off_screen[s] -> u32,
         0x0605_70d8 => aim::turn_toward[angle, speed, from, to; most, ease, accel] -> (),
@@ -719,11 +799,13 @@ pub fn register(n: &mut Natives) {
         0x0604_deb4 => effects::effect_exec[obj] -> (),
         0x0604_d780 => actors::actor_exec[actor] -> (),
         0x0604_3d38 => hits::hits_exec[hits] -> (),
-        0x0605_6644 => models::pose_step[p] -> (),
         0x0604_5d78 => math::random_seed[seed] -> (),
         0x0604_5d90 => math::random[n] -> u32,
         0x0604_5dcc => math::by_difficulty[x] -> u32,
         0x0606_14b0 => text::typewriter_set[s, at, flags, blink] -> u32,
+        0x0605_975c => text::opening_exec[o] -> (),
+        0x0605_9920 => text::opening_bar_draw[s] -> (),
+        0x0605_99c8 => text::opening_set[l1, l2, l3, l4; wait] -> (),
         0x0606_131c => text::typewriter_exec[obj] -> (),
         0x0606_1504 => text::message_exec[obj] -> (),
         0x0606_12bc => text::stop_text_objects[] -> (),

@@ -400,3 +400,97 @@ pub fn pose_step(cpu: &mut Cpu, p: u32) {
     let left = cpu.read16(p + P_LEFT).wrapping_sub(1);
     cpu.write16(p + P_LEFT, left);
 }
+
+/// A spinner's draw (`s` its sprite): its model (sprite kind 32's first, through its table) at
+/// its place, turned by its angle about y and a quarter about x, under the screen's light;
+/// SGL's 0x0606713c set to 0 around it when its byte +0x2d says.
+const SPINNER_MODELS: u32 = 0x0607_43f0;
+const SPINNER_OWN: u32 = 0x2d;
+const SPINNER_TURN: u32 = 0x1e;
+const SL_0606713C: u32 = 0x0606_713c;
+const SCREEN_LIGHT: u32 = 0x70;
+
+pub fn spinner_draw(cpu: &mut Cpu, s: u32) {
+    let own = cpu.read8(s + SPINNER_OWN) != 0;
+    if own {
+        cpu.call(SL_0606713C, &[0]);
+    }
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    let screen = cpu.read32(super::screen::SCREEN);
+    cpu.call(SL_LOAD_MATRIX, &[screen + SCREEN_LIGHT]);
+    let p = [1, 2, 3].map(|i| cpu.read32(s + 4 * i));
+    cpu.call(SL_TRANSLATE, &p);
+    let a = cpu.read16(s + SPINNER_TURN) as i16 as i32 as u32;
+    cpu.call(SL_ROT_Y, &[a]);
+    cpu.call(SL_ROT_X, &[0x4000]);
+    let table = cpu.read32(SPINNER_MODELS);
+    let at = cpu.read32(table + 0x1c);
+    let at = cpu.read32(at);
+    let model = cpu.read32(at);
+    cpu.call(SL_PUT_POLYGON, &[model]);
+    cpu.call(SL_POP_MATRIX, &[]);
+    if cpu.read8(s + SPINNER_OWN) != 0 {
+        cpu.call(SL_0606713C, &[1]);
+    }
+}
+
+/// A spinner's turn a frame (at +0x2e, a word): 0x100 and up to 0x200 more back, by a sine whose
+/// phase (+0x44) runs 0x80 a frame.
+const SPIN_PHASE: u32 = 0x44;
+const SPIN_ANGLE: u32 = 0x2e;
+const SPIN_SWING: u32 = 0x200_0000;
+const SL_SIN_M: u32 = 0x0606_9a0c;
+const SL_MUL_FX_M: u32 = 0x0606_e26c;
+
+pub fn spinner_turn(cpu: &mut Cpu, o: u32) {
+    let phase = cpu.read16(o + SPIN_PHASE).wrapping_add(0x80);
+    cpu.write16(o + SPIN_PHASE, phase);
+    let s = cpu.call(SL_SIN_M, &[phase as i16 as i32 as u32]);
+    let m = (cpu.call(SL_MUL_FX_M, &[SPIN_SWING, s]) >> 16) as i16;
+    let a = cpu.read16(o + SPIN_ANGLE).wrapping_add(0xff00).wrapping_sub(m.unsigned_abs());
+    cpu.write16(o + SPIN_ANGLE, a);
+}
+
+/// Sprite kind `kind`'s models (sprites.rs's kinds: each kind's table, its +0x1c the models: for
+/// each frame a pointer to its plain model and its flashing one; SGL's polygon data: +0xc the
+/// polygons' count, +0x10 their attributes, 12 bytes each).
+const MODEL_KINDS: u32 = 0x0607_41f0;
+const KIND_MODELS: u32 = 0x1c;
+const PD_COUNT: u32 = 0xc;
+const PD_ATTRS: u32 = 0x10;
+const ATTR_SIZE: u32 = 12;
+const ATTR_BITS: u32 = 4;
+const ATTR_COLOUR: u32 = 6;
+
+fn kind_model(cpu: &mut Cpu, kind: u32, frame: u32) -> u32 {
+    let table = cpu.read32(MODEL_KINDS.wrapping_add(kind << 4));
+    let models = cpu.read32(table + KIND_MODELS);
+    cpu.read32(models.wrapping_add(frame << 2))
+}
+
+/// The plain model's polygons all given colour `colour`.
+pub fn model_colour(cpu: &mut Cpu, kind: u32, frame: u32, colour: u32) {
+    let at = kind_model(cpu, kind, frame);
+    let pd = cpu.read32(at);
+    let mut k = 0;
+    while k < cpu.read32(pd + PD_COUNT) {
+        let attrs = cpu.read32(pd + PD_ATTRS);
+        cpu.write16(attrs + ATTR_SIZE * k + ATTR_COLOUR, colour as u16);
+        k += 1;
+    }
+}
+
+/// Both models' polygons' attribute bits xored with `bits`.
+pub fn model_flip_bits(cpu: &mut Cpu, kind: u32, frame: u32, bits: u32) {
+    let at = kind_model(cpu, kind, frame);
+    let (plain, flashing) = (cpu.read32(at), cpu.read32(at + 4));
+    let mut k = 0;
+    while k < cpu.read32(plain + PD_COUNT) {
+        for pd in [plain, flashing] {
+            let a = cpu.read32(pd + PD_ATTRS) + ATTR_SIZE * k + ATTR_BITS;
+            let v = cpu.read16(a) ^ bits as u16;
+            cpu.write16(a, v);
+        }
+        k += 1;
+    }
+}

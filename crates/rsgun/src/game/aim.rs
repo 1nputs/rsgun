@@ -79,6 +79,22 @@ pub fn distance(cpu: &mut Cpu, a: u32, b: u32) -> u32 {
     length_of(cpu, dx, dy)
 }
 
+/// The player nearer `obj` (the second when both are as near; the only one in; with neither,
+/// the director).
+pub fn nearer_player_to(cpu: &mut Cpu, obj: u32) -> u32 {
+    let p0 = cpu.read32(PLAYERS);
+    let p1 = cpu.read32(PLAYERS + 4);
+    match (p0, p1) {
+        (0, 0) => cpu.read32(GAME),
+        (0, p) | (p, 0) => p,
+        _ => {
+            let d0 = nested!(cpu, DISTANCE, distance(cpu, obj, p0)) as i32;
+            let d1 = nested!(cpu, DISTANCE, distance(cpu, obj, p1)) as i32;
+            if d0 >= d1 { p1 } else { p0 }
+        }
+    }
+}
+
 /// The player `obj` aims at: the nearer of the two (the only one in; with neither, the director).
 /// `out` (unless 0) gets where it is: its position, or with `delay` (1-32) where it was `delay`
 /// frames ago.

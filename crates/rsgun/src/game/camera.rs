@@ -157,3 +157,15 @@ pub fn camera_exec(cpu: &mut Cpu, cam: u32) {
     let roll = cpu.read16(cam + ROLL) as i16 as i32 as u32;
     cpu.call(SL_LOOK_AT, &[cam + EYE, cam + AT, roll]);
 }
+
+/// How far `b` is ahead of `a` (angles, 16 bits): 0 to 0xffff.
+pub fn angle_ahead(_cpu: &mut Cpu, a: u32, b: u32) -> u32 {
+    let (a, b) = ((a & 0xffff) as i32, (b & 0xffff) as i32);
+    (if b >= a { b } else { b + 0x1_0000 }).wrapping_sub(a) as u32
+}
+
+/// How far `b` is behind `a` going back (angles, 16 bits): -0xffff to 0.
+pub fn angle_behind(_cpu: &mut Cpu, a: u32, b: u32) -> u32 {
+    let (a, b) = ((a & 0xffff) as i32, (b & 0xffff) as i32);
+    (if b > a { b - 0x1_0000 } else { b }).wrapping_sub(a) as u32
+}

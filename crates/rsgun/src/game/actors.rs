@@ -566,3 +566,231 @@ pub fn flap_and_face(cpu: &mut Cpu, actor: u32, v: u32) {
     cpu.write32(actor + FLAGS, flags);
 }
 
+
+/// A depth box: an unseen enemy part kept at the place at +0x74 (its depth 0xb0 nearer), hittable
+/// only while that depth is within its range (pixels either way). While the word at +0x6c has
+/// any of WATCH_OFF it cannot be hit; with WATCH_END it ends.
+const DB_WATCHED: u32 = 0x6c;
+const DB_AT: u32 = 0x74;
+const DB_RANGE: u32 = 0x78;
+const DB_NO_HITS: u32 = 0x8_0000;
+const DB_NEARER: u32 = 0xff50_0000;
+const WATCH_OFF: u16 = 0xe0;
+const WATCH_END: u16 = 0x40;
+const DB_POSITION: u32 = 0x14;
+
+pub fn depth_box_exec(cpu: &mut Cpu, o: u32) {
+    let watched = cpu.read32(o + DB_WATCHED);
+    let w = cpu.read16(watched);
+    let hittable = if w & WATCH_OFF == 0 {
+        let at = cpu.read32(o + DB_AT);
+        for k in 0..2 {
+            let v = cpu.read32(at + 4 * k);
+            cpu.write32(o + DB_POSITION + 4 * k, v);
+        }
+        let z = cpu.read32(at + 8).wrapping_add(DB_NEARER);
+        cpu.write32(o + DB_POSITION + 8, z);
+        let range = cpu.read8(o + DB_RANGE) as i8 as i32;
+        let z = z as i32;
+        z <= range << 16 && z > range.wrapping_neg() << 16
+    } else if w & WATCH_END != 0 {
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    } else {
+        false
+    };
+    let flags = cpu.read32(o + FLAGS);
+    cpu.write32(o + FLAGS, if hittable { flags & !DB_NO_HITS } else { flags | DB_NO_HITS });
+}
+
+/// Makes a depth box of kind `kind` (its range from a table: 4, 8, 12 or 16 pixels take their own
+/// boxes). It, or 0.
+const DB_SIZE: u32 = 0x80;
+const DB_LIST: u32 = 2;
+const DB_EXEC: u32 = 0x0605_6f7c;
+const DB_FLAGS: u32 = 0x8008_0000;
+const DB_RANGES: u32 = 0x0607_2fa4;
+const DB_BOXES: [(u8, u32); 4] = [(4, 0x0607_2fe8), (8, 0x0607_2ff0), (12, 0x0607_2ff8), (16, 0x0607_3000)];
+const DB_SIDE: u32 = 0x54;
+const DB_TYPE: u32 = 0x55;
+const DB_BOX_LIST: u32 = 0x3c;
+
+pub fn depth_box_set(cpu: &mut Cpu, kind: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, DB_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, DB_LIST, blocks, 0x0604_d780));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + DB_BOX_LIST));
+    cpu.write32(o + BEHAVIOUR, DB_EXEC);
+    cpu.write32(o + FLAGS, DB_FLAGS);
+    let range = cpu.read8(DB_RANGES + (kind & 0xffff));
+    cpu.write8(o + DB_RANGE, range);
+    cpu.write8(o + DB_SIDE, 1);
+    cpu.write8(o + DB_TYPE, 5);
+    let range = cpu.read8(o + DB_RANGE);
+    if let Some(&(_, boxes)) = DB_BOXES.iter().find(|&&(r, _)| r == range) {
+        cpu.write32(o + DB_BOX_LIST, boxes);
+    }
+    o
+}
+
+/// The bonus item (the numbered objects' last, one at a time): drifting with its speed against
+/// the ground's movement; of kind 2 it lasts its frames. Shot (out of life) it gives its points
+/// to the player who shot it (sound 67, scored as weapon 6), stops being hittable and flickers
+/// for 120 frames, then shows its points (effects.rs's popup) and ends. Off screen it ends.
+const BONUS: u32 = 0x0607_41ec;
+const BN_SHOT: u32 = 0x7c;
+const BN_KIND: u32 = 0x88;
+const BN_LEFT: u32 = 0x8a;
+const BN_SPEED: u32 = 0x80;
+const BN_POINTS: u32 = 0xac;
+const BN_FRAMES: u32 = 0xb0;
+const BN_SHOOTER: u32 = 0xb8;
+const BN_LASTS: u8 = 2;
+const BN_LIFE: u32 = 0x50;
+const BN_HIT_BY: u32 = 0x40;
+const BN_NUMBER: u32 = 0x32;
+const BN_FRAME: u32 = 0x2f;
+const BN_FIRST_FRAME: u8 = 0xa3;
+const SE_BONUS: u32 = 67;
+const BONUS_WEAPON: u32 = 6;
+const NO_DRAW: u32 = 0x8000_0000;
+/// The popup (effects.rs's): its place, points, a word 1, what it shows over, the player.
+const PU_POINTS: u32 = 0x14;
+const PU_ONE: u32 = 0x1a;
+const PU_PLAYER: u32 = 0x1e;
+const PU_OVER: u32 = 0x3c;
+
+pub fn bonus_exec(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    if cpu.read8(o + BN_KIND) == BN_LASTS && cpu.read8(o + BN_SHOT) == 0 {
+        let left = cpu.read32(o + BN_FRAMES).wrapping_sub(1);
+        cpu.write32(o + BN_FRAMES, left);
+        if left as i32 <= 0 {
+            cpu.write8(o + OBJ_MODE, ENDING);
+            return;
+        }
+    }
+    let shot = cpu.read8(o + BN_SHOT);
+    if shot == 0 {
+        if (cpu.read32(o + BN_LIFE) as i32) < 0 {
+            cpu.write8(o + BN_SHOT, shot + 1);
+            let flags = cpu.read32(o + FLAGS) & !NO_DRAW | DB_NO_HITS;
+            cpu.write32(o + FLAGS, flags);
+            nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_BONUS));
+            let by = cpu.read32(o + BN_HIT_BY);
+            let n = cpu.read8(by + BN_NUMBER) as i8 as i32 as u32;
+            cpu.write32(o + BN_SHOOTER, n);
+            let by = cpu.read32(o + BN_HIT_BY);
+            let n = cpu.read8(by + BN_NUMBER) as i8 as i32 as u32;
+            let points = cpu.read32(o + BN_POINTS);
+            nested!(cpu, 0x0604_3108, hits::score_kill(cpu, n, BONUS_WEAPON, o, points));
+        } else if nested!(cpu, 0x0605_6a24, super::aim::off_screen(cpu, o + SPRITE)) as u8 != 0 {
+            cpu.write8(o + OBJ_MODE, ENDING);
+            return;
+        }
+    } else {
+        let left = cpu.read16(o + BN_LEFT).wrapping_sub(1);
+        cpu.write16(o + BN_LEFT, left);
+        let flicker = ((cpu.read32(GAME_FRAMES_A) >> 1) & 3) as u8;
+        cpu.write8(o + BN_FRAME, flicker.wrapping_add(BN_FIRST_FRAME));
+        if (cpu.read16(o + BN_LEFT) as i16) < 0 {
+            cpu.write8(o + OBJ_MODE, ENDING);
+            for k in 0..2 {
+                let v = cpu.read32(o + DB_POSITION + 4 * k);
+                cpu.write32(f + 4 * k, v);
+            }
+            cpu.write32(f + 8, 0);
+            let points = cpu.read32(o + BN_POINTS);
+            cpu.write32(f + PU_POINTS, points);
+            cpu.write16(f + PU_ONE, 1);
+            cpu.write32(f + PU_OVER, o);
+            let n = cpu.read8(o + BN_SHOOTER + 3);
+            cpu.write8(f + PU_PLAYER, n);
+            nested!(cpu, 0x0604_ea48, super::effects::popup(cpu, f));
+        }
+    }
+    use super::globals::{GROUND_DX_AT, GROUND_DY_AT};
+    for (k, at) in [(0, GROUND_DX_AT), (1, GROUND_DY_AT)] {
+        let at = cpu.read32(at);
+        let ground = cpu.read32(at);
+        let d = cpu.read32(o + BN_SPEED + 4 * k).wrapping_sub(ground);
+        let p = o + DB_POSITION + 4 * k;
+        let v = cpu.read32(p).wrapping_add(d);
+        cpu.write32(p, v);
+    }
+}
+
+/// Makes the bonus item from the description at `d` (its kind (a byte at +1), place (pixel words
+/// at +4, +6), points, speed (x, y), frames) unless there is one. 1.
+const BN_SIZE: u32 = 0xbc;
+const BN_EXEC: u32 = 0x0605_9a84;
+const BN_NUMBERED: u8 = 63;
+const BN_LIFT: u8 = 0x7e;
+const BN_COLOURS: u32 = 0x0607_3274;
+const BN_BOXES: u32 = 0x0607_326a;
+const BN_TYPE: u8 = 6;
+const BN_FLICKER: u16 = 120;
+const GAME_FRAMES_A: u32 = super::globals::GAME_FRAMES;
+
+pub fn bonus_set(cpu: &mut Cpu, d: u32) -> u32 {
+    if cpu.read32(BONUS) != 0 {
+        return 1;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, BN_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, DB_LIST, blocks, 0x0604_d600));
+    if o == 0 {
+        return 1;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + DB_BOX_LIST));
+    nested!(cpu, 0x0605_681c, enemy_clear(cpu, o));
+    cpu.write32(o + BEHAVIOUR, BN_EXEC);
+    cpu.write32(o + FLAGS, NO_DRAW);
+    cpu.write8(o + BN_NUMBER, BN_NUMBERED);
+    cpu.write32(BONUS, o);
+    for k in 0..2 {
+        let v = (cpu.read16(d + 4 + 2 * k) as i16 as i32) << 16;
+        cpu.write32(o + DB_POSITION + 4 * k, v as u32);
+    }
+    cpu.write32(o + DB_POSITION + 8, 0);
+    cpu.write8(o + 0x33, BN_LIFT);
+    let kind = cpu.read8(d + 1);
+    cpu.write8(o + BN_KIND, kind);
+    cpu.write8(o + 0x2e, 0);
+    cpu.write8(o + BN_FRAME, BN_FIRST_FRAME);
+    let kind = cpu.read8(o + BN_KIND) as i8 as i32 as u32;
+    let colour = cpu.read16(CHAR_BASE).wrapping_add(cpu.read8(BN_COLOURS.wrapping_add(kind)) as u16);
+    cpu.write16(o + 0x2a, colour);
+    cpu.write16(o + 0x28, colour);
+    cpu.write32(o + BN_LIFE, 1);
+    cpu.write32(o + DB_BOX_LIST, BN_BOXES);
+    cpu.write8(o + DB_SIDE, 1);
+    cpu.write8(o + DB_TYPE, BN_TYPE);
+    cpu.write16(o + BN_LEFT, BN_FLICKER);
+    for (field, from) in [(BN_SPEED, 0x14), (BN_SPEED + 4, 0x18), (BN_POINTS, 0x10), (BN_FRAMES, 0x1c)] {
+        let v = cpu.read32(d + from);
+        cpu.write32(o + field, v);
+    }
+    1
+}
+
+/// `n` bytes from `at` set to `v` (the count a byte, as the SH-2 code keeps it).
+pub fn fill_bytes(cpu: &mut Cpu, at: u32, v: u32, n: u32) {
+    let n = n as i16 as i32;
+    let mut i: u8 = 0;
+    while (i as i32) < n {
+        cpu.write8(at + i as u32, v as u8);
+        i = i.wrapping_add(1);
+    }
+}
+
+/// A script started at `s` (a stage's: the script at +0x20, its three counts cleared).
+pub fn script_start(cpu: &mut Cpu, s: u32, script: u32) {
+    cpu.write32(s + 0x20, script);
+    for k in 0..3 {
+        cpu.write16(s + 0x24 + 2 * k, 0);
+    }
+}

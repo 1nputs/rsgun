@@ -690,6 +690,8 @@ const SPARK_KIND: u32 = 0x2b;
 const SPARK_FRAMES: u16 = 15;
 const SL_ATAN: u32 = 0x0606_780c;
 const SL_ROTATE: u32 = 0x0606_4eac;
+// (register_boxes calls it with the SH-2 code's return addresses: its push of PR, made before it
+// calls SGL's cosine, is read later as an unset field.)
 /// The effect's struct (in the frame): x, y, z, its scales (16.16), its kind, its angle (a word),
 /// two bytes, the player, its first character (a word), its frames (a word), one byte more.
 const FX_X: u32 = 0;
@@ -1022,7 +1024,7 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
             let sy = cpu.read32(obj + OBJ_SCALE_Y);
             cpu.write32(t + 0x10, sy);
             turn_struct(cpu, obj, t);
-            cpu.call(SL_ROTATE, &[t]);
+            cpu.call_returning(0x0604_53c8, SL_ROTATE, &[t]);
             (cpu.read32(t), cpu.read32(t + 4))
         };
         let e = entry(cpu);
@@ -1051,7 +1053,7 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
                 cpu.write32(t, d as u32);
                 cpu.write32(t + 8, d as u32);
                 cpu.write32(t + 4, 0);
-                cpu.call(SL_ROTATE, &[t]);
+                cpu.call_returning(0x0604_54ee, SL_ROTATE, &[t]);
                 let a = (cpu.read32(t) as i32).wrapping_abs().wrapping_sub(cpu.read32(t + 8) as i32);
                 cpu.write32(t, a as u32);
                 let b = (cpu.read32(t + 4) as i32).wrapping_abs();
@@ -1061,7 +1063,7 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
                 cpu.write32(t + 4, d as u32);
                 cpu.write32(t + 8, d as u32);
                 cpu.write32(t, 0);
-                cpu.call(SL_ROTATE, &[t]);
+                cpu.call_returning(0x0604_5534, SL_ROTATE, &[t]);
                 let a = (cpu.read32(t) as i32).wrapping_abs();
                 cpu.write32(t, a as u32);
                 let b = (cpu.read32(t + 4) as i32).wrapping_abs().wrapping_sub(cpu.read32(t + 8) as i32);

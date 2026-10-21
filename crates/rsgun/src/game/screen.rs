@@ -612,3 +612,16 @@ pub fn plane_picture(cpu: &mut Cpu, picture: u32) {
     cpu.nested_with_stack(&QUEUE_CELLS_PROLOGUE, QUEUE_CELLS, &[PICTURE_PALETTE, PICTURE_ADD], |cpu| queue_cells(cpu, src, dst, w, h, PICTURE_PALETTE, PICTURE_ADD));
 }
 
+
+/// VDP2's colour offset B as the mode sets it (r, g, b).
+pub fn set_offset_b(cpu: &mut Cpu, r: u32, g: u32, b: u32) {
+    let s = cpu.read32(SCREEN);
+    for (k, v) in [r, g, b].into_iter().enumerate() {
+        cpu.write16(s + OFFSET_B + 2 * k as u32, v as u16);
+    }
+}
+
+/// Sets PLANE_SHARED_NEXT (for the stages' code).
+pub fn set_plane_shared_next(cpu: &mut Cpu, v: u32) {
+    cpu.write32(PLANE_SHARED_NEXT, v);
+}

@@ -656,3 +656,134 @@ pub fn stop_text_objects(cpu: &mut Cpu) {
     }
     nested!(cpu, 0x0605_fde8, screen::request_clear_text_plane(cpu));
 }
+
+/// A stage's opening message (with the BIOS's setting 1): after a wait, typed out a line at a
+/// time on the text plane, the first and second lines its own, the second in the large font,
+/// then three lines of its own 30 frames apart; an underline beneath grows meanwhile. After 180
+/// frames it is cleared and ends.
+const MS_PHASE: u32 = 0x3c;
+const MS_LINES: u32 = 0x40;
+const MS_WAIT: u32 = 0x50;
+const MS_BAR: u32 = 0x52;
+const MS_SIZE: u32 = 0x54;
+const MS_EXEC: u32 = 0x0605_975c;
+const MS_DRAW: u32 = 0x0605_9920;
+const MS_FLAGS: u32 = 0xc0_0000;
+const MS_DRAW_AT: u32 = 0x34;
+const PLAIN_EXEC: u32 = 0x0604_dcb4;
+/// The lines' places on the plane (VDP2 RAM), the fixed lines, the blank that clears them.
+const MS_AT: [u32; 6] = [0x25e7_e808, 0x25e7_e888, 0x25e7_ea08, 0x25e7_eb08, 0x25e7_eb88, 0x25e7_ec08];
+const MS_TITLE: u32 = 0x0607_3210;
+const MS_RULE: u32 = 0x0607_322c;
+const MS_BLANK: u32 = 0x0607_3248;
+/// Each phase's typing: the line (0 its own first, then 0 its own n), where, flags, blink, and
+/// the wait after.
+const MS_LAST_LINES: [(u16, usize); 3] = [(150, 1), (120, 2), (90, 3)];
+const MS_BAR_LONGEST: u32 = 0x80;
+const MS_BAR_GROWTH: u32 = 16;
+
+fn ms_type(cpu: &mut Cpu, s: u32, at: u32, flags: u32, blink: u32) {
+    nested!(cpu, 0x0606_14b0, typewriter_set(cpu, s, at, flags, blink));
+}
+
+pub fn opening_exec(cpu: &mut Cpu, o: u32) {
+    let phase = cpu.read8(o + MS_PHASE);
+    let tick = |cpu: &mut Cpu| {
+        let w = cpu.read16(o + MS_WAIT).wrapping_sub(1);
+        cpu.write16(o + MS_WAIT, w);
+        w as i16
+    };
+    match phase {
+        0..=2 => {
+            if tick(cpu) < 0 {
+                cpu.write8(o + MS_PHASE, phase + 1);
+                let (s, at, flags, blink, wait) = match phase {
+                    0 => (MS_TITLE, MS_AT[0], 0, 30, 36),
+                    1 => (cpu.read32(o + MS_LINES), MS_AT[1], 1, 0xbc, 60),
+                    _ => (MS_RULE, MS_AT[2], 0, 0, 180),
+                };
+                cpu.write16(o + MS_WAIT, wait);
+                ms_type(cpu, s, at, flags, blink);
+            }
+        }
+        3 => {
+            tick(cpu);
+            for (when, k) in MS_LAST_LINES {
+                if (cpu.read16(o + MS_WAIT) as i16) == when as i16 {
+                    let s = cpu.read32(o + MS_LINES + 4 * k as u32);
+                    ms_type(cpu, s, MS_AT[2 + k], 0, 0);
+                }
+            }
+            if (cpu.read16(o + MS_WAIT) as i16) < 0 {
+                cpu.write8(o + OBJ_MODE, ENDING);
+                for (k, at) in MS_AT.into_iter().enumerate() {
+                    if k == 1 {
+                        nested!(cpu, 0x0606_1204, put_large_string(cpu, MS_BLANK, at, 0));
+                    } else {
+                        nested!(cpu, 0x0606_11b8, put_string(cpu, MS_BLANK, at, 0));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    if cpu.read8(o + MS_PHASE) > 1 {
+        let bar = cpu.read16(o + MS_BAR) as i16 as i32 as u32;
+        let bar = nested!(cpu, 0x0604_6168, super::actors::approach(cpu, bar, MS_BAR_LONGEST, MS_BAR_GROWTH));
+        cpu.write16(o + MS_BAR, bar as u16);
+    }
+}
+
+/// The message's underline drawn (its draw; `s` its sprite): a polygon a pixel high, as long as
+/// the bar, at (-144, 39), once the second line is out.
+const UL_FOUR_CORNERS: u32 = 2;
+const UL_CORNERS_AT: u32 = 0x24;
+const UL_CORNERS: u32 = 0x2c;
+const UL_LIFT: u8 = 0x7e;
+const UL_COLOUR: u16 = 12;
+const UL_PLACE: (u32, u32) = (0xff70_0000, 0x27_0000);
+const CHAR_BASE: u32 = 0x0607_41fc;
+
+pub fn opening_bar_draw(cpu: &mut Cpu, s: u32) {
+    let f = cpu.stack();
+    if cpu.read8(s + MS_PHASE - 0x10) <= 1 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, f));
+    cpu.write32(f, UL_FOUR_CORNERS);
+    cpu.write32(f + UL_CORNERS_AT, f + UL_CORNERS);
+    cpu.write8(f + 0x23, UL_LIFT);
+    let colour = cpu.read16(CHAR_BASE).wrapping_add(UL_COLOUR);
+    cpu.write16(f + 0x18, colour);
+    cpu.write32(f + 4, UL_PLACE.0);
+    cpu.write32(f + 8, UL_PLACE.1);
+    cpu.write32(f + 0xc, 0);
+    let bar = cpu.read16(s + MS_BAR - 0x10);
+    for (k, v) in [0, 0, bar, 0, bar, 1, 0, 1].into_iter().enumerate() {
+        cpu.write16(f + UL_CORNERS + 2 * k as u32, v);
+    }
+    nested!(cpu, 0x0604_0960, super::sprites::draw(cpu, f));
+}
+
+/// Makes a stage's opening message (with the BIOS's setting 1): its own lines `l1`..`l4`, after
+/// `wait` frames.
+pub fn opening_set(cpu: &mut Cpu, l1: u32, l2: u32, l3: u32, l4: u32, wait: u32) {
+    if !super::globals::bios_setting_is_1(cpu) {
+        return;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, MS_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks, PLAIN_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, o + 0x10));
+    cpu.write32(o + 0x38, MS_EXEC);
+    cpu.write32(o + 0x10, MS_FLAGS);
+    cpu.write32(o + MS_DRAW_AT, MS_DRAW);
+    for (k, l) in [l1, l2, l3, l4].into_iter().enumerate() {
+        cpu.write32(o + MS_LINES + 4 * k as u32, l);
+    }
+    cpu.write8(o + MS_PHASE, 0);
+    cpu.write16(o + MS_WAIT, wait as u16);
+    cpu.write16(o + MS_BAR, 0);
+}

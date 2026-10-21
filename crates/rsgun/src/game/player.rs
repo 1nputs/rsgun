@@ -352,7 +352,11 @@ pub fn weapons_frame(cpu: &mut Cpu, p: u32) {
     }
     let state = cpu.read8(p + STATE_LOW) as u32;
     let behaviour = cpu.read32(STATES + 4 * state);
-    cpu.call(behaviour, &[p]);
+    // the SH-2 code holds the ship, its number's address, the hits' size, their base, a field's
+    // address and a limit in r8-r13 here: the state's callees push them (read later as an unset
+    // field)
+    let regs = [(8, p), (9, p + NUMBER), (10, HITS_SIZE), (11, WEAPON_HITS), (12, WEAPON_HITS + 18), (13, 299)];
+    cpu.holding(&regs, |cpu| cpu.call(behaviour, &[p]));
     cpu.write32(p + SPEED + 4, 0);
     cpu.write32(p + SPEED, 0);
 }
@@ -1237,4 +1241,65 @@ pub fn ship_dead(cpu: &mut Cpu, p: u32) {
         }
         _ => {}
     }
+}
+
+/// The players' objects (the numbered objects' first two; 0 when out).
+const PLAYER_OBJECTS: [u32; 2] = [0x0607_40f0, 0x0607_40f4];
+/// The ship's pad words (held, changed, pressed, let go: pads.rs's PAD_INF as the ship keeps it).
+const SHIP_PAD: u32 = 0xa0;
+
+/// The ships' pad words cleared (for the stages' scenes: the ships take no input).
+pub fn ships_still(cpu: &mut Cpu) {
+    for at in PLAYER_OBJECTS {
+        let p = cpu.read32(at);
+        if p != 0 {
+            for k in 0..4 {
+                cpu.write16(p + SHIP_PAD + 2 * k, 0);
+            }
+        }
+    }
+}
+
+/// The ships hidden (not drawn).
+pub fn ships_hidden(cpu: &mut Cpu) {
+    for at in PLAYER_OBJECTS {
+        let p = cpu.read32(at);
+        if p != 0 {
+            let flags = cpu.read32(p + FLAGS) | NO_DRAW;
+            cpu.write32(p + FLAGS, flags);
+        }
+    }
+}
+
+/// A scene's flags (states.rs's: the pads not taken, and the two display flags) set, or cleared.
+const SCENE_FLAGS: [u32; 3] = [0x0600_ed90, 0x0600_cc61, 0x0600_edcc];
+
+pub fn scene_on(cpu: &mut Cpu) {
+    for at in SCENE_FLAGS {
+        cpu.write8(at, 1);
+    }
+}
+
+pub fn scene_off(cpu: &mut Cpu) {
+    for at in SCENE_FLAGS {
+        cpu.write8(at, 0);
+    }
+}
+
+/// Start pressed by a player who is in (pads.rs's PAD_INF pressed words; START), before the demo
+/// modes: the bit, or 0.
+const PRESSED: [u32; 2] = [0x0602_ee14, 0x0602_ee1c];
+const START: u16 = 0x800;
+const BEFORE_DEMOS: i8 = 12;
+
+pub fn start_pressed(cpu: &mut Cpu) -> u32 {
+    let mut pressed = 0;
+    if (cpu.read8(super::globals::GAME_MODE) as i8) < BEFORE_DEMOS {
+        for (at, pad) in PLAYER_OBJECTS.into_iter().zip(PRESSED) {
+            if cpu.read32(at) != 0 {
+                pressed |= cpu.read16(pad) & START;
+            }
+        }
+    }
+    pressed as u32
 }

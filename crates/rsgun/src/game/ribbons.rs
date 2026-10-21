@@ -198,8 +198,8 @@ pub fn ribbon_draw(cpu: &mut Cpu, s: u32) {
     cpu.call(SL_POP_MATRIX, &[]);
 }
 
-/// The ribbon ended: it fades (FADE), its points pushed back, and it bursts (bullets.rs's maker,
-/// not rewritten yet: at its head, a ring of 0x101) or ends the other way (not rewritten yet).
+/// The ribbon ended: it fades (FADE), its points pushed back, and it bursts (bullets.rs's burst,
+/// at its head, the ball in its second colours) or ends the other way (not rewritten yet).
 const BURST: u32 = 0x0605_5310;
 const OTHER_END: u32 = 0x0606_4494;
 const B_NUMBER: u32 = 0x1e;
@@ -227,7 +227,7 @@ pub fn ribbon_end(cpu: &mut Cpu, o: u32) {
     }
     cpu.write32(f + 0x30, 0);
     cpu.write32(f + 0x34, 0);
-    cpu.call(BURST, &[f]);
+    nested!(cpu, BURST, super::bullets::burst_set(cpu, f));
 }
 
 /// The trail's place `k` (16.16).

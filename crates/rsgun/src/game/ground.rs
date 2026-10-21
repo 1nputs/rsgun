@@ -338,7 +338,7 @@ const GROUND_AREA: [u32; 4] = [0xff80_0000, 0x0080_0000, 0xff44_0000, 0x00bc_000
 const KIND_1_FRAMES: u32 = 0x0607_3481;
 const KIND_2_FRAMES: u32 = 0x0607_34c1;
 const FLIPPED_Y: u32 = 0x20;
-/// Not rewritten yet: a parting shot, the kinds' explosions.
+/// Not rewritten yet: a parting shot. The kinds' explosions (below).
 const PARTING_SHOT: u32 = 0x0605_6070;
 const BLOWN_UP_1: u32 = 0x0605_9e9c;
 const BLOWN_UP: u32 = 0x0605_9e4c;
@@ -367,8 +367,11 @@ pub fn ground_exec(cpu: &mut Cpu, o: u32) {
             if kind == 2 && cpu.read8(DIFFICULTY) as i8 > 2 {
                 cpu.call(PARTING_SHOT, &[o, 0]);
             }
-            let blown = if cpu.read16(o + KIND_OF) == 1 { BLOWN_UP_1 } else { BLOWN_UP };
-            cpu.call(blown, &[o]);
+            if cpu.read16(o + KIND_OF) == 1 {
+                nested!(cpu, BLOWN_UP_1, blown_up_1(cpu, o));
+            } else {
+                nested!(cpu, BLOWN_UP, blown_up(cpu, o));
+            }
         }
         cpu.write8(o + OBJ_MODE, ENDING);
         return;
@@ -467,7 +470,7 @@ pub fn gun_exec(cpu: &mut Cpu, o: u32) {
         };
     if !alive(cpu) || leaves {
         if !alive(cpu) {
-            cpu.call(BLOWN_UP_1, &[o]);
+            nested!(cpu, BLOWN_UP_1, blown_up_1(cpu, o));
         }
         cpu.write8(o + OBJ_MODE, ENDING);
         return;
@@ -532,20 +535,21 @@ const F_GUN: u32 = 0x40;
 /// frames for each step of its rate above the difficulty, and 8 (12 at least).
 const B_ROCKET_OUT: i32 = 30;
 const B_ROCKET_KICK: u16 = 0xfffc;
-/// The second kind (1): two missiles 16 pixels either side of a point 20 out, turned 0x2000 out
-/// from the barrel's angle, speeding up (by the difficulty) and homing; the barrel kicked back 5.
+/// The second kind (1): two missiles (bullets.rs's) 16 pixels either side of a point 20 out,
+/// turned 0x2000 out from the barrel's angle, launched along it, homing for longer at higher
+/// difficulty (8 to 200 frames); the barrel kicked back 5.
 /// The second and third kinds' next shot waits 8 frames a step, and 8 (16 at least).
 const MISSILE: u32 = 0x0605_49f8;
 const B_MISSILE_OUT: i32 = 20;
 const B_MISSILE_ASIDE: i32 = 16;
 const B_MISSILE_TURNS: [(u16, u16); 2] = [(0x4000, 0x2000), (0xc000, 0xc000)];
-const B_MISSILE_FLAGS: u32 = 0x24000;
-const B_MISSILE_SPEEDS: u32 = 0x0607_34e0;
-const B_MISSILE_TURN: u16 = 0x100;
-const MS_SPEED: u32 = 0x2e;
-const MS_TURN: u32 = 0x32;
-const MS_ANGLE: u32 = 0x34;
-const MS_FLAGS: u32 = 0x38;
+const B_MISSILE_SPEED: u32 = 0x24000;
+const B_MISSILE_HOMING: u32 = 0x0607_34e0;
+const B_MISSILE_AIM: u16 = 0x100;
+const MS_HOMING: u32 = 0x2e;
+const MS_AIM: u32 = 0x32;
+const MS_LAUNCH: u32 = 0x34;
+const MS_SPEED: u32 = 0x38;
 const F_MISSILE_X: u32 = 0x44;
 const F_MISSILE_ANGLE_AT: u32 = 0x48;
 const B_KICK: u16 = 5;
@@ -620,12 +624,12 @@ fn barrel_fire(cpu: &mut Cpu, o: u32, f: u32) {
             shot_out(cpu, o, f, a, B_MISSILE_OUT);
             let (x, y) = (cpu.read32(f), cpu.read32(f + 4));
             cpu.write32(f + F_MISSILE_X, x);
-            cpu.write32(f + MS_FLAGS, B_MISSILE_FLAGS);
+            cpu.write32(f + MS_SPEED, B_MISSILE_SPEED);
             let d = cpu.read8(DIFFICULTY) as i8 as i32 as u32;
-            let speed = cpu.read8(B_MISSILE_SPEEDS.wrapping_add(d));
-            cpu.write16(f + MS_SPEED, speed as u16);
-            cpu.write16(f + MS_TURN, B_MISSILE_TURN);
-            cpu.write32(f + F_MISSILE_ANGLE_AT, f + MS_ANGLE);
+            let homing = cpu.read8(B_MISSILE_HOMING.wrapping_add(d));
+            cpu.write16(f + MS_HOMING, homing as u16);
+            cpu.write16(f + MS_AIM, B_MISSILE_AIM);
+            cpu.write32(f + F_MISSILE_ANGLE_AT, f + MS_LAUNCH);
             for (k, (aside, turn)) in B_MISSILE_TURNS.into_iter().enumerate() {
                 let b = cpu.read16(o + ANGLE).wrapping_add(aside) as i16 as i32 as u32;
                 let s = cpu.call(SL_SIN, &[b]) as i32;
@@ -640,8 +644,8 @@ fn barrel_fire(cpu: &mut Cpu, o: u32, f: u32) {
                 cpu.write32(f + 4, sy);
                 let angle = cpu.read16(f + S_ANGLE).wrapping_add(turn);
                 cpu.write16(f + S_ANGLE, angle);
-                cpu.write16(f + MS_ANGLE, angle);
-                cpu.call(MISSILE, &[f]);
+                cpu.write16(f + MS_LAUNCH, angle);
+                nested!(cpu, MISSILE, super::bullets::missile_set(cpu, f));
             }
         }
         2 => {
@@ -662,7 +666,7 @@ fn barrel_fire(cpu: &mut Cpu, o: u32, f: u32) {
             let colour = cpu.read8(B_SHELL_COLOURS.wrapping_add(t));
             cpu.write16(f + SH_COLOUR, colour as u16);
             cpu.write32(f + SH_SCALE, B_SHELL_SCALE);
-            cpu.call(SHELL, &[f]);
+            nested!(cpu, SHELL, super::bullets::shell_set(cpu, f));
         }
         3 => {
             let wait = cpu.read16(o + B_RATE).wrapping_add(4);
@@ -678,7 +682,7 @@ fn barrel_fire(cpu: &mut Cpu, o: u32, f: u32) {
             shot_out(cpu, o, f, a, B_HEAVY_OUT);
             let z = z(cpu);
             cpu.write32(f + 8, z);
-            cpu.call(HEAVY_BULLET, &[f]);
+            nested!(cpu, HEAVY_BULLET, super::bullets::heavy_bullet(cpu, f));
         }
         _ => {}
     }
@@ -922,7 +926,7 @@ const WOUNDED: i32 = 0x9c3;
 const WOUND_WAIT: u32 = 0xa2;
 const SIDE_SHOT: u32 = 0x0605_b4c0;
 const SIDE_SHOT_X: [u32; 2] = [0xffe8_0000, 0x18_0000];
-/// Not rewritten yet: the wounded kind's explosion.
+/// The wounded kind's explosion (below).
 const BLOWN_UP_WOUNDED: u32 = 0x0605_9ee4;
 /// The smoke (actors.rs's drifting effect): its animation, colour (attribute bits at random), how
 /// far out it starts (up to 4 pixels each way, 4 units nearer), its scales and speed.
@@ -945,8 +949,11 @@ pub fn wounded_exec(cpu: &mut Cpu, o: u32) {
         };
     if !alive(cpu) || leaves {
         if !alive(cpu) {
-            let blown = if cpu.read32(o + BOXES) == PLAIN_BOXES { BLOWN_UP_1 } else { BLOWN_UP_WOUNDED };
-            cpu.call(blown, &[o]);
+            if cpu.read32(o + BOXES) == PLAIN_BOXES {
+                nested!(cpu, BLOWN_UP_1, blown_up_1(cpu, o));
+            } else {
+                nested!(cpu, BLOWN_UP_WOUNDED, blown_up_wounded(cpu, o));
+            }
         }
         cpu.write8(o + OBJ_MODE, ENDING);
         return;
@@ -1392,7 +1399,7 @@ pub fn on_body(cpu: &mut Cpu, o: u32) -> u32 {
     let n = cpu.read8(o + NUMBER) as i8 as i32;
     let body = cpu.read32(NUMBERED.wrapping_add((n * 4) as u32));
     if cpu.read32(body + LIFE) as i32 <= WOUNDED {
-        cpu.call(GUN_BLOWN_OFF, &[o]);
+        nested!(cpu, GUN_BLOWN_OFF, gun_blown_off(cpu, o));
         cpu.write8(o + OBJ_MODE, ENDING);
         if cpu.read8(DIFFICULTY) == 4 {
             cpu.call(PARTING_SHOT, &[o, 0]);
@@ -1444,7 +1451,7 @@ const G_ROCKET_FLAGS: u16 = 0x21;
 const SE_ROCKETS: u32 = 25;
 const SE_HEAVY: u32 = 29;
 const FLASH: u16 = 1;
-/// Not rewritten yet: the heavy bullet and the laser.
+/// The heavy bullet and the laser (bullets.rs).
 const HEAVY_BULLET: u32 = 0x0605_41d0;
 const LASER: u32 = 0x0605_46ac;
 static BIG_GUN_TURN_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
@@ -1538,7 +1545,7 @@ pub fn big_gun_exec(cpu: &mut Cpu, o: u32) {
                     let y = cpu.read32(f + 4).wrapping_sub(c.wrapping_mul(G_BULLET_ASIDE) as u32);
                     cpu.write32(f + 4, y);
                 }
-                cpu.call(HEAVY_BULLET, &[f]);
+                nested!(cpu, HEAVY_BULLET, super::bullets::heavy_bullet(cpu, f));
             }
             2 => {
                 cpu.write16(o + G_TIMER, 0);
@@ -1551,7 +1558,7 @@ pub fn big_gun_exec(cpu: &mut Cpu, o: u32) {
                 let w = cpu.read16(o + G_WAIT).wrapping_sub(80);
                 cpu.write16(f + S_ROCKET_FLAGS, w);
                 cpu.write16(f + 0x32, 0);
-                cpu.call(LASER, &[f, o + ANGLE]);
+                nested!(cpu, LASER, super::bullets::laser_set(cpu, f, o + ANGLE));
             }
             _ => {}
         }
@@ -1609,7 +1616,7 @@ pub fn hatch_exec(cpu: &mut Cpu, o: u32) {
         };
     if !alive(cpu) || leaves {
         if !alive(cpu) {
-            cpu.call(BLOWN_UP, &[o]);
+            nested!(cpu, BLOWN_UP, blown_up(cpu, o));
         }
         cpu.write8(o + OBJ_MODE, ENDING);
         return;
@@ -1735,7 +1742,7 @@ pub fn spreader_exec(cpu: &mut Cpu, o: u32) {
         };
     if !alive(cpu) || leaves {
         if !alive(cpu) {
-            cpu.call(BLOWN_UP_1, &[o]);
+            nested!(cpu, BLOWN_UP_1, blown_up_1(cpu, o));
         }
         cpu.write8(o + OBJ_MODE, ENDING);
         return;
@@ -1821,7 +1828,7 @@ const F_SIDE: u32 = 0x1a;
 /// The glow (explosions.rs's glow_set: its size at +0x2c).
 const SL_GLOW_SIZE: u32 = 0x1_1000;
 const GLOW_SIZE: u32 = 0x2c;
-/// The laser (bullets.rs's, not rewritten yet): its description's direction and swing (left,
+/// The laser (bullets.rs's laser_set): its description's direction and swing (left,
 /// right), flags, frames, and the object it comes from.
 const SL_LASER_TURNS: [(u16, u16); 2] = [(0xa000, 0xe000), (0x6000, 0x2000)];
 const SL_LASER_FLAGS: u16 = 73;
@@ -1892,7 +1899,7 @@ pub fn side_laser_exec(cpu: &mut Cpu, o: u32) {
         let (turn, swing) = SL_LASER_TURNS[(cpu.read8(o + FRAME) == SL_RIGHT) as usize];
         cpu.write16(f + S_ANGLE, turn);
         cpu.write16(f + LS_SWING, swing);
-        cpu.call(LASER, &[f, o + ANGLE]);
+        nested!(cpu, LASER, super::bullets::laser_set(cpu, f, o + ANGLE));
     }
     let w = cpu.read16(o + SL_WAIT).wrapping_sub(SL_SLOWED[0]);
     if w <= SL_SLOWED[1] {
@@ -1975,7 +1982,7 @@ pub fn carrier_exec(cpu: &mut Cpu, o: u32) {
         };
     if !alive(cpu) || leaves {
         if !alive(cpu) {
-            cpu.call(BLOWN_UP_WOUNDED, &[o]);
+            nested!(cpu, BLOWN_UP_WOUNDED, blown_up_wounded(cpu, o));
         }
         cpu.write8(o + OBJ_MODE, ENDING);
     } else {
@@ -2145,7 +2152,7 @@ const BURST_EASE: u32 = 16;
 const BURST_ACCEL: u32 = 0x30;
 const ROUTE_HIT: u16 = 1;
 const S_SPEED: u32 = 0x30;
-/// Not rewritten yet: the bursting enemy's pieces (with 0x50) and explosion.
+/// Not rewritten yet: the bursting enemy's pieces (with 0x50). Its explosion (below).
 const PIECES: u32 = 0x0605_61ac;
 const BLOWN_UP_BURSTER: u32 = 0x0605_9fc4;
 const BULLET_SET: u32 = 0x0605_3db0;
@@ -2162,7 +2169,7 @@ pub fn burster_exec(cpu: &mut Cpu, o: u32) {
     }
     if cpu.read32(o + LIFE) as i32 <= 0 {
         cpu.call(PIECES, &[o, 0x50]);
-        cpu.call(BLOWN_UP_BURSTER, &[o]);
+        nested!(cpu, BLOWN_UP_BURSTER, blown_up_burster(cpu, o));
         cpu.write8(o + OBJ_MODE, ENDING);
         if cpu.read8(DIFFICULTY) as i8 > 2 {
             for x in [0x1_8000, 0xc000, 0] {
@@ -2223,7 +2230,7 @@ pub fn burster_exec(cpu: &mut Cpu, o: u32) {
 
 /// The burster drawn (its sprite's draw; `s` its sprite): a copy of the sprite on the stack, below
 /// the ships, white for the two frames after a hit (ROUTE_HIT, then ROUTE_HIT_SHOWN), then its
-/// thrust flame (not rewritten yet: by its pace, 14 pixels behind).
+/// thrust flame (by its pace, 14 pixels behind).
 const ROUTE_HIT_SHOWN: u16 = 2;
 const HIT_WHITE: u16 = 0xe0;
 const DRAWN_LIFT: u8 = 0xf8;
@@ -2269,5 +2276,237 @@ pub fn burster_draw(cpu: &mut Cpu, s: u32) {
     };
     cpu.write16(f + SP_COLOUR, colour);
     nested!(cpu, 0x0604_0960, super::sprites::draw(cpu, f));
-    cpu.call(THRUST, &[o, f, THRUST_BEHIND, THRUST_SCALE]);
+    nested!(cpu, THRUST, thrust(cpu, o, f, THRUST_BEHIND, THRUST_SCALE));
+}
+
+/// The ground enemies' explosions, each from a description on the stack at their place: sparks
+/// along the enemy's angle (sound 12), smoke (sound 57), a cloud of smoke at a random angle
+/// (sound 66), a gun blown off its body (sound 15: a burst and a glow), fire (sound 18).
+const SPARK_BURST: u32 = 0x0605_786c;
+const SMOKING_SET: u32 = 0x0605_7b70;
+const SMOKE_BURST: u32 = 0x0605_7754;
+const BURNING_SET: u32 = 0x0605_7cb0;
+const SE_SMOKE: u32 = 57;
+const SE_SMOKE_CLOUD: u32 = 66;
+const SE_GUN_OFF: u32 = 15;
+const SE_FIRE: u32 = 18;
+const ED_ANGLE: u32 = 0x18;
+const ED_SPEED: u32 = 0x14;
+const SPARKS_SPEED: u32 = 0x1_2000;
+const CLOUD_SCALES: [u32; 2] = [0xc000, 0x10_0000];
+const CLOUD_FRAMES: u16 = 8;
+const GUN_OFF_BURST: u32 = 0x0607_3008;
+const GUN_OFF_SCALE: u32 = 0xa000;
+const GUN_OFF_GLOW: u32 = 0x1_1000;
+
+/// The description's place: the enemy's.
+fn at_enemy(cpu: &mut Cpu, o: u32, f: u32) {
+    for k in 0..3 {
+        let v = cpu.read32(o + POSITION + 4 * k);
+        cpu.write32(f + 4 * k, v);
+    }
+}
+
+pub fn blown_up(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    at_enemy(cpu, o, f);
+    let a = cpu.read16(o + ANGLE);
+    cpu.write16(f + ED_ANGLE, a);
+    cpu.write32(f + ED_SPEED, SPARKS_SPEED);
+    nested!(cpu, SPARK_BURST, super::explosions::spark_burst(cpu, f));
+    nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_BLOWN));
+}
+
+pub fn blown_up_1(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    at_enemy(cpu, o, f);
+    let a = cpu.read16(o + ANGLE);
+    cpu.write16(f + ED_ANGLE, a);
+    nested!(cpu, SMOKING_SET, super::explosions::smoking_set(cpu, f));
+    nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_SMOKE));
+}
+
+pub fn blown_up_wounded(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    at_enemy(cpu, o, f);
+    cpu.write32(f + ED_SPEED, 0);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    cpu.write16(f + ED_ANGLE, r as u16);
+    cpu.write16(f + ED_ANGLE + 2, CLOUD_FRAMES);
+    cpu.write32(f + 0xc, CLOUD_SCALES[0]);
+    cpu.write32(f + 0x10, CLOUD_SCALES[1]);
+    nested!(cpu, SMOKE_BURST, super::explosions::smoke_burst(cpu, f));
+    nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_SMOKE_CLOUD));
+}
+
+pub fn gun_blown_off(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_GUN_OFF));
+    use super::actors::{E_ANGLE, E_COLOUR, E_SCALES, E_SCRIPT, E_SPEED};
+    cpu.write32(f + E_SCRIPT, GUN_OFF_BURST);
+    cpu.write16(f + E_COLOUR, L_BURST_COLOUR);
+    at_enemy(cpu, o, f);
+    cpu.write16(f + E_ANGLE, 0);
+    cpu.write32(f + E_SPEED, 0);
+    cpu.write32(f + E_SCALES, GUN_OFF_SCALE);
+    cpu.write32(f + E_SCALES + 4, GUN_OFF_SCALE);
+    nested!(cpu, 0x0605_7454, actors::drift_effect(cpu, f));
+    cpu.write32(f + GLOW_SIZE, GUN_OFF_GLOW);
+    nested!(cpu, 0x0605_8f34, super::explosions::glow_set(cpu, f));
+}
+
+pub fn blown_up_burster(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_FIRE));
+    at_enemy(cpu, o, f);
+    nested!(cpu, BURNING_SET, super::explosions::burning_set(cpu, f));
+}
+
+/// Makes a spreader (spreader_exec's) from its description at `d` (gun_set's layout; +0x1a its
+/// kind, a word), moving by route `script`. It, or 0 when there is no number or room.
+const SPREADER_EXEC: u32 = 0x0605_cc54;
+const SPREADER_FLAGS: u32 = 0x2008_0000;
+const SPREADER_LOOK: (u8, u8) = (8, 7);
+const SPREADER_BOXES: u32 = 0x0607_3440;
+const SPREADER_LIFE: u32 = 1800;
+
+/// The numbered enemy every ground maker starts with: a number, the object (list 2), its sprite
+/// and boxes set up, its fields cleared, its exec and flags, entered in the numbered objects.
+fn numbered_enemy(cpu: &mut Cpu, exec: u32, flags: u32) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, ENEMY_NUMBERS)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, BARREL_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, GUN_LIST, blocks, NUMBERED_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, o + SPRITE));
+    nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, o + BOXES));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + BEHAVIOUR, exec);
+    cpu.write32(o + FLAGS, flags);
+    cpu.write8(o + NUMBER, n as u8);
+    let n = cpu.read8(o + NUMBER) as i8 as i32;
+    cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), o);
+    o
+}
+
+pub fn spreader_set(cpu: &mut Cpu, d: u32, script: u32) -> u32 {
+    let o = numbered_enemy(cpu, SPREADER_EXEC, SPREADER_FLAGS);
+    if o == 0 {
+        return 0;
+    }
+    cpu.write8(o + KIND, SPREADER_LOOK.0);
+    cpu.write8(o + FRAME, SPREADER_LOOK.1);
+    let colour = cpu.read16(KIND_COLOURS[0]).wrapping_add(cpu.read16(d + D_COLOUR).wrapping_mul(16));
+    cpu.write16(o + COLOUR, colour);
+    cpu.write16(o + OWN_COLOUR, colour);
+    cpu.write32(o + BOXES, SPREADER_BOXES);
+    cpu.write32(o + LIFE, SPREADER_LIFE);
+    let t = cpu.read8(d + D_TYPE);
+    cpu.write8(o + TYPE, t);
+    cpu.write8(o + SIDE, ENEMIES);
+    cpu.write32(o + SCRIPT, script);
+    let direction = cpu.read16(d + D_DIRECTION);
+    cpu.write16(o + BASE_DIRECTION, direction);
+    let mirror = cpu.read8(d + D_MIRROR);
+    cpu.write8(o + MIRROR, mirror);
+    let kind = cpu.read16(d + D_KIND) as i16 as i32 as u32;
+    cpu.write32(o + S_KIND, kind);
+    for k in 0..3 {
+        let v = cpu.read32(d + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    cpu.write8(o + LIFT, GUN_LIFT);
+    o
+}
+
+/// Makes a burster (burster_exec's, drawn by burster_draw) from its description at `d`, moving
+/// by route `script` (facing its first direction). It, or 0 when there is no number or room.
+const BURSTER_EXEC: u32 = 0x0605_d780;
+const BURSTER_FLAGS: u32 = 0xc8_0000;
+const BURSTER_DRAW: u32 = 0x0605_d988;
+const BURSTER_KIND: u8 = 0x1c;
+const BURSTER_BOXES: u32 = 0x0607_3574;
+const BURSTER_LIFE: u32 = 1000;
+const SPRITE_DRAW: u32 = 0x34;
+
+pub fn burster_set(cpu: &mut Cpu, d: u32, script: u32) -> u32 {
+    let o = numbered_enemy(cpu, BURSTER_EXEC, BURSTER_FLAGS);
+    if o == 0 {
+        return 0;
+    }
+    cpu.write32(o + SPRITE_DRAW, BURSTER_DRAW);
+    cpu.write8(o + KIND, BURSTER_KIND);
+    cpu.write8(o + FRAME, 0);
+    let colour = cpu.read16(d + D_COLOUR).wrapping_mul(16).wrapping_add(cpu.read16(KIND_COLOURS[0]));
+    cpu.write16(o + COLOUR, colour);
+    cpu.write16(o + OWN_COLOUR, colour);
+    cpu.write32(o + BOXES, BURSTER_BOXES);
+    cpu.write32(o + LIFE, BURSTER_LIFE);
+    cpu.write8(o + SIDE, ENEMIES);
+    let t = cpu.read8(d + D_TYPE);
+    cpu.write8(o + TYPE, t);
+    for k in 0..3 {
+        let v = cpu.read32(d + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    let mirror = cpu.read8(d + D_MIRROR);
+    cpu.write8(o + MIRROR, mirror);
+    cpu.write32(o + SCRIPT, script);
+    let direction = cpu.read16(d + D_DIRECTION);
+    cpu.write16(o + BASE_DIRECTION, direction);
+    let settings = cpu.read8(d + D_SETTINGS);
+    cpu.write8(o + SETTINGS, settings);
+    let first = (cpu.read8(script + 2) as u16) << 8;
+    cpu.write16(o + ANGLE, first);
+    o
+}
+
+/// A thrust flame drawn behind `o` with the sprite struct at `s` (burster_draw's copy): as long
+/// as `scale` times its pace allows (1.25 at most; none when not moving), `behind` pixels back
+/// along its angle, one below it, its frame running with the frame count, its colour by its
+/// type, mirrored at random.
+const THRUST_MOST: i32 = 0x1_4000;
+const THRUST_FRAMES: u8 = 0x70;
+const THRUST_COLOURS: [(i8, u16); 3] = [(0, 0), (1, 0x30), (2, 0x40)];
+const LOOPS_T: u32 = super::globals::LOOPS;
+
+pub fn thrust(cpu: &mut Cpu, o: u32, s: u32, behind: u32, scale: u32) {
+    let behind = behind as i8 as i32;
+    let pace = ((cpu.read16(o + PACE) as i16 as i32) << 4) as u32;
+    let size = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, pace, scale)) as i32;
+    if size <= 0 {
+        return;
+    }
+    let size = size.min(THRUST_MOST) as u32;
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    cpu.write32(s, r & 0x100);
+    cpu.write8(s + SP_KIND, 0);
+    let loops = cpu.read32(LOOPS_T);
+    let f = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, loops, 3));
+    cpu.write8(s + SP_FRAME, (f as u8).wrapping_add(THRUST_FRAMES));
+    cpu.write32(s + 0x10, size);
+    cpu.write32(s + 0x14, size);
+    let t = cpu.read8(o + TYPE) as i8;
+    if let Some(&(_, c)) = THRUST_COLOURS.iter().find(|&&(k, _)| k == t) {
+        let colour = cpu.read16(CHAR_BASE).wrapping_add(c);
+        cpu.write16(s + SP_COLOUR, colour);
+    }
+    let a = cpu.read16(o + ANGLE).wrapping_add(0x8000);
+    cpu.write16(s + SP_ANGLE, a);
+    let a = a as i16 as i32 as u32;
+    let sn = cpu.call(SL_SIN, &[a]) as i32;
+    let x = cpu.read32(o + POSITION).wrapping_add(sn.wrapping_mul(behind) as u32);
+    cpu.write32(s + SP_POSITION, x);
+    let cs = cpu.call(SL_COS, &[a]) as i32;
+    let y = cpu.read32(o + POSITION + 4).wrapping_add(cs.wrapping_mul(behind.wrapping_neg()) as u32);
+    cpu.write32(s + SP_POSITION + 4, y);
+    let z = cpu.read32(o + POSITION + 8);
+    cpu.write32(s + SP_POSITION + 8, z);
+    let lift = cpu.read8(s + SP_LIFT).wrapping_sub(1);
+    cpu.write8(s + SP_LIFT, lift);
+    nested!(cpu, 0x0604_0960, super::sprites::draw(cpu, s));
 }
