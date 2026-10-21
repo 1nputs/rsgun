@@ -1180,3 +1180,101 @@ pub fn shard_exec(cpu: &mut Cpu, o: u32) {
     let a = cpu.read16(o + ANGLE).wrapping_add(cpu.read16(o + SHARD_TURN));
     cpu.write16(o + ANGLE, a);
 }
+
+/// A ground enemy that fires spreads of pulsing bullets (bullets.rs's pulse_set) while firing,
+/// each 40 frames: aimed at the nearer player (its kind 1: fans of 3 on odd volleys, 2 on even,
+/// two more each above difficulty 1, and on odd volleys two more above difficulty 0), or else
+/// bursts of 8 at random down the screen (sound 24; 2 fewer each step of difficulty below 2; each
+/// third volley after a longer wait of 120).
+const S_KIND: u32 = 0xb4;
+const S_VOLLEYS: u32 = 0xa4;
+const S_WAIT: u32 = 0xa6;
+const SE_BURST: u32 = 24;
+const AIMED_FANS: u32 = 1;
+const PULSE_SET: u32 = 0x0605_4c8c;
+
+fn pulse_at(cpu: &mut Cpu, f: u32, a: u16) {
+    cpu.write16(f + S_ANGLE, a);
+    nested!(cpu, PULSE_SET, super::bullets::pulse_set(cpu, f));
+}
+
+pub fn spreader_exec(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let alive = |cpu: &mut Cpu| cpu.read32(o + LIFE) as i32 > 0;
+    let leaves = alive(cpu)
+        && cpu.read16(o + ROUTE_FLAGS) & ROUTE_1000 != 0
+        && {
+            let [top, bottom, left, right] = ROUTE_AREA;
+            cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + SPRITE, top, bottom, left, right)) as u8 != 0
+        };
+    if !alive(cpu) || leaves {
+        if !alive(cpu) {
+            cpu.call(BLOWN_UP_1, &[o]);
+        }
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    let script = cpu.read32(o + SCRIPT);
+    match nested!(cpu, 0x0605_a000, route_step(cpu, o, script)) & 0xff {
+        START_FIRING => {
+            let fl = cpu.read16(o + ROUTE_FLAGS) | FIRING;
+            cpu.write16(o + ROUTE_FLAGS, fl);
+        }
+        STOP_FIRING => {
+            let fl = cpu.read16(o + ROUTE_FLAGS) & !FIRING;
+            cpu.write16(o + ROUTE_FLAGS, fl);
+        }
+        _ => {}
+    }
+    nested!(cpu, 0x0605_a460, route_move(cpu, o));
+    let wait = cpu.read16(o + S_WAIT) as i16 as i32 as u32;
+    let wait = nested!(cpu, 0x0604_6168, actors::approach(cpu, wait, u32::MAX, 1));
+    cpu.write16(o + S_WAIT, wait as u16);
+    if cpu.read16(o + ROUTE_FLAGS) & FIRING == 0 || wait as i16 >= 0 {
+        return;
+    }
+    let v = cpu.read16(o + S_VOLLEYS).wrapping_add(1);
+    cpu.write16(o + S_VOLLEYS, v);
+    let n = cpu.read8(o + NUMBER);
+    cpu.write8(f + S_NUMBER, n);
+    for k in 0..2 {
+        let p = cpu.read32(o + POSITION + 4 * k);
+        cpu.write32(f + 4 * k, p);
+    }
+    cpu.write32(f + 8, 0);
+    let difficulty = |cpu: &mut Cpu| cpu.read8(DIFFICULTY) as i8;
+    if cpu.read32(o + S_KIND) == AIMED_FANS {
+        let p = nested!(cpu, 0x0605_6a58, aim::nearer_player(cpu, o + SPRITE));
+        let a = nested!(cpu, 0x0604_5e30, aim::angle_to(cpu, o, p)) as u16;
+        cpu.write16(f + S_FLAGS, 6);
+        cpu.write16(o + S_WAIT, 40);
+        let odd = cpu.read16(o + S_VOLLEYS) & 1 != 0;
+        let fans: &[(i8, u16)] = if odd {
+            &[(1, 0xe800), (1, 0x1800), (0, 0xf400), (0, 0x0c00)]
+        } else {
+            &[(1, 0xee00), (1, 0x1200), (-1, 0xfa00), (-1, 0x0600)]
+        };
+        for &(above, by) in fans {
+            if difficulty(cpu) > above {
+                pulse_at(cpu, f, a.wrapping_add(by));
+            }
+        }
+        if odd {
+            pulse_at(cpu, f, a);
+        }
+        return;
+    }
+    nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_BURST));
+    let volleys = cpu.read16(o + S_VOLLEYS) as i16 as i32 as u32;
+    let third = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, volleys, 3));
+    cpu.write16(o + S_WAIT, if third != 0 { 40 } else { 120 });
+    let d = difficulty(cpu) as i32;
+    let first = if d > 1 { 0 } else { (2 - d) * 2 };
+    for _ in first..8 {
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1800));
+        cpu.write16(f + S_ANGLE, (r.wrapping_add(0x8400) & 0xf800) as u16);
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 3));
+        cpu.write16(f + S_FLAGS, r.wrapping_add(6) as u16);
+        nested!(cpu, PULSE_SET, super::bullets::pulse_set(cpu, f));
+    }
+}

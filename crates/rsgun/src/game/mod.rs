@@ -529,6 +529,7 @@ pub fn register(n: &mut Natives) {
         0x0605_be90 => ground::route_exec[o] -> (),
         0x0605_bf28 => ground::launcher_exec[o] -> (),
         0x0605_c1d4 => ground::turret_exec[o] -> (),
+        0x0605_cc54 => ground::spreader_exec[o] -> (),
         0x0605_dba4 => ground::shard_exec[o] -> (),
         0x0605_de54 => ground::hatch_exec[o] -> (),
         0x0605_c700 => ground::ride[o] -> (),
