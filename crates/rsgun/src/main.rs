@@ -289,7 +289,7 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
         println!("overlay code seen: {}", named.join(", "));
     }
     if let (Some(p), Some(c)) = (&o.compare, &m.compare) {
-        let report = c.report(&|e| m.sys.natives.name(e));
+        let report = c.report();
         fs::write(p, &report).map_err(|err| format!("{}: {err}", p.display()))?;
         println!("compare: {} (report: {})", report.lines().next().unwrap_or(""), p.display());
     }

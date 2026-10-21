@@ -1172,10 +1172,52 @@ fn first_stage_end(cpu: &mut Cpu, game: u32) {
     }
 }
 
+/// The play's room settings (SETTINGS_LONG and SETTINGS_WORD's current ones) as the modes' files
+/// keep them in the director's slots while they load: the first long (a buffer's address) at
+/// +0x6c, the room's top at +0x70 (moved down by the mode's room), the third long at +0x74, the
+/// first two words at +0x78 and +0x7c, the third word at +0x7e (kept but not given back).
+const KEPT_LONGS: [(u32, u32); 3] = [(0x0607_40e4, 0x6c), (0x0607_4050, 0x70), (0x0607_4058, 0x74)];
+const KEPT_WORDS: [(u32, u32); 3] = [(0x0607_40ea, 0x78), (0x0607_40e8, 0x7c), (0x0607_4054, 0x7e)];
+const KEPT_PLACE: u32 = 0x70;
+
+pub fn keep_mode_settings(cpu: &mut Cpu, game: u32, room: u32) {
+    for (at, kept) in KEPT_LONGS {
+        let v = cpu.read32(at);
+        cpu.write32(game + kept, v);
+    }
+    for (at, kept) in KEPT_WORDS {
+        let v = cpu.read16(at);
+        cpu.write16(game + kept, v);
+    }
+    let place = cpu.read32(game + KEPT_PLACE).wrapping_sub(room);
+    cpu.write32(game + KEPT_PLACE, place);
+}
+
+pub fn give_back_mode_settings(cpu: &mut Cpu, game: u32) {
+    for (at, kept) in KEPT_LONGS {
+        let v = cpu.read32(game + kept);
+        cpu.write32(at, v);
+    }
+    for (at, kept) in &KEPT_WORDS[..2] {
+        let v = cpu.read16(game + kept);
+        cpu.write16(*at, v);
+    }
+}
+
 /// A stage's data block (its overlay's, at `p`): the block, and its three parts (offsets in its
 /// first three longs) made addresses.
 const STAGE_DATA: u32 = 0x0607_4800;
 const STAGE_PARTS: [u32; 3] = [0x0607_47fc, 0x0607_47f8, 0x0607_47d0];
+pub const CELLS: usize = 0;
+pub const COLOURS: usize = 1;
+pub const MAPS: usize = 2;
+
+/// Item `k` of the stage data's part `part` (CELLS, COLOURS, MAPS: each a list of offsets in the
+/// data): its address.
+pub fn stage_part(cpu: &mut Cpu, part: usize, k: u32) -> u32 {
+    let list = cpu.read32(STAGE_PARTS[part]);
+    cpu.read32(list + 4 * k).wrapping_add(cpu.read32(STAGE_DATA))
+}
 
 pub fn stage_data_set(cpu: &mut Cpu, p: u32) {
     cpu.write32(STAGE_DATA, p);

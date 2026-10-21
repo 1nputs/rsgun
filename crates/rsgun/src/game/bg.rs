@@ -196,14 +196,14 @@ pub fn map_stream(cpu: &mut Cpu, plane: u32, map: u32) -> u32 {
 
 /// The scroll planes NBG0 (A) and NBG1 (B): the screen's centre on the plane, its speed (16.16
 /// a frame each), and the zoom (16.16, 1 the plane's own size).
-const PLANE_A: u32 = 0x0607_47e0;
-const PLANE_B: u32 = 0x0607_47b0;
-const X: u32 = 0x00;
-const Y: u32 = 0x04;
-const SPEED_X: u32 = 0x08;
-const SPEED_Y: u32 = 0x0c;
-const ZOOM_X: u32 = 0x10;
-const ZOOM_Y: u32 = 0x14;
+pub const PLANE_A: u32 = 0x0607_47e0;
+pub const PLANE_B: u32 = 0x0607_47b0;
+pub const X: u32 = 0x00;
+pub const Y: u32 = 0x04;
+pub const SPEED_X: u32 = 0x08;
+pub const SPEED_Y: u32 = 0x0c;
+pub const ZOOM_X: u32 = 0x10;
+pub const ZOOM_Y: u32 = 0x14;
 const PLANE_SPEED: u32 = 0x0605_f01c;
 const PLANE_STEP: u32 = 0x0605_f028;
 const PLANE_CORNER: u32 = 0x0605_f0d8;

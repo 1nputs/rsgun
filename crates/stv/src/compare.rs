@@ -40,6 +40,8 @@ pub struct Access {
 /// A call being logged.
 struct Call {
     entry: u32,
+    /// The native function's name (overlay code has one at an entry for each of its codes).
+    name: &'static str,
     /// Where its accesses start in the CPU's log.
     start: usize,
     state: Sh2,
@@ -80,7 +82,8 @@ pub struct Compare {
     /// An interrupt just taken, until the handler's first instruction: a call starting there is the
     /// handler, which returns by RTE to the interrupted code.
     taken: [Option<(u32, u32)>; 2],
-    pub verdicts: HashMap<u32, Verdict>,
+    /// By entry and the native function's name.
+    pub verdicts: HashMap<(u32, &'static str), Verdict>,
 }
 
 /// The native run of a call against its log (entry, state at the call, the log, its interrupt
@@ -104,7 +107,7 @@ impl Compare {
 
     /// CPU `c` reached a function the port has: its call is logged from here (`log`: the CPU's
     /// accesses so far).
-    pub fn enter(&mut self, c: usize, entry: u32, contract: Contract, cpu: &Sh2, log: &[Access]) {
+    pub fn enter(&mut self, c: usize, entry: u32, name: &'static str, contract: Contract, cpu: &Sh2, log: &[Access]) {
         let (ret, sp) = self.taken[c].take().unwrap_or((cpu.pr, cpu.r[15]));
         let relaxed = contract != Contract::Exact;
         if relaxed {
@@ -113,7 +116,7 @@ impl Compare {
             }
         }
         let kept = if contract == Contract::Exact { Contract::AbiVoid.kept() } else { contract.kept() };
-        let call = Call { entry, start: log.len(), state: cpu.clone(), ret, sp, depth: self.depth(c), min_sp: cpu.r[15], relaxed, kept };
+        let call = Call { entry, name, start: log.len(), state: cpu.clone(), ret, sp, depth: self.depth(c), min_sp: cpu.r[15], relaxed, kept };
         self.calls[c].push(call);
     }
 
@@ -142,7 +145,7 @@ impl Compare {
             && self.depth(c) == call.depth
         {
             let call = self.calls[c].pop().expect("a call");
-            let v = self.verdicts.entry(call.entry).or_default();
+            let v = self.verdicts.entry((call.entry, call.name)).or_default();
             v.calls += 1;
             let accesses = &log[call.start..];
             let stack = call.relaxed.then_some(call.min_sp..call.sp);
@@ -170,7 +173,7 @@ impl Compare {
             // the outermost calls are let go until the log is short enough
             while log.len() - self.calls[c][0].start > CAP / 2 {
                 let call = self.calls[c].remove(0);
-                let v = self.verdicts.entry(call.entry).or_default();
+                let v = self.verdicts.entry((call.entry, call.name)).or_default();
                 v.calls += 1;
                 v.too_long += 1;
                 if self.calls[c].is_empty() {
@@ -193,16 +196,16 @@ impl Compare {
     }
 
     /// The report: one line a function (diverging first), then the divergences.
-    pub fn report(&self, name: &dyn Fn(u32) -> &'static str) -> String {
-        let mut v: Vec<(&u32, &Verdict)> = self.verdicts.iter().collect();
-        v.sort_by_key(|(e, v)| (std::cmp::Reverse(v.diverged > 0), std::cmp::Reverse(v.diverged), **e));
+    pub fn report(&self) -> String {
+        let mut v: Vec<(&(u32, &str), &Verdict)> = self.verdicts.iter().collect();
+        v.sort_by_key(|(k, v)| (std::cmp::Reverse(v.diverged > 0), std::cmp::Reverse(v.diverged), **k));
         let (calls, equal, diverged) = v.iter().fold((0, 0, 0), |a, (_, v)| (a.0 + v.calls, a.1 + v.equal, a.2 + v.diverged));
         let failing = v.iter().filter(|(_, v)| v.diverged > 0).count();
         let mut out = format!("{} functions called, {failing} diverging; {calls} calls: {equal} equal, {diverged} diverged\n", v.len());
-        for (e, v) in &v {
-            out += &format!("{e:08x} {:<12} calls {:>9} equal {:>9} diverged {:>7} too long {:>5}\n", name(**e), v.calls, v.equal, v.diverged, v.too_long);
+        for ((e, name), v) in &v {
+            out += &format!("{e:08x} {name:<12} calls {:>9} equal {:>9} diverged {:>7} too long {:>5}\n", v.calls, v.equal, v.diverged, v.too_long);
         }
-        for (e, v) in v.iter().filter(|(_, v)| v.diverged > 0) {
+        for ((e, _), v) in v.iter().filter(|(_, v)| v.diverged > 0) {
             for (frame, what) in &v.first {
                 out += &format!("\n{e:08x} at frame {frame}: {what}\n");
             }

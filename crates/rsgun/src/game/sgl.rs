@@ -1820,31 +1820,31 @@ fn inverse_step(cpu: &mut Cpu, m: u32, p: usize, others: [usize; 2]) -> ([u32; 2
     for col in (0..3).filter(|&col| col != p) {
         let x = cpu.read32(at(p, col));
         for (row, f) in others.into_iter().zip(factors) {
-            let q = inverse_divide(cpu, pivot, wide(f) * wide(x));
+            let q = divide64(cpu, pivot, wide(f) * wide(x));
             let v = cpu.read32(at(row, col)).wrapping_sub(q);
             cpu.write32(at(row, col), v);
         }
-        let q = inverse_divide(cpu, pivot, wide(x) << 16);
+        let q = divide64(cpu, pivot, wide(x) << 16);
         cpu.write32(at(p, col), q.wrapping_neg());
     }
     let x = cpu.read32(at(p, 3));
-    let translation = inverse_divide(cpu, pivot, wide(x) << 8);
+    let translation = divide64(cpu, pivot, wide(x) << 8);
     for (row, f) in others.into_iter().zip(factors) {
         let v = cpu.read32(at(row, 3)).wrapping_sub(((wide(f) * wide(translation)) >> 8) as u32);
         cpu.write32(at(row, 3), v);
     }
     cpu.write32(at(p, 3), translation.wrapping_neg() << 8);
     for (row, f) in others.into_iter().zip(factors) {
-        let q = inverse_divide(cpu, pivot, wide(f) << 16);
+        let q = divide64(cpu, pivot, wide(f) << 16);
         cpu.write32(at(row, p), q);
     }
-    let reciprocal = inverse_divide(cpu, pivot, 1 << 32);
+    let reciprocal = divide64(cpu, pivot, 1 << 32);
     cpu.write32(at(p, p), reciprocal);
     (factors, translation)
 }
 
 /// `dividend` (64 bits) over `divisor` on the divide unit, its quotient read back.
-fn inverse_divide(cpu: &mut Cpu, divisor: u32, dividend: i64) -> u32 {
+fn divide64(cpu: &mut Cpu, divisor: u32, dividend: i64) -> u32 {
     cpu.write32(DVSR, divisor);
     cpu.write32(DVDNTH, (dividend >> 32) as u32);
     cpu.write32(DVDNTL, dividend as u32);
@@ -2485,14 +2485,13 @@ pub fn rotation_bank(cpu: &mut Cpu, at: u32, use_: u32) {
 /// map offset (a nibble's three bits: `a` over 64 pages) and each plane's page (its address over
 /// a page, 6 bits). A page's size as a shift: 2 KB, doubled with 2-word pattern names (the
 /// pattern name control's top bit clear), four times with 1x1 cells (the character size clear).
-fn page_shift(cpu: &mut Cpu, pnc: u32, chctl: u32, high: bool) -> u32 {
+fn page_shift(cpu: &mut Cpu, pnc: u32, chctl: u32, size_bit: u32) -> u32 {
     let w = cpu.gbr();
     let mut s = 11;
     if cpu.read16(w + IMAGE + pnc) & 0x8000 == 0 {
         s += 1;
     }
-    let c = cpu.read16(w + chctl) as u32;
-    if (if high { c >> 8 } else { c }) & 1 == 0 {
+    if cpu.read16(w + chctl) as u32 >> size_bit & 1 == 0 {
         s += 2;
     }
     s
@@ -2516,22 +2515,32 @@ fn map_set(cpu: &mut Cpu, s: u32, mpof: u32, high: bool, mpab: u32, planes: [u32
 pub fn sl_map_nbg0(cpu: &mut Cpu, a: u32, b: u32, c: u32, d: u32) {
     let w = cpu.gbr();
     cpu.write32(w + SCREEN_MAPS, a);
-    let s = page_shift(cpu, PNCN0, CHCTLA, false);
+    let s = page_shift(cpu, PNCN0, CHCTLA, 0);
     map_set(cpu, s, MPOFN + 1, false, MPABN0, [a, b, c, d]);
 }
 
 pub fn sl_map_nbg1(cpu: &mut Cpu, a: u32, b: u32, c: u32, d: u32) {
     let w = cpu.gbr();
     cpu.write32(w + SCREEN_MAPS + 4, a);
-    let s = page_shift(cpu, PNCN1, CHCTLA, true);
+    let s = page_shift(cpu, PNCN1, CHCTLA, 8);
     map_set(cpu, s, MPOFN + 1, true, MPABN1, [a, b, c, d]);
 }
 
 pub fn sl_map_nbg2(cpu: &mut Cpu, a: u32, b: u32, c: u32, d: u32) {
     let w = cpu.gbr();
     cpu.write32(w + SCREEN_MAPS + 8, a);
-    let s = page_shift(cpu, PNCN2, CHCTLB, false);
+    let s = page_shift(cpu, PNCN2, CHCTLB, 0);
     map_set(cpu, s, MPOFN, false, MPABN2, [a, b, c, d]);
+}
+
+/// slMapNbg3 (OPENING.BIN's copy): its character size is CHCTLB's bit 4.
+const MPABN3: u32 = 0x10c;
+
+pub fn sl_map_nbg3(cpu: &mut Cpu, a: u32, b: u32, c: u32, d: u32) {
+    let w = cpu.gbr();
+    cpu.write32(w + SCREEN_MAPS + 12, a);
+    let s = page_shift(cpu, PNCN3, CHCTLB, 4);
+    map_set(cpu, s, MPOFN, true, MPABN3, [a, b, c, d]);
 }
 
 /// slMapRbg0: RBG0's (its parameter A's) sixteen planes all on the map at `a`, its VRAM bank
@@ -2540,7 +2549,7 @@ pub fn sl_map_rbg0(cpu: &mut Cpu, a: u32) {
     let w = cpu.gbr();
     cpu.write32(w + RBG0_MAP, a);
     cpu.call(ROTATION_BANK, &[a, BANK_NAMES]);
-    let s = page_shift(cpu, PNCR, CHCTLB, true);
+    let s = page_shift(cpu, PNCR, CHCTLB, 8);
     let offset = (a >> (s + 6)) & 7;
     let m = cpu.read8(w + MPOFR_LOW) as i8 as i32 as u32;
     cpu.write8(w + MPOFR_LOW, ((m & 0xf0) | offset) as u8);
@@ -2573,6 +2582,63 @@ pub fn sl_plane_nbg1(cpu: &mut Cpu, size: u32) {
 pub fn sl_plane_nbg2(cpu: &mut Cpu, size: u32) {
     plane_size(cpu, 0xcf, size << 4);
     cpu.leave(&[(4, size << 4)]);
+}
+
+/// slPlaneNbg3 (OPENING.BIN's copy).
+pub fn sl_plane_nbg3(cpu: &mut Cpu, size: u32) {
+    plane_size(cpu, 0x3f, (size << 8) >> 2);
+    cpu.leave(&[(4, (size << 8) >> 2)]);
+}
+
+/// slScrPosNbg3, and its move by (dx, dy) (OPENING.BIN's copies): NBG3's place (x, y: 16.16) as
+/// SGL keeps it, and its integer parts in the VDP2 image (SCXN3, SCYN3).
+const NBG3_X: u32 = 0x2f4;
+const NBG3_Y: u32 = 0x2f8;
+const SCROLL_NBG3: u32 = 0x154;
+
+pub fn sl_scr_pos_nbg3(cpu: &mut Cpu, x: u32, y: u32) {
+    let w = cpu.gbr();
+    cpu.write32(w + NBG3_X, x);
+    cpu.write32(w + NBG3_Y, y);
+    let v = (x & 0xffff_0000) | y >> 16;
+    cpu.write32(w + SCROLL_NBG3, v);
+    cpu.leave(&[(0, v), (4, x >> 16)]);
+}
+
+pub fn sl_scr_move_nbg3(cpu: &mut Cpu, dx: u32, dy: u32) {
+    let w = cpu.gbr();
+    let x = cpu.read32(w + NBG3_X).wrapping_add(dx);
+    cpu.write32(w + NBG3_X, x);
+    let y = cpu.read32(w + NBG3_Y).wrapping_add(dy);
+    cpu.write32(w + NBG3_Y, y);
+    let v = (x & 0xffff_0000) | y >> 16;
+    cpu.write32(w + SCROLL_NBG3, v);
+    cpu.leave(&[(0, v), (1, x.rotate_left(16))]);
+}
+
+/// slSpriteCCalcCond, slSpriteCCalcNum (OPENING.BIN's copies): the sprites' colour calculation
+/// condition (SPCTL's SPCCCS, bits 12-13) and number (SPCCN, bits 8-10), set in SPCTL's high
+/// byte with its bytes swapped (the register's upper half the read's sign).
+fn swap_bytes(v: u32) -> u32 {
+    (v & 0xffff_0000) | (v & 0xff) << 8 | (v >> 8) & 0xff
+}
+
+fn spctl_high(cpu: &mut Cpu, keep: u32, v: u32) -> u32 {
+    let w = cpu.gbr();
+    let old = cpu.read16(w + SPCTL) as i16 as i32 as u32;
+    let new = swap_bytes((swap_bytes(old) & keep) | v);
+    cpu.write16(w + SPCTL, new as u16);
+    new
+}
+
+pub fn sl_sprite_cc_condition(cpu: &mut Cpu, condition: u32) {
+    let v = spctl_high(cpu, !0x30, condition << 4);
+    cpu.leave(&[(0, v), (1, !0x30), (4, condition << 4)]);
+}
+
+pub fn sl_sprite_cc_number(cpu: &mut Cpu, n: u32) {
+    let v = spctl_high(cpu, !7, n);
+    cpu.leave(&[(0, v), (1, !7)]);
 }
 
 /// slZoomMode: the screen's (`screen`: NBG1 0, NBG0 1) zoom control byte set to `mode`.
@@ -7578,4 +7644,238 @@ pub fn slave_commands(cpu: &mut Cpu) {
         cpu.write8(FTCSR, 0);
         at = cpu.read32(w + SLAVE_PLACE);
     }
+}
+
+// ---- STG00.BIN's copies of SGL's rotation scroll set-up ------------------------------------------
+
+/// slSpriteType (STG00.BIN's copy): the sprite type (SPCTL's SPTYPE, bits 0-3).
+pub fn sl_sprite_type(cpu: &mut Cpu, t: u32) {
+    let w = cpu.gbr();
+    let v = (cpu.read16(w + SPCTL) as i16 as i32 as u32 & !0xf) | t;
+    cpu.write16(w + SPCTL, v as u16);
+    cpu.leave(&[(0, v), (1, !0xf)]);
+}
+
+/// slPlaneRA, slOverRA, slPlaneRB, slOverRB (STG00.BIN's copies): rotation parameter A's and
+/// B's plane size and over mode, two bits each in PLSZ's high byte.
+const PLSZ_HIGH: u32 = 0xfa;
+
+fn plsz_high(cpu: &mut Cpu, keep: u32, v: u32) {
+    let w = cpu.gbr();
+    let p = (cpu.read8(w + PLSZ_HIGH) as i8 as i32 as u32 & keep) | v;
+    cpu.write8(w + PLSZ_HIGH, p as u8);
+    cpu.leave(&[(0, p)]);
+}
+
+pub fn sl_plane_ra(cpu: &mut Cpu, size: u32) {
+    plsz_high(cpu, 0xfc, size);
+}
+
+pub fn sl_over_ra(cpu: &mut Cpu, mode: u32) {
+    plsz_high(cpu, 0xf3, mode << 2);
+    cpu.leave(&[(4, mode << 2)]);
+}
+
+pub fn sl_plane_rb(cpu: &mut Cpu, size: u32) {
+    plsz_high(cpu, 0xcf, size << 4);
+    cpu.leave(&[(4, size << 4)]);
+}
+
+pub fn sl_over_rb(cpu: &mut Cpu, mode: u32) {
+    plsz_high(cpu, 0x3f, (mode << 8) >> 2);
+    cpu.leave(&[(4, (mode << 8) >> 2)]);
+}
+
+/// slRparaMode (STG00.BIN's copy): RPMD.
+const RPMD: u32 = 0x170;
+
+pub fn sl_rpara_mode(cpu: &mut Cpu, mode: u32) {
+    let w = cpu.gbr();
+    cpu.write16(w + RPMD, mode as u16);
+    cpu.leave(&[(0, mode)]);
+}
+
+/// The rotation parameters' tables (A's, B's 0x68 bytes on) as SGL keeps them, and the current
+/// one (slCurRpara: STG00.BIN's copy).
+const RPARA_A: u32 = 0x060f_fe1c;
+const RPARA_B: u32 = 0x060f_fe84;
+const CURRENT_RPARA: u32 = 0x1e0;
+
+pub fn sl_cur_rpara(cpu: &mut Cpu, b: u32) {
+    let w = cpu.gbr();
+    let at = if b != 0 { RPARA_A + 0x68 } else { RPARA_A };
+    cpu.write32(w + CURRENT_RPARA, at);
+    cpu.leave(&[(0, at)]);
+    cpu.leave_t(b == 0);
+}
+
+/// slRparaInitSet (STG00.BIN's copy): the rotation parameters' table at `tables` (its address
+/// kept, and in RPTA in words), both parameters set to their start (rpara_init), A current.
+const ROTATION_TABLES: u32 = 0x214;
+const RPTA: u32 = 0x17c;
+const RPARA_HALF_FROM: u32 = 0x80;
+const RPARA_WORD_FROM: u32 = 0x68;
+
+pub fn sl_rpara_init_set(cpu: &mut Cpu, tables: u32) {
+    let w = cpu.gbr();
+    cpu.write32(w + ROTATION_TABLES, tables);
+    cpu.write32(w + RPTA, tables >> 1);
+    let half = cpu.read32(w + RPARA_HALF_FROM) >> 1;
+    let word = cpu.read32(w + RPARA_WORD_FROM);
+    cpu.write32(w + CURRENT_RPARA, RPARA_A);
+    cpu.leave(&[(2, half), (3, word)]);
+    for table in [RPARA_A, RPARA_B] {
+        cpu.leave(&[(0, table)]);
+        nested!(cpu, 0x0608_0ec8, rpara_init(cpu));
+    }
+    // its GBR, pushed at the start, back
+    cpu.sh2.gbr = w;
+}
+
+/// A rotation parameter's table at r0 (SGL's convention here: r0, with r2 and r3 the caller's)
+/// to its start: places and the coefficient's start 0, the matrix's diagonal and steps 1 (16.16),
+/// the screen's centre from r2 (twice), r3's halves swapped (twice), a word at +100 cleared. GBR
+/// is left at the table, as the SH-2 code leaves it.
+pub fn rpara_init(cpu: &mut Cpu) {
+    let (table, half, word) = (cpu.reg(0), cpu.reg(2), cpu.reg(3));
+    cpu.sh2.gbr = table;
+    for at in [0, 4, 8, 12, 24, 32, 36, 40, 48, 68, 72] {
+        cpu.write32(table + at, 0);
+    }
+    for at in [16, 20, 28, 44, 76, 80] {
+        cpu.write32(table + at, 0x1_0000);
+    }
+    for at in [52, 60] {
+        cpu.write32(table + at, half);
+    }
+    let swapped = word.rotate_left(16);
+    for at in [56, 64] {
+        cpu.write16(table + at, swapped as u16);
+    }
+    cpu.write16(table + 100, 0);
+    cpu.leave(&[(0, 0)]);
+}
+
+/// slMakeKtable (STG00.BIN's copy): a coefficient table at `table` (its address kept): 0x4002
+/// longs of "none" (the top bit), then 0x3ffe of 2^32 over a divisor stepping by 0x200 from
+/// 0x400 (each on the divide unit), the low 23 bits, with a top byte that steps down from 0x7d by
+/// 2 while it can.
+const KTABLE_AT: u32 = 0x218;
+const NO_COEFFICIENT: u32 = 0xff00_0000;
+const KTABLE_NONE: u32 = 0x4002;
+const KTABLE_STEPS: u32 = 0x3ffe;
+
+pub fn sl_make_ktable(cpu: &mut Cpu, table: u32) {
+    let w = cpu.gbr();
+    cpu.write32(w + KTABLE_AT, table);
+    let mut at = table;
+    for _ in 0..KTABLE_NONE {
+        cpu.write32(at, NO_COEFFICIENT);
+        at += 4;
+    }
+    let (mut divisor, mut top, mut v, mut r1) = (0x200u32, 0x7f00_0000u32, 0, 0);
+    for _ in 0..KTABLE_STEPS {
+        divisor += 0x200;
+        v = divide64(cpu, divisor, 1 << 32) & 0x7f_ffff;
+        r1 = 0;
+        if top as i32 >= 0x20_0000 {
+            top -= 0x20_0000;
+            r1 = top & 0x7f00_0000;
+            v |= r1;
+        }
+        cpu.write32(at, v);
+        at += 4;
+    }
+    cpu.leave(&[(0, v), (1, r1), (2, 1), (3, 0xffff_ff00), (4, at), (5, 0), (6, 0x200), (7, divisor)]);
+    cpu.leave_t(true);
+}
+
+/// slKtableRA, slKtableRB (STG00.BIN's copies): the parameter's coefficient table at `table` in
+/// `mode` (KTCTL's byte, kept in the parameter's table too): KTAOF's bits from the table's
+/// address (in words or longs by mode bit 1), the table's offset kept; for A, the banks VRAM gave
+/// the coefficients taken back; with mode bit 5, the table's bank given to them (rotation_bank).
+const KTCTL: u32 = 0x174;
+const KTAOF: u32 = 0x176;
+const KTABLE_A_KEPT: u32 = 0x27c;
+const KTABLE_A_OFFSET: u32 = 0x270;
+const KTABLE_B_OFFSET: u32 = 0x2d8;
+const RPARA_A_MODE: u32 = 0x060f_fe80;
+const RPARA_B_TABLE: u32 = 0x060f_fee4;
+const RPARA_B_MODE: u32 = 0x060f_fee8;
+const BANK_COEFFICIENTS: u32 = 1;
+
+fn ktable_shifted(table: u32, mode: u32) -> u32 {
+    if mode & 2 != 0 { table >> 1 } else { table >> 2 }
+}
+
+pub fn sl_ktable_ra(cpu: &mut Cpu, table: u32, mode: u32) {
+    let w = cpu.gbr();
+    let c = (cpu.read16(w + KTCTL) as i16 as i32 as u32 >> 8 << 8) | mode;
+    cpu.write16(w + KTCTL, c as u16);
+    cpu.write16(RPARA_A_MODE, mode as u16);
+    cpu.write32(w + KTABLE_A_KEPT, table);
+    let page = (ktable_shifted(table, mode) >> 16) & 7;
+    let a = (cpu.read16(w + KTAOF) as i16 as i32 as u32 >> 8 << 8) | page;
+    cpu.write16(w + KTAOF, a as u16);
+    cpu.write32(w + KTABLE_A_OFFSET, ktable_shifted(table, mode) << 16);
+    // RAMCTL's banks given to coefficients (1) taken back
+    let mut r = cpu.read16(w + RAMCTL) as i16 as i32 as u32;
+    let mut r6 = 0;
+    for bank in 0..4 {
+        let mask = 3 << (2 * bank);
+        r6 = r & mask;
+        if r6 == BANK_COEFFICIENTS << (2 * bank) {
+            r6 = !mask;
+            r &= r6;
+        }
+    }
+    cpu.write16(w + RAMCTL, r as u16);
+    cpu.leave(&[(6, r6)]);
+    if mode & 0x20 != 0 {
+        cpu.call(ROTATION_BANK, &[table, BANK_COEFFICIENTS]);
+    } else {
+        cpu.leave(&[(0, 0x20), (1, 0), (2, 0x300), (3, 0x100)]);
+        cpu.leave_t(true);
+    }
+}
+
+pub fn sl_ktable_rb(cpu: &mut Cpu, table: u32, mode: u32) {
+    let w = cpu.gbr();
+    let c = (cpu.read16(w + KTCTL) as i16 as i32 as u32 & 0xff) | mode << 8;
+    cpu.write16(w + KTCTL, c as u16);
+    cpu.write16(RPARA_B_MODE, mode as u16);
+    cpu.write32(RPARA_B_TABLE, table);
+    let page = ((ktable_shifted(table, mode) >> 16) & 7) << 8;
+    let a = (cpu.read16(w + KTAOF) as i16 as i32 as u32 & 0xff) | page;
+    cpu.write16(w + KTAOF, a as u16);
+    let offset = ktable_shifted(table, mode) << 16;
+    cpu.write32(w + KTABLE_B_OFFSET, offset);
+    if mode & 0x20 != 0 {
+        cpu.call(ROTATION_BANK, &[table, BANK_COEFFICIENTS]);
+    } else {
+        cpu.leave(&[(0, 0x20), (1, 2), (2, offset), (3, 7)]);
+        cpu.leave_t(true);
+    }
+}
+
+/// slMapRB (STG00.BIN's copy): rotation parameter B's sixteen planes all on the map at `a`, its
+/// VRAM bank given to the pattern names (slMapRbg0's for A).
+const RB_MAP: u32 = 0x210;
+const MPABRB: u32 = 0x120;
+
+pub fn sl_map_rb(cpu: &mut Cpu, a: u32) {
+    let w = cpu.gbr();
+    cpu.write32(w + RB_MAP, a);
+    cpu.call(ROTATION_BANK, &[a, BANK_NAMES]);
+    let s = page_shift(cpu, PNCR, CHCTLB, 8);
+    let offset = ((a >> (s + 6)) & 7) << 4;
+    let m = cpu.read8(w + MPOFR_LOW) as i8 as i32 as u32;
+    cpu.write8(w + MPOFR_LOW, ((m & 0x0f) | offset) as u8);
+    let page = (a >> s) & 63;
+    let v = page << 8 | page;
+    for k in 0..8 {
+        cpu.write16(w + MPABRB + 2 * k, v as u16);
+    }
+    cpu.leave(&[(0, v), (1, 63), (2, offset), (3, s), (4, page)]);
+    cpu.leave_t(s & 1 == 0);
 }

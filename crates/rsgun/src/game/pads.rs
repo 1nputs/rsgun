@@ -34,6 +34,17 @@ fn pad(n: u32) -> u32 {
     PAD_INF + 8 * n
 }
 
+/// Player `n`'s buttons pressed this frame, and held (its PAD_INF's), and the start button's bit.
+pub fn pressed(cpu: &mut Cpu, n: u32) -> u16 {
+    cpu.read16(pad(n) + TRIG)
+}
+
+pub fn held(cpu: &mut Cpu, n: u32) -> u16 {
+    cpu.read16(pad(n) + DATA)
+}
+
+pub const START: u16 = 0x800;
+
 /// Clears the four PAD_INFs.
 pub fn pad_init(cpu: &mut Cpu) {
     for n in 0..4 {

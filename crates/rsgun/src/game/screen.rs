@@ -878,7 +878,7 @@ const PAGE_COLUMNS: u32 = 64;
 const PICTURE_COLUMNS: u32 = 88;
 const PICTURE_ROWS: u32 = 56;
 
-fn picture_part(cpu: &mut Cpu, p: u32, k: u32) -> u32 {
+pub fn picture_part(cpu: &mut Cpu, p: u32, k: u32) -> u32 {
     let at = cpu.read32(p + 4 * k);
     cpu.read32(p.wrapping_add(at)).wrapping_add(p)
 }

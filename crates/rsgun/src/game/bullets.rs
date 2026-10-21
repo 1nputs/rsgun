@@ -189,9 +189,9 @@ pub fn bullet_swirl(cpu: &mut Cpu, b: u32) {
 /// A shot's description (the shooter's): its position (x, y, z), its number (a byte, the bullet's),
 /// its direction (a word), its shot flags (a word), its speed, and a swirl's start angle, turn and
 /// radius to go to (words).
-const S_POSITION: u32 = 0x00;
-const S_NUMBER: u32 = 0x1e;
-const S_ANGLE: u32 = 0x2c;
+pub const S_POSITION: u32 = 0x00;
+pub const S_NUMBER: u32 = 0x1e;
+pub const S_ANGLE: u32 = 0x2c;
 const S_FLAGS: u32 = 0x2e;
 const S_SPEED: u32 = 0x30;
 const S_SWIRL_ANGLE: u32 = 0x36;

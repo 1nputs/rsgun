@@ -27,10 +27,13 @@ mod ground;
 mod hits;
 mod hud;
 mod kinds;
+mod logos;
 mod main_loop;
+mod modes;
 mod math;
 mod models;
 mod objects;
+mod opening;
 mod orbits;
 mod pads;
 mod player;
@@ -47,6 +50,7 @@ mod sound;
 mod sprites;
 mod start;
 mod states;
+mod stg00;
 mod system;
 mod text;
 mod timeline;
@@ -299,7 +303,7 @@ const PROLOGUES: [(u32, &[u8], u32); 13] = [
 
 impl Prologue {
     /// Read from the code at `entry` (but PROLOGUES), up to its first branch: the pushes (`mov.l Rm,@-R15`, then
-    /// `sts.l PR,@-R15`, after which a push is an argument's), and the locals (`add #imm,R15`, or
+    /// `sts.l PR,@-R15`, after which a push is an argument's, and `stc.l GBR,@-R15`), and the locals (`add #imm,R15`, or
     /// `mov.w @(disp,PC),Rn` then `add Rn,R15`). Other instructions may be scheduled among them.
     pub fn read(bus: &mut dyn Bus, entry: u32) -> Prologue {
         if let Some(&(_, pushes, locals)) = PROLOGUES.iter().find(|(e, ..)| *e == entry) {
@@ -326,6 +330,8 @@ impl Prologue {
                 p.pushes.push(m);
             } else if op == 0x4F22 {
                 p.pushes.push(PR_PUSH);
+            } else if op == 0x4F13 {
+                p.pushes.push(GBR_PUSH);
             } else if op & 0xFF00 == 0x7F00 {
                 p.locals = (op as u8 as i8 as i32).wrapping_neg() as u32;
                 break;
@@ -1292,5 +1298,66 @@ pub fn register(n: &mut Natives) {
         0x0606_e24c => system::wait_dma0[] -> (),
         0x0603_5070 => system::set_interrupt_mask[mask] -> (),
         0x0600_136a => system::next_unless_end[n] -> u32,
+    }
+    // TITLE.BIN's code (the logo mode's)
+    rewrites! { n; overlay "TITLE";
+        0x0608_0000 => logos::logo_mode[game] -> u32,
+        0x0608_0054 => logos::logos_exec[obj] -> (),
+        0x0608_04a0 => logos::logos_set[] -> (),
+    }
+    // OPENING.BIN's code (the opening mode's), with its copies of SGL's NBG3 and sprite setters
+    rewrites! { n; overlay "OPENING";
+        0x0608_0000 => opening::opening_mode[game] -> u32,
+        0x0608_0328 => opening::opening_start[data, room] -> (),
+        0x0608_03b4 => modes::mode_wait[] -> (),
+        0x0608_03e0 => opening::text_cell[x, y] -> u32,
+        0x0608_083c => opening::typer_exec[obj] -> (),
+        0x0608_099c => opening::typer_set[text, at, width, blinks] -> (),
+        0x0608_0a20 => opening::story_exec[obj] -> (),
+        0x0608_0b60 => opening::story_set[] -> (),
+        0x0608_0b90 => opening::pictures_start[work] -> (),
+        0x0608_0d90 => opening::picture_put[work, p] -> (),
+        0x0608_0e6c => opening::pictures_exec[work] -> (),
+        0x0608_1164 => opening::opening_end[] -> (),
+        0x0608_1184 => opening::opening_idle[] -> (),
+        0x0608_1190 => sgl::sl_sprite_cc_condition[condition] -> (),
+        0x0608_11b0 => sgl::sl_sprite_cc_number[n] -> (),
+        0x0608_11c0 => sgl::sl_scr_move_nbg3[dx, dy] -> (),
+        0x0608_11e0 => sgl::sl_plane_nbg3[size] -> (),
+        0x0608_11f0 => sgl::sl_map_nbg3[a, b, c, d] -> (),
+        0x0608_12b0 => sgl::sl_scr_pos_nbg3[x, y] -> (),
+    }
+    // STG00.BIN's code (the first stage mode's), with its copies of SGL's rotation scroll set-up
+    rewrites! { n; overlay "STG00";
+        0x0608_0000 => stg00::stg00_mode[game] -> u32,
+        0x0608_0244 => stg00::cycling_behaviour[actor] -> (),
+        0x0608_029c => stg00::cycling_set[] -> u32,
+        0x0608_04b4 => stg00::ground_row[event] -> u32,
+        0x0608_064c => stg00::wounded_shooting[o] -> (),
+        0x0608_0720 => stg00::wounded_event[event] -> u32,
+        0x0608_0828 => stg00::stg00_start[data, room] -> (),
+        0x0608_0ba4 => modes::mode_wait[] -> (),
+        0x0608_0bd0 => stg00::countdown_start[work] -> (),
+        0x0608_0c48 => stg00::plane_b_scroll[] -> (),
+        0x0608_0c74 => stg00::countdown_show[work] -> (),
+        0x0608_0d54 => stg00::skip_text[work] -> (),
+        0x0608_0d9c => stg00::countdown_exec[work] -> (),
+        0x0608_0e48 => stg00::stg00_end[] -> (),
+        0x0608_0e74 => stg00::stg00_idle[] -> (),
+        0x0608_0e94 => sgl::sl_rpara_init_set[tables] -> (),
+        0x0608_0ec8 => sgl::rpara_init[] -> (),
+        0x0608_0f04 => sgl::sl_make_ktable[table] -> (),
+        0x0608_0f84 => sgl::sl_plane_ra[size] -> (),
+        0x0608_0f94 => sgl::sl_over_ra[mode] -> (),
+        0x0608_0fa4 => sgl::sl_ktable_ra[table, mode] -> (),
+        0x0608_1024 => sgl::sl_rpara_mode[mode] -> (),
+        0x0608_1034 => sgl::sl_cur_rpara[b] -> (),
+        0x0608_1044 => sgl::sl_plane_rb[size] -> (),
+        0x0608_1054 => sgl::sl_map_rb[a] -> (),
+        0x0608_10f4 => sgl::sl_over_rb[mode] -> (),
+        0x0608_1104 => sgl::sl_ktable_rb[table, mode] -> (),
+        0x0608_1164 => sgl::sl_sprite_type[t] -> (),
+        0x0608_1174 => sgl::sl_sprite_cc_condition[condition] -> (),
+        0x0608_1194 => sgl::sl_sprite_cc_number[n] -> (),
     }
 }
