@@ -1361,3 +1361,42 @@ pub fn ring_set(cpu: &mut Cpu, d: u32) {
     let colour = cpu.read16(d + 0x20);
     cpu.write16(o + RING_COLOUR, colour);
 }
+
+/// Smoke and sparks at `p` (x, y, z) every other game frame (its sound, one of four at random,
+/// at most every 50 frames): a puff 176 nearer, of 3/4 size less up to 7 steps at random, and
+/// `n`/2 twin sparks. Whether it made them.
+const SMOKE_SOUND_LAST: u32 = 0x0607_320c;
+const SMOKE_SOUNDS: u32 = 0x0607_31fe;
+const SMOKE_SOUND_GAP: u32 = 50;
+const SMOKE_NEARER: u32 = 0xff50_0000;
+const SMOKE_SIZE: u32 = 0xc000;
+const SMOKE_SIZE_STEP: u32 = 0x600;
+
+pub fn smoke_and_sparks(cpu: &mut Cpu, p: u32, n: u32) -> u32 {
+    let now = cpu.read32(super::globals::GAME_FRAMES);
+    if now.wrapping_sub(cpu.read32(SMOKE_SOUND_LAST)) > SMOKE_SOUND_GAP {
+        cpu.write32(SMOKE_SOUND_LAST, now);
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+        let se = cpu.read16(SMOKE_SOUNDS + (r & 3) * 4) as i16 as i32 as u32;
+        nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, se));
+    }
+    if cpu.read32(super::globals::GAME_FRAMES) & 1 != 0 {
+        return 0;
+    }
+    let f = cpu.stack();
+    for k in 0..2 {
+        let v = cpu.read32(p + 4 * k);
+        cpu.write32(f + 4 * k, v);
+    }
+    let z = cpu.read32(p + 8).wrapping_add(SMOKE_NEARER);
+    cpu.write32(f + 8, z);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    cpu.write32(f + 12, SMOKE_SIZE.wrapping_sub((r & 7) * SMOKE_SIZE_STEP));
+    nested!(cpu, 0x0605_77d0, smoke_puff(cpu, f));
+    let mut m = (n as i8) / 2;
+    while m > 0 {
+        nested!(cpu, 0x0605_8278, twin_set(cpu, f));
+        m -= 1;
+    }
+    1
+}

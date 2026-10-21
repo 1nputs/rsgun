@@ -664,3 +664,80 @@ pub fn pod_glow(cpu: &mut Cpu, o: u32) {
     cpu.write16(a + SA_DIR, POD_SPRITE_DIR);
     cpu.call(SL_PUT_SPRITE, &[f, a, 0]);
 }
+
+/// Kind 31's model (an actor's own draw, at its sprite `s`): its body placed and turned as the
+/// sprite, two side parts, two parts turned about y by the actor's word +0x3e (the second the
+/// other way), and four glows under its corners (the pods' glow, its size flickering by SGL's
+/// random number).
+const KIND_31_MODELS: u32 = MODEL_KINDS + 31 * 16;
+const M31_TURN: u32 = 0x2e;
+const M31_SIDES: [(u32, [u32; 3]); 2] = [(3, [0x4f_0000, 0xffcf_0000, 0x25_0000]), (4, [0xffb1_0000, 0xffcf_0000, 0x25_0000])];
+const M31_TURNED: [(u32, u32, bool); 2] = [(1, 0xa_0000, false), (2, 0xfff6_0000, true)];
+const M31_TURNED_Z: u32 = 0x9_0000;
+const M31_GLOW_EVEN: (u32, u16, u16, u32, u32) = (0x6a8, 0x30, 0, 0x5000, 0xff90_0000);
+const M31_GLOW_ODD: (u32, u16, u16, u32, u32) = (8, 0x70, 0x100, 0x7000, 0xff86_0000);
+const M31_GLOW_STEP: u32 = 0x300;
+const M31_GLOWS: [(u32, u32); 4] = [(0x10_0000, 0xfff0_0000), (0x10_0000, 0x10_0000), (0xfff0_0000, 0xfff0_0000), (0xfff0_0000, 0x10_0000)];
+const SL_RANDOM: u32 = 0x0603_4dd4;
+
+fn model_31(cpu: &mut Cpu, part: u32) -> u32 {
+    let table = cpu.read32(KIND_31_MODELS);
+    let models = cpu.read32(table + KIND_MODELS);
+    let at = cpu.read32(models + 4 * part);
+    cpu.read32(at)
+}
+
+pub fn model31_draw(cpu: &mut Cpu, s: u32) {
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    let screen = cpu.read32(super::screen::SCREEN);
+    cpu.call(SL_LOAD_MATRIX, &[screen + SCREEN_LIGHT]);
+    let p = [1, 2, 3].map(|i| cpu.read32(s + 4 * i));
+    cpu.call(SL_TRANSLATE, &p);
+    for (at, rot) in [(S_TURN_X, SL_ROT_X), (S_TURN_Y, SL_ROT_Y), (S_TURN_Z, SL_ROT_Z)] {
+        let a = cpu.read16(s + at) as i16 as i32 as u32;
+        cpu.call(rot, &[a]);
+    }
+    let body = model_31(cpu, 0);
+    cpu.call(SL_PUT_POLYGON, &[body]);
+    for (part, at) in M31_SIDES {
+        cpu.call(SL_PUSH_MATRIX, &[]);
+        cpu.call(SL_TRANSLATE, &at);
+        let m = model_31(cpu, part);
+        cpu.call(SL_PUT_POLYGON, &[m]);
+        cpu.call(SL_POP_MATRIX, &[]);
+    }
+    for (part, x, other_way) in M31_TURNED {
+        cpu.call(SL_PUSH_MATRIX, &[]);
+        cpu.call(SL_TRANSLATE, &[x, 0, M31_TURNED_Z]);
+        let a = cpu.read16(s + M31_TURN) as i16;
+        let a = if other_way { a.wrapping_neg() } else { a };
+        cpu.call(SL_ROT_Y, &[a as i32 as u32]);
+        let m = model_31(cpu, part);
+        cpu.call(SL_PUT_POLYGON, &[m]);
+        cpu.call(SL_POP_MATRIX, &[]);
+    }
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    let f = cpu.stack();
+    let a = f + 16;
+    let odd = cpu.read32(super::globals::LOOPS) & 1 != 0;
+    let (frame, colours, attrs, size, y) = if odd { M31_GLOW_ODD } else { M31_GLOW_EVEN };
+    let colour = cpu.read16(KIND_0 + SPRITE_KIND_COLOUR).wrapping_add(colours);
+    cpu.write16(a + SA_COLOUR, colour);
+    cpu.write16(a + SA_ATTRS, attrs);
+    let frames = cpu.read32(KIND_0 + SPRITE_KIND_FRAMES);
+    let at = cpu.read32(frames + frame);
+    let texture = cpu.read16(KIND_0 + SPRITE_KIND_CHAR).wrapping_add(cpu.read8(at) as u16);
+    cpu.write16(a + SA_TEXTURE, texture);
+    cpu.write32(f + 4, y);
+    let r = cpu.call(SL_RANDOM, &[]) & 0xf;
+    cpu.write32(f + 12, size.wrapping_add(r * M31_GLOW_STEP));
+    cpu.write16(a + SA_GOURAUD, 0);
+    cpu.write16(a + SA_DIR, POD_SPRITE_DIR);
+    for (x, z) in M31_GLOWS {
+        cpu.write32(f, x);
+        cpu.write32(f + 8, z);
+        cpu.call(SL_PUT_SPRITE, &[f, a, 0]);
+    }
+    cpu.call(SL_POP_MATRIX, &[]);
+    cpu.call(SL_POP_MATRIX, &[]);
+}

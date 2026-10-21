@@ -2510,3 +2510,113 @@ pub fn thrust(cpu: &mut Cpu, o: u32, s: u32, behind: u32, scale: u32) {
     cpu.write8(s + SP_LIFT, lift);
     nested!(cpu, 0x0604_0960, super::sprites::draw(cpu, s));
 }
+
+/// Makes a ground enemy (ground_exec's) from description `d` with its script: numbered,
+/// unhittable at first, of the enemies' side, below the ships; by its kind (a word, +0x1a) its
+/// sprite (kind 8, 14 or 6), colour (the sprite kind's, 16 a step by the description's colour),
+/// boxes and life; its place, mirror, type, base direction and settings (the first shot after
+/// the low 4 bits in 8s, less 8). It, or 0.
+const GROUND_EXEC: u32 = 0x0605_a4cc;
+const GROUND_LOOKS: [(u8, u8, u32, u32, u32); 3] = [
+    (8, 8, 0x0607_425c + 0x60, 0x0607_3288, 1500),
+    (14, 4, 0x0607_425c + 0x80, 0x0607_3278, 100),
+    (6, 0, 0x0607_425c, 0x0607_3278, 200),
+];
+const GROUND_LIFT: u8 = 0xf9;
+
+pub fn ground_set(cpu: &mut Cpu, d: u32, script: u32) -> u32 {
+    let o = numbered_enemy(cpu, GROUND_EXEC, GUN_FLAGS);
+    if o == 0 {
+        return 0;
+    }
+    let kind = cpu.read16(d + D_KIND);
+    let (sprite, frame, colours, boxes, life) = GROUND_LOOKS[match kind { 1 => 0, 2 => 1, _ => 2 }];
+    cpu.write8(o + KIND, sprite);
+    cpu.write8(o + FRAME, frame);
+    let colour = (cpu.read16(d + D_COLOUR) << 4).wrapping_add(cpu.read16(colours));
+    cpu.write16(o + COLOUR, colour);
+    cpu.write32(o + BOXES, boxes);
+    cpu.write32(o + LIFE, life);
+    let colour = cpu.read16(o + COLOUR);
+    cpu.write16(o + OWN_COLOUR, colour);
+    let kind = cpu.read16(d + D_KIND);
+    cpu.write16(o + KIND_OF, kind);
+    cpu.write8(o + SIDE, ENEMIES);
+    let t = cpu.read8(d + D_TYPE);
+    cpu.write8(o + TYPE, t);
+    cpu.write8(o + LIFT, GROUND_LIFT);
+    for k in 0..3 {
+        let v = cpu.read32(d + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    let mirror = cpu.read8(d + D_MIRROR);
+    cpu.write8(o + MIRROR, mirror);
+    if (mirror as i8) < 0 {
+        let flags = cpu.read32(o + FLAGS);
+        cpu.write32(o + FLAGS, flags | FLIPPED_X);
+    }
+    cpu.write32(o + SCRIPT, script);
+    let direction = cpu.read16(d + D_DIRECTION);
+    cpu.write16(o + BASE_DIRECTION, direction);
+    let settings = cpu.read8(d + D_SETTINGS);
+    cpu.write8(o + SETTINGS, settings);
+    let wait = ((settings & FIRE_EVERY) as u16).wrapping_mul(8).wrapping_sub(8);
+    cpu.write16(o + FIRE_WAIT, wait);
+    o
+}
+
+/// Makes a shard (shard_exec's) at the description's `d` place (x, y), its angle and frame from
+/// it, flying away at half a pixel a frame in its direction (a word, +0x2c), slowed by a 64th of
+/// that a frame; its look (kind, colour, lift above) from the enemy `from`, turning the way the
+/// enemy faces.
+const SHARD_SIZE: u32 = 100;
+const SHARD_LIST: u32 = 3;
+const SHARD_EXEC: u32 = 0x0605_dba4;
+const SHARD_HALF: u32 = 0x8000;
+const SHARD_TURN_BY: u32 = 0x400;
+/// The long whose low word is the turn (written whole).
+const SHARD_TURN_LONG: u32 = 0x40;
+const D_SHARD_ANGLE: u32 = 0x18;
+const D_SHARD_DIRECTION: u32 = 0x2c;
+const D_SHARD_FRAME: u32 = 0x2f;
+const SHARD_PLAIN_EXEC: u32 = 0x0604_dcb4;
+
+pub fn shard_set(cpu: &mut Cpu, d: u32, from: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, SHARD_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, SHARD_LIST, blocks, SHARD_PLAIN_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, o + SPRITE));
+    cpu.write32(o + BEHAVIOUR, SHARD_EXEC);
+    cpu.write8(o + SHARD_FRAMES, 0);
+    for k in 0..2 {
+        let v = cpu.read32(d + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    cpu.write32(o + POSITION + 8, 0);
+    let a = cpu.read16(d + D_SHARD_ANGLE);
+    cpu.write16(o + ANGLE, a);
+    let direction = cpu.read16(d + D_SHARD_DIRECTION) as i16 as i32 as u32;
+    let s = nested!(cpu, 0x0606_9a0c, super::math::sl_sin(cpu, direction));
+    let vx = nested!(cpu, 0x0600_6a58, super::math::fixed_mul(cpu, s, SHARD_HALF));
+    cpu.write32(o + SHARD_SPEED, vx);
+    let direction = cpu.read16(d + D_SHARD_DIRECTION) as i16 as i32 as u32;
+    let c = nested!(cpu, 0x0606_9a30, super::math::sl_cos(cpu, direction));
+    let vy = nested!(cpu, 0x0600_6a58, super::math::fixed_mul(cpu, c.wrapping_neg(), SHARD_HALF));
+    cpu.write32(o + SHARD_SPEED + 4, vy);
+    for k in 0..2 {
+        let v = cpu.read32(o + SHARD_SPEED + 4 * k) as i32;
+        cpu.write32(o + SHARD_ACCEL + 4 * k, (v.wrapping_neg() / 64) as u32);
+    }
+    let frame = cpu.read8(d + D_SHARD_FRAME);
+    cpu.write8(o + FRAME, frame);
+    let kind = cpu.read8(from + KIND);
+    cpu.write8(o + KIND, kind);
+    let colour = cpu.read16(from + COLOUR);
+    cpu.write16(o + COLOUR, colour);
+    let lift = cpu.read8(from + LIFT).wrapping_add(1);
+    cpu.write8(o + LIFT, lift);
+    let turn = if cpu.read8(from + MIRROR) as i8 > 0 { SHARD_TURN_BY } else { SHARD_TURN_BY.wrapping_neg() };
+    cpu.write32(o + SHARD_TURN_LONG, turn);
+}

@@ -25,6 +25,7 @@ mod globals;
 mod ground;
 mod hits;
 mod hud;
+mod kinds;
 mod main_loop;
 mod math;
 mod models;
@@ -505,6 +506,7 @@ pub fn register(n: &mut Natives) {
         0x0605_8d00 => explosions::blast_draw[s] -> (),
         0x0605_80bc => explosions::twin_exec[o] -> (),
         0x0605_8278 => explosions::twin_set[p] -> (),
+        0x0605_968c => explosions::smoke_and_sparks[p, n] -> u32,
         0x0605_8444 => explosions::ember_exec[o] -> (),
         0x0605_8520 => explosions::ember_set[d] -> (),
         0x0605_8638 => explosions::debris_exec[o] -> (),
@@ -539,6 +541,16 @@ pub fn register(n: &mut Natives) {
         0x0604_c2e8 => shots::sword_exec[s] -> (),
         0x0604_c9a4 => shots::shot_sword_set[p] -> u32,
         0x0604_caa8 => shots::hyper_piece_exec[o] -> (),
+        0x0604_5638 => kinds::sprite_kind_fix[k, p] -> (),
+        0x0604_5688 => kinds::sprite_kind_read[k, dst] -> u32,
+        0x0604_56cc => kinds::kind_load[k, dst] -> u32,
+        0x0604_570c => kinds::sprite_kind_install[k, vram, first, colour] -> u32,
+        0x0604_583c => kinds::model_kind_fix[k, p] -> (),
+        0x0604_58cc => kinds::model_kind_read[k, dst] -> u32,
+        0x0604_5910 => kinds::kind_load[k, dst] -> u32,
+        0x0604_5950 => kinds::model_kind_install[k, vram, first, colour] -> u32,
+        0x0605_3620 => kinds::kinds_exec[o] -> (),
+        0x0605_3aa0 => kinds::kinds_set[] -> u32,
         0x0604_7f60 => player::player_exec[p] -> (),
         0x0604_7b0c => player::control[p] -> (),
         0x0604_77ec => player::weapons_frame[p] -> (),
@@ -630,6 +642,7 @@ pub fn register(n: &mut Natives) {
         0x0605_a340 => ground::aim_step[o, script, keep] -> u32,
         0x0605_a460 => ground::route_move[o] -> (),
         0x0605_a4cc => ground::ground_exec[o] -> (),
+        0x0605_a780 => ground::ground_set[d, script] -> u32,
         0x0605_a970 => ground::gun_exec[o] -> (),
         0x0605_aae8 => ground::barrel_exec[o] -> (),
         0x0605_b0d4 => ground::barrel_init[o, gun] -> (),
@@ -651,6 +664,7 @@ pub fn register(n: &mut Natives) {
         0x0605_d988 => ground::burster_draw[s] -> (),
         0x0605_da58 => ground::burster_set[d, script] -> u32,
         0x0605_dba4 => ground::shard_exec[o] -> (),
+        0x0605_dc18 => ground::shard_set[d, from] -> (),
         0x0605_de54 => ground::hatch_exec[o] -> (),
         0x0605_c700 => ground::ride[o] -> (),
         0x0606_38c0 => aim::point_area_wide[p] -> u32,
@@ -675,6 +689,7 @@ pub fn register(n: &mut Natives) {
         0x0606_46c4 => models::pod_model[o] -> (),
         0x0606_48e4 => models::pod_sprite[o] -> (),
         0x0606_4520 => models::pod_glow[o] -> (),
+        0x0606_2b54 => models::model31_draw[s] -> (),
         0x0606_3900 => aim::point_area[p] -> u32,
         0x0605_3bfc => bullets::bullet_frame[b] -> (),
         0x0605_3ccc => bullets::bullet_move[b] -> (),
@@ -816,6 +831,7 @@ pub fn register(n: &mut Natives) {
         0x0605_73a0 => actors::anim_step[actor] -> u32,
         0x0605_73f0 => actors::drift[actor] -> (),
         0x0605_6cc8 => parts::part_exec[part] -> (),
+        0x0605_6dbc => parts::part_set[kind] -> u32,
         0x0604_dd50 => effects::actor_init[actor] -> (),
         0x0604_6530 => effects::link_init[link, to] -> (),
         0x0604_e1cc => effects::effect_set[fx] -> u32,

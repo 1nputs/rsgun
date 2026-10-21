@@ -4,7 +4,7 @@
 //! learns from them when one was hit.
 
 use super::nested;
-use super::{hits, Cpu};
+use super::{hits, objects, sprites, Cpu};
 
 /// The objects' mode byte's ending, and the actor fields a part uses: its flags (NO_HITS), what
 /// hit it last, its own life (one, 16.16, each frame), its hit flags (WAS_HIT), the boss's state
@@ -178,3 +178,36 @@ pub fn flash_against(cpu: &mut Cpu, part: u32, with: u32) {
     }
 }
 
+
+/// Makes a part of kind `kind` (its depth from the depth boxes' table: 4, 8, 12 or 16 take their
+/// own boxes), never drawn, on the enemies' side, its life one. It, or 0.
+const PART_SIZE: u32 = 0x80;
+const PART_LIST: u32 = 2;
+const ACTOR_EXEC: u32 = 0x0604_d780;
+const PART_EXEC: u32 = 0x0605_6cc8;
+const PART_FLAGS: u32 = 0x8008_0000;
+const BOXES: u32 = 0x3c;
+const BEHAVIOUR: u32 = 0x38;
+const DEPTHS: u32 = 0x0607_2fa4;
+const DEPTH_BOXES: [(i8, u32); 4] = [(4, 0x0607_2fa8), (8, 0x0607_2fb8), (12, 0x0607_2fc8), (16, 0x0607_2fd8)];
+
+pub fn part_set(cpu: &mut Cpu, kind: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, PART_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, PART_LIST, blocks, ACTOR_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + 0x10));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + BOXES));
+    cpu.write32(o + BEHAVIOUR, PART_EXEC);
+    cpu.write32(o + FLAGS, PART_FLAGS);
+    cpu.write32(o + LIFE, ONE);
+    cpu.write8(o + SIDE, 1);
+    let depth = cpu.read8(DEPTHS + (kind & 0xffff));
+    cpu.write8(o + DEPTH, depth);
+    let depth = cpu.read8(o + DEPTH) as i8;
+    if let Some(&(_, boxes)) = DEPTH_BOXES.iter().find(|&&(d, _)| d == depth) {
+        cpu.write32(o + BOXES, boxes);
+    }
+    o
+}
