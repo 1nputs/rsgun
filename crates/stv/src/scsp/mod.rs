@@ -157,8 +157,11 @@ impl Scsp {
         if self.samples & 1 == 0 {
             let count = (self.samples >> 1) as u32;
             for n in 0..32 {
-                let regs = self.slot_regs(n);
-                self.slots[n].clock(&regs, count);
+                // a slot keyed off has no envelope to clock
+                if self.slots[n].active {
+                    let regs = self.slot_regs(n);
+                    self.slots[n].clock(&regs, count);
+                }
             }
         }
         if std::mem::take(&mut self.key_pending) {
@@ -172,6 +175,14 @@ impl Scsp {
         self.dsp.run(&mut self.ram);
         let (mut l, mut r) = (0i32, 0i32);
         for n in 0..32 {
+            if !self.slots[n].active {
+                // silent: its output (0) still goes on the stack, unless STWINH
+                if self.reg(0x20 * n + 0xC) & 0x200 == 0 {
+                    self.stack[self.stack_pos] = 0;
+                }
+                self.stack_pos = (self.stack_pos + 1) & 63;
+                continue;
+            }
             let regs = self.slot_regs(n);
             let modulation = if regs.mdl >= 5 {
                 let x = self.stack[(self.stack_pos + regs.mdxsl as usize) & 63] as i32;
@@ -195,9 +206,9 @@ impl Scsp {
             }
         }
         for i in 0..18 {
-            let regs = self.slot_regs(i);
             let e = if i < 16 { self.dsp.efreg[i] } else { self.dsp.exts[i - 16] } as i32;
             if e != 0 {
+                let regs = self.slot_regs(i);
                 let (el, er) = slot::send(e, regs.efsdl, regs.efpan);
                 l += el;
                 r += er;

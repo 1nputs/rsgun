@@ -166,6 +166,8 @@ fn load_machine(o: &Options) -> Result<(Machine, Option<Boot>), String> {
     let key = stv::mem::fnv1a(eeprom.as_deref().unwrap_or_default()).wrapping_add((o.cpu_speed as u64 - 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     let mut m = Machine::new(bios, cart, 1, eeprom.as_deref());
     m.cpu_speed = o.cpu_speed;
+    // the picture's lines in bands, on the cores there are
+    m.render_threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(4));
     if o.native || o.compare.is_some() {
         m.sys.natives.overlay = Some(overlay());
         generated::register(&mut m.sys.natives);
@@ -264,7 +266,14 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
     }
     let run = frames.saturating_sub(first);
     let ms = t.elapsed().as_secs_f64() * 1000.0 / run.max(1) as f64;
-    println!("{run} frames (from frame {first}), {ms:.2} ms a frame");
+    let part = |d: Duration| d.as_secs_f64() * 1000.0 / run.max(1) as f64;
+    let c = m.sys.costs;
+    println!(
+        "{run} frames (from frame {first}), {ms:.2} ms a frame (VDP2 {:.2}, VDP1 {:.2}, sound {:.2})",
+        part(c.compose),
+        part(c.draw),
+        part(c.sound)
+    );
     if o.native {
         let n = &m.sys.natives;
         println!("native: {} functions, {} calls run natively, {} passed to the interpreter", n.len(), n.native_calls, n.interpreted_calls);

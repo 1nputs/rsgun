@@ -24,7 +24,15 @@ pub struct Vdp1Draw<'a> {
     sys_clip: (i32, i32),
     user_clip: (i32, i32, i32, i32),
     local: (i32, i32),
+    /// The last line's walk, kept for the next (a quad's lines mostly share it): the texel column
+    /// at each step, and the minor axis's offset at each step, for (its distance, length).
+    cols: (Option<ColumnsFor>, Vec<usize>),
+    offsets: (Option<(i32, i32)>, Vec<i32>),
 }
+
+/// What a line's texel columns depend on: the texture's width, the line's length, HFLIP, high-speed
+/// shrink and TVMR's EOS.
+type ColumnsFor = (i32, i32, bool, bool, u16);
 
 /// A command's drawing parameters.
 #[derive(Clone, Copy)]
@@ -70,7 +78,7 @@ fn sext(v: u16, bits: u32) -> i32 {
 
 impl<'a> Vdp1Draw<'a> {
     pub fn new(vram: &'a [u8], fb: &'a mut [u8], tvmr: u16) -> Vdp1Draw<'a> {
-        Vdp1Draw { vram, fb, tvmr, sys_clip: (0, 0), user_clip: (0, 0, 0, 0), local: (0, 0) }
+        Vdp1Draw { vram, fb, tvmr, sys_clip: (0, 0), user_clip: (0, 0, 0, 0), local: (0, 0), cols: (None, Vec::new()), offsets: (None, Vec::new()) }
     }
 
     fn w(&self, a: usize, i: usize) -> u16 {
@@ -231,28 +239,44 @@ impl<'a> Vdp1Draw<'a> {
         let (p0, p1) = if !quad && ((x_major && dx0 < 0) || (!x_major && dy0 < 0)) { (p1, p0) } else { (p0, p1) };
         let (dx, dy) = (p1.0 - p0.0, p1.1 - p0.1);
         let len = dx.abs().max(dy.abs());
-        let (sx, sy) = (dx.signum(), dy.signum());
+        let tw = d.tex.map_or(1, |t| t.1) as i32;
+        // high-speed shrink: the even texels (odd with TVMR's EOS) walked as a texture of half the
+        // width
+        let shrink = d.pmod & 0x1000 != 0 && tw > len + 1;
+        let key = (tw, len, d.hflip, shrink, self.tvmr & 0x10);
+        let mut cols = std::mem::take(&mut self.cols);
+        if cols.0 != Some(key) {
+            cols.1.clear();
+            cols.1.extend((0..=len).map(|j| {
+                let walk = if d.hflip { len - j } else { j };
+                if shrink { 2 * texel_at(walk, tw / 2, len + 1) + ((self.tvmr >> 4) & 1) as usize } else { texel_at(walk, tw, len + 1) }
+            }));
+            cols.0 = Some(key);
+        }
+        // the minor axis rounds to nearest, halves toward the start
+        let minor = if x_major { dy } else { dx };
+        let mut offsets = std::mem::take(&mut self.offsets);
+        if offsets.0 != Some((minor, len)) {
+            offsets.1.clear();
+            offsets.1.extend((0..=len).map(|j| if len == 0 { 0 } else { round_half_in(minor * j, len) }));
+            offsets.0 = Some((minor, len));
+        }
+        self.walk_line(p0, (dx.signum(), dy.signum()), x_major, &cols.1, &offsets.1, row, d, g, quad);
+        (self.cols, self.offsets) = (cols, offsets);
+    }
+
+    /// A line's pixels from `p0`: `cols.len()` steps along its major axis (by `sx` or `sy`), each
+    /// with its offset across it in `offsets` and its texel column in `cols`.
+    #[allow(clippy::too_many_arguments)]
+    fn walk_line(&mut self, p0: (i32, i32), (sx, sy): (i32, i32), x_major: bool, cols: &[usize], offsets: &[i32], row: Option<usize>, d: Draw, g: Option<([i32; 3], [i32; 3])>, quad: bool) {
+        let len = cols.len() as i32 - 1;
         let tw = d.tex.map_or(1, |t| t.1) as i32;
         let mut prev: Option<(i32, i32)> = None;
         // end codes (ECD clear): the texels the walk passes are counted, the second ends the line
         let counting = d.pmod & 0x80 == 0 && matches!((d.tex, row), (Some(_), Some(_)));
         let (mut walked, mut end_codes) = (None::<i32>, 0);
-        for j in 0..=len {
-            let (x, y) = if len == 0 {
-                p0
-            } else if x_major {
-                (p0.0 + sx * j, p0.1 + round_half_in(dy * j, len))
-            } else {
-                (p0.0 + round_half_in(dx * j, len), p0.1 + sy * j)
-            };
-            let walk = if d.hflip { len - j } else { j };
-            let col = if d.pmod & 0x1000 != 0 && tw > len + 1 {
-                // high-speed shrink: the even texels (odd with TVMR's EOS) walked as a texture of
-                // half the width
-                2 * texel_at(walk, tw / 2, len + 1) + ((self.tvmr >> 4) & 1) as usize
-            } else {
-                texel_at(walk, tw, len + 1)
-            };
+        for (j, (&col, &offset)) in (0..).zip(cols.iter().zip(offsets)) {
+            let (x, y) = if x_major { (p0.0 + sx * j, p0.1 + offset) } else { (p0.0 + offset, p0.1 + sy * j) };
             if counting
                 && let (Some((src, w, _)), Some(r)) = (d.tex, row)
             {

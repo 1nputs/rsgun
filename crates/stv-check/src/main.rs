@@ -656,6 +656,15 @@ fn vdp2(dir: &Path) -> Result<bool, String> {
     let frame = stv::vdp2render::Vdp2Frame { regs: &regs, vram: &vram, cram: &cram, fb: &fb, tvmr: v1[0] };
     let (w, h) = (frame.width(), frame.height());
     let ours = frame.render();
+    if let Some(n) = bench_runs() {
+        // in bands of lines too: the same picture
+        let threads = std::env::var("STV_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        if frame.render_in(threads) != ours {
+            return Err(format!("{threads} threads render another picture"));
+        }
+        let best = (0..n).map(|_| timed(|| drop(frame.render_in(threads)))).fold(f64::MAX, f64::min);
+        eprintln!("{}: renders in {best:.3} ms", dir.display());
+    }
     let (sw, sh, shot) = read_ppm(&dir.join("screen.ppm"))?;
     write_ppm(&dir.join("ours.ppm"), w, h, &ours)?;
     if sw != w {
@@ -695,6 +704,19 @@ fn vdp2(dir: &Path) -> Result<bool, String> {
     Ok(bad == 0)
 }
 
+/// STV_BENCH=N: vdp1 and vdp2 also time their drawing, N times, and print the best (development;
+/// STV_THREADS=T: VDP2's in T bands of lines).
+fn bench_runs() -> Option<u32> {
+    std::env::var("STV_BENCH").ok()?.parse().ok()
+}
+
+/// How long `f` takes, in ms.
+fn timed(f: impl FnOnce()) -> f64 {
+    let t = std::time::Instant::now();
+    f();
+    t.elapsed().as_secs_f64() * 1000.0
+}
+
 /// A framebuffer pixel as a colour to look at: RGB pixels as they are, palette pixels as grey.
 fn fb_rgb(v: u16) -> [u8; 3] {
     if v & 0x8000 != 0 {
@@ -714,6 +736,13 @@ fn vdp1(dir: &Path) -> Result<bool, String> {
     let rd = |n: &str| fs::read(dir.join("draw").join(n)).map_err(|e| format!("{n}: {e}"));
     let (vram, mut fb, after, regs) = (rd("vdp1-vram.bin")?, rd("fb-before.bin")?, rd("fb-after.bin")?, rd("vdp1-regs.bin")?);
     let tvmr = u16::from_be_bytes([regs[0], regs[1]]);
+    if let Some(n) = bench_runs() {
+        let best = (0..n).map(|_| {
+            let mut f = fb.clone();
+            timed(|| stv::vdp1render::Vdp1Draw::new(&vram, &mut f, tvmr).run())
+        });
+        eprintln!("{}: draws in {:.3} ms", dir.display(), best.fold(f64::MAX, f64::min));
+    }
     stv::vdp1render::Vdp1Draw::new(&vram, &mut fb, tvmr).run();
     let (w, h) = (512usize, 256usize);
     let mut img = vec![0u8; w * 3 * h * 3];

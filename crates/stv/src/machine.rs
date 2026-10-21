@@ -85,13 +85,23 @@ pub struct Sys {
     signalled: bool,
     /// The instructions each CPU's interpreter has fetched (the SH-2 code still run as such).
     pub interpreted: [u64; 2],
+    /// The time the machine's other parts have taken (wall clock, for the player's report).
+    pub costs: Costs,
+}
+
+/// Wall-clock time spent in VDP2's composition, VDP1's drawing, and the sound CPU with the SCSP.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Costs {
+    pub compose: std::time::Duration,
+    pub draw: std::time::Duration,
+    pub sound: std::time::Duration,
 }
 
 saved!(Sys {
     wram_l, wram_h, backup, prot, prot_on, prot_counter, io, inputs, onchip, cache_data, scu, smpc,
     vdp1, vdp2, scsp, m68k, sound_on, sound_reset_pending, sound_owed, sound_in_sample, sound_steps,
     slave_on, clock352, line, frame, reset_pending, nmi_pending, slave_reset_pending, wait,
-} skip { bios, cart, trace, spin, natives, logging, log_depth, access_log, idle, signalled, interpreted });
+} skip { bios, cart, trace, spin, natives, logging, log_depth, access_log, idle, signalled, interpreted, costs });
 
 impl Sys {
     #[inline]
@@ -170,6 +180,7 @@ impl Sys {
             idle: [false; 2],
             signalled: false,
             interpreted: [0; 2],
+            costs: Costs::default(),
         }
     }
 }
@@ -190,6 +201,7 @@ impl Sys {
 
     /// Runs the sound CPU and the SCSP for `sh2_cycles` of the main clock.
     fn run_sound(&mut self, sh2_cycles: u32) {
+        let started = std::time::Instant::now();
         self.sound_owed += sh2_cycles as u64 * SOUND_HZ;
         let cycles = (self.sound_owed / self.sh2_hz()) as u32;
         self.sound_owed %= self.sh2_hz();
@@ -217,6 +229,7 @@ impl Sys {
             self.scu.raise(scu::SOUND_REQUEST);
             self.scu.trigger(scu::FACTOR_SOUND);
         }
+        self.costs.sound += started.elapsed();
     }
 
     // ---- the external bus (also what DMA reaches) ----------------------------------------------
@@ -417,7 +430,9 @@ impl Sys {
         let fb = self.vdp1.draw;
         let tvmr = self.vdp1.tvmr;
         let (vram, fbs) = (&self.vdp1.vram, &mut self.vdp1.fb);
+        let started = std::time::Instant::now();
         crate::vdp1render::Vdp1Draw::new(vram, &mut fbs[fb], tvmr).run();
+        self.costs.draw += started.elapsed();
         self.vdp1.run_draw();
         self.scu.raise(scu::SPRITE_END);
         self.scu.trigger(scu::FACTOR_SPRITE_END);
@@ -770,6 +785,8 @@ pub struct Machine {
     /// slowdown where it ran out of time (and a native run and an interpreted one stay equal
     /// although they cost differently). Their timers count their own clock.
     pub cpu_speed: u32,
+    /// Threads VDP2's composition renders a frame's lines in (the picture is the same with any).
+    pub render_threads: usize,
     /// A place to watch for (CPU, address): the frame in which the CPU first reached it (to run its
     /// instruction, or to call native code there), in `reached`.
     pub breakpoint: Option<(usize, u32)>,
@@ -784,7 +801,7 @@ pub struct Machine {
     roms: std::cell::OnceCell<(u64, u64)>,
 }
 
-saved!(Machine { cpu, sys, time, steps, picture } skip { coverage, evidence, compare, spin_enabled, cpu_speed, breakpoint, reached, watch, fibers, stacks, spare, roms });
+saved!(Machine { cpu, sys, time, steps, picture } skip { coverage, evidence, compare, spin_enabled, cpu_speed, render_threads, breakpoint, reached, watch, fibers, stacks, spare, roms });
 
 /// A save state's start, and its format's version.
 const STATE_MAGIC: &[u8; 8] = b"STVSTATE";
@@ -1017,6 +1034,7 @@ impl Machine {
             compare: None,
             spin_enabled: true,
             cpu_speed: 1,
+            render_threads: 1,
             breakpoint: None,
             reached: None,
             watch: Default::default(),
@@ -1569,7 +1587,9 @@ impl Machine {
             fb: &s.vdp1.fb[s.vdp1.draw ^ 1],
             tvmr: s.vdp1.tvmr as u8,
         };
-        self.picture = (frame.width(), frame.height(), frame.render());
+        let started = std::time::Instant::now();
+        self.picture = (frame.width(), frame.height(), frame.render_in(self.render_threads));
+        self.sys.costs.compose += started.elapsed();
     }
 
     fn roms(&self) -> (u64, u64) {

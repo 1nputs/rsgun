@@ -94,7 +94,9 @@ impl Dsp {
         let mut yreg: i32 = 0;
         let mut adrs: u32 = 0;
         let ring = (8 * 1024u32) << self.rbl;
-        for step in 0..128usize {
+        // a step of zeros writes nothing: the program ends at its last other step
+        let steps = self.mpro.as_chunks::<4>().0.iter().rposition(|i| *i != [0; 4]).map_or(0, |last| last + 1);
+        for step in 0..steps {
             let i = &self.mpro[step * 4..step * 4 + 4];
             let tra = ((i[0] >> 8) & 0x7F) as u32;
             let twt = (i[0] >> 7) & 1 != 0;
