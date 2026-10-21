@@ -208,8 +208,7 @@ const SCROLL_TABLE: u32 = 0x0607_47cc;
 /// A request for the next frame (set by code not rewritten yet), passed on as this frame's flag.
 const REQUEST: u32 = 0x0607_3c84;
 const REQUESTED: u32 = 0x0607_4804;
-/// With the director's flag bit 3 (director.rs) the screen is handed to SCREEN_ALT instead (not
-/// rewritten yet).
+/// With the director's flag bit 3 (director.rs) the screen is handed to SCREEN_ALT instead.
 const SCREEN_ALT: u32 = 0x0605_e630;
 
 /// SGL's: colour offsets A and B (r, g, b).
@@ -222,7 +221,7 @@ pub fn screen_exec(cpu: &mut Cpu, s: u32) {
         return;
     }
     if nested!(cpu, 0x0604_0cb4, super::director::director_flags(cpu)) & 8 != 0 {
-        cpu.call(SCREEN_ALT, &[]);
+        nested!(cpu, SCREEN_ALT, screen_alt(cpu));
         return;
     }
     let work = s + 0x10;
@@ -663,4 +662,94 @@ pub fn scroll_next(cpu: &mut Cpu) {
             cpu.write32(REQUEST, 1);
         }
     }
+}
+
+/// NBG0 and NBG1 shown, NBG2 and RBG0 hidden (SGL's display bits).
+const PLANES_AB: u32 = 0x14_0003;
+
+pub fn planes_ab(cpu: &mut Cpu) {
+    nested!(cpu, 0x0606_e23c, super::sgl::sl_bg_on(cpu, PLANES_AB));
+}
+
+/// The screen while the director's flag bit 3 is set: off.
+pub fn screen_alt(cpu: &mut Cpu) {
+    nested!(cpu, 0x0605_e24c, screen_off(cpu));
+}
+
+/// SGL's VDP2 settings for play (its calls, not rewritten yet: their meanings not known yet), a
+/// flag of SGL's set, the fades stopped and the colour offsets cleared.
+const SL_E_DC8A: u32 = 0x0606_dc8a;
+const SL_E_DCEC: u32 = 0x0606_dcec;
+const SL_E_DD4C: u32 = 0x0606_dd4c;
+const SL_E_DD5C: u32 = 0x0606_dd5c;
+const SL_E_DD6C: u32 = 0x0606_dd6c;
+const SL_FLAG_FC12: u32 = 0x060f_fc12;
+
+pub fn play_screen_set(cpu: &mut Cpu) {
+    cpu.call(SL_E_DC8A, &[4]);
+    cpu.call(SL_E_DCEC, &[1]);
+    cpu.write8(SL_FLAG_FC12, 1);
+    cpu.call(SL_E_DD4C, &[3]);
+    nested!(cpu, 0x0605_e9d8, stop_fades(cpu));
+    nested!(cpu, 0x0605_e6c0, offsets_clear(cpu));
+    cpu.call(SL_E_DD5C, &[0]);
+    cpu.call(SL_E_DD6C, &[4]);
+}
+
+/// SGL's VDP2 settings back to their start (its calls: the planes' eight settings, three more,
+/// two more for each rotation plane), with window 0's setting between the window switches.
+const SL_E_E17C: u32 = 0x0606_e17c;
+const SL_E_E19E: u32 = 0x0606_e19e;
+const SL_E_E18C: u32 = 0x0606_e18c;
+const SL_E_E190: u32 = 0x0606_e190;
+const SL_E_E1BC: u32 = 0x0606_e1bc;
+const SL_E_E1CC: u32 = 0x0606_e1cc;
+
+pub fn screen_reset(cpu: &mut Cpu) {
+    for plane in [1, 0, 3, 2, 5, 4, 7, 6] {
+        cpu.call(SL_E_E17C, &[plane, 0]);
+    }
+    for f in [SL_E_E19E, SL_E_E18C, SL_E_E190] {
+        cpu.call(f, &[0]);
+    }
+    for plane in [1, 0] {
+        cpu.call(SL_E_E1BC, &[plane, 0]);
+    }
+    nested!(cpu, 0x0606_713c, super::sgl::sl_cur_window(cpu, 0));
+    cpu.call(SL_E_E1CC, &[0x4000]);
+    nested!(cpu, 0x0606_713c, super::sgl::sl_cur_window(cpu, 1));
+}
+
+/// A screen mode's start (the mode's scroll table, and what its first scroll's start takes):
+/// NBG2 shown, NBG0, NBG1 and RBG0 hidden (SGL's display bits), four of the screen's flags
+/// cleared, its fields and fades to their start, the fade offset to none, SGL's settings and the
+/// shading to their start, the first scroll started, the text plane cleared, the screen on.
+const PLANES_START: u32 = 0x13_0004;
+const SCREEN_FLAGS: [u32; 4] = [0x0607_3c90, 0x0607_3c94, 0x0607_3c9c, 0x0607_3c98];
+const NO_FADE: u32 = 0xffff_ff01;
+
+pub fn screen_start(cpu: &mut Cpu, table: u32, a: u32, b: u32) {
+    nested!(cpu, 0x0606_e23c, super::sgl::sl_bg_on(cpu, PLANES_START));
+    for at in SCREEN_FLAGS {
+        cpu.write32(at, 0);
+    }
+    nested!(cpu, 0x0605_e2dc, screen_fields(cpu));
+    nested!(cpu, 0x0605_e9d8, stop_fades(cpu));
+    nested!(cpu, 0x0605_e6dc, set_fade_offset(cpu, NO_FADE, NO_FADE, NO_FADE));
+    nested!(cpu, 0x0605_e34c, screen_reset(cpu));
+    nested!(cpu, 0x0606_320c, super::gouraud::shading_default(cpu));
+    cpu.write32(SCROLL_TABLE, table);
+    let start = cpu.read32(table);
+    cpu.call(start, &[a, b]);
+    nested!(cpu, 0x0606_e24c, super::system::wait_dma0(cpu));
+    nested!(cpu, 0x0605_fdfc, clear_text_plane(cpu));
+    let s = screen(cpu);
+    cpu.write8(s + SCREEN_OFF, 0);
+}
+
+/// NBG0 shown, NBG1 and NBG2 hidden (SGL's display bits).
+const PLANE_A: u32 = 0x16_0001;
+
+pub fn plane_a(cpu: &mut Cpu) {
+    nested!(cpu, 0x0606_e23c, super::sgl::sl_bg_on(cpu, PLANE_A));
 }

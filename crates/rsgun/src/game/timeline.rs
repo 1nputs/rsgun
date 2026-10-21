@@ -97,3 +97,24 @@ pub fn timeline_run(cpu: &mut Cpu, t: u32) {
     let f = cpu.read32(t + FRAME).wrapping_add(1);
     cpu.write32(t + FRAME, f);
 }
+
+/// Makes a timeline (list 0) running the events at `events` from its start. It, or 0 (also for
+/// no events).
+const TIMELINE_SIZE: u32 = 0x20;
+const TIMELINE_LIST: u32 = 0;
+const TIMELINE_EXEC: u32 = 0x0605_72ec;
+
+pub fn timeline_set(cpu: &mut Cpu, events: u32) -> u32 {
+    if events == 0 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, TIMELINE_SIZE)) as i8 as i32 as u32;
+    let t = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, TIMELINE_LIST, blocks, TIMELINE_EXEC));
+    if t != 0 {
+        cpu.write32(t + EVENTS, events);
+        for field in [CURRENT, FRAME, FRAME + 4] {
+            cpu.write32(t + field, 0);
+        }
+    }
+    t
+}

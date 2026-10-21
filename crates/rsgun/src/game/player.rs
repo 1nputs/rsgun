@@ -837,7 +837,7 @@ pub fn hyper_state(cpu: &mut Cpu, p: u32) {
             wait(cpu, p, 0, 2);
         }
         2 => {
-            if cpu.call(HYPER_SET, &[p]) == 0 {
+            if nested!(cpu, HYPER_SET, super::shots::hyper_set(cpu, p)) == 0 {
                 return;
             }
             nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 10));

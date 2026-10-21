@@ -472,3 +472,9 @@ pub fn kinds_set(cpu: &mut Cpu) -> u32 {
     }
     o
 }
+
+/// Kind `k`'s colours as VDP1's table bank (its first colour, by fours, from 0x1c00).
+pub fn kind_colour_bank(cpu: &mut Cpu, k: u32) -> u32 {
+    let at = kind((k as i8 as i32) as u32) + K_COLOUR;
+    ((cpu.read16(at) >> 2) as u32).wrapping_add(VDP1_BANK as u32)
+}

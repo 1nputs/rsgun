@@ -169,6 +169,25 @@ impl Cpu<'_> {
         self.sh2.gbr
     }
 
+    /// Registers left as SGL's code leaves them (`(n, value)`, r1-r7): its callers' code passes
+    /// what is left in them on, and some of SGL's own code reads them before it sets them.
+    pub fn leave(&mut self, regs: &[(usize, u32)]) {
+        for &(n, v) in regs {
+            self.sh2.r[n] = v;
+        }
+    }
+
+    /// MACH and MACL left as SGL's code leaves them (the 64-bit sum).
+    pub fn leave_mac(&mut self, sum: i64) {
+        self.sh2.mach = (sum >> 32) as u32;
+        self.sh2.macl = sum as u32;
+    }
+
+    /// SR's T bit left as SGL's code leaves it.
+    pub fn leave_t(&mut self, t: bool) {
+        self.sh2.sr = (self.sh2.sr & !1) | t as u32;
+    }
+
     /// Takes `bytes` of pushed arguments off the stack.
     pub fn pop(&mut self, bytes: u32) {
         self.sh2.r[15] = self.sh2.r[15].wrapping_add(bytes);
@@ -353,6 +372,7 @@ pub fn register(n: &mut Natives) {
         0x0600_6a8e => math::fixed_div[a, b] -> u32,
         0x0600_57f8 => objects::obj_size[bytes] -> u32,
         0x0600_6aac => objects::find_free[area, blocks] -> u32,
+        0x0600_5694 => objects::obj_set_after[area, blocks, exec, after] -> u32,
         0x0600_6b00 => objects::obj_set[area, blocks, exec] -> u32,
         0x0600_579c => objects::obj_free[obj] -> (),
         0x0600_6b64 => objects::obj_exec[] -> (),
@@ -548,6 +568,8 @@ pub fn register(n: &mut Natives) {
         0x0604_c2e8 => shots::sword_exec[s] -> (),
         0x0604_c9a4 => shots::shot_sword_set[p] -> u32,
         0x0604_caa8 => shots::hyper_piece_exec[o] -> (),
+        0x0604_cd28 => shots::hyper_exec[o] -> (),
+        0x0604_d444 => shots::hyper_set[p] -> u32,
         0x0604_5638 => kinds::sprite_kind_fix[k, p] -> (),
         0x0604_5688 => kinds::sprite_kind_read[k, dst] -> u32,
         0x0604_56cc => kinds::kind_load[k, dst] -> u32,
@@ -633,6 +655,7 @@ pub fn register(n: &mut Natives) {
         0x0605_0f70 => banner::banner_idle[] -> (),
         0x0605_0f7c => banner::banner_step_17[] -> (),
         0x0605_72ec => timeline::timeline_exec[t] -> (),
+        0x0605_7354 => timeline::timeline_set[events] -> u32,
         0x0605_7210 => timeline::timeline_run[t] -> (),
         0x0605_6b14 => parts::body_exec[body] -> (),
         0x0605_6a58 => aim::nearer_player[p] -> u32,
@@ -724,6 +747,9 @@ pub fn register(n: &mut Natives) {
         0x0606_46c4 => models::pod_model[o] -> (),
         0x0606_48e4 => models::pod_sprite[o] -> (),
         0x0606_4520 => models::pod_glow[o] -> (),
+        0x0606_4a7c => models::pod_init[o, n] -> (),
+        0x0606_4d34 => models::pod_set[exec, n] -> u32,
+        0x0606_4d98 => models::pod_normals[] -> (),
         0x0606_2b54 => models::model31_draw[s] -> (),
         0x0606_3900 => aim::point_area[p] -> u32,
         0x0605_3bfc => bullets::bullet_frame[b] -> (),
@@ -749,6 +775,7 @@ pub fn register(n: &mut Natives) {
         0x0605_2e50 => models::model_draw[s] -> (),
         0x0605_2f3c => models::group_end[s] -> (),
         0x0605_2f54 => models::end_with_parent[obj] -> (),
+        0x0605_2f78 => models::group_end_set[head] -> u32,
         0x0605_ecb4 => screen::queue_fill[src, dst, size] -> u32,
         0x0605_ecf0 => screen::queue_copy[src, dst, size] -> u32,
         0x0605_ed2c => screen::queue_long_copy[src, dst, size, piece] -> u32,
@@ -845,9 +872,11 @@ pub fn register(n: &mut Natives) {
         0x0606_745c => sgl::sl_put_polygon[pd] -> u32,
         0x0606_780c => sgl::sl_atan[x, y] -> u32,
         0x0606_713c => sgl::sl_cur_window[win] -> u32,
+        0x0606_db2c => sgl::sl_calc_point[x, y, z, out] -> (),
         0x0606_db5c => sgl::sl_push_no_copy[] -> u32,
         0x0606_db7c => sgl::sl_load_matrix[src] -> (),
         0x0606_db9c => sgl::sl_get_matrix[dst] -> (),
+        0x0606_e23c => sgl::sl_bg_on[bits] -> (),
         0x0603_511a => sgl::sl_push_unit_matrix[] -> u32,
         0x0606_9a0c => math::sl_sin[a] -> u32,
         0x0606_9a30 => math::sl_cos[a] -> u32,
@@ -871,6 +900,8 @@ pub fn register(n: &mut Natives) {
         0x0605_6554 => aim::turn_sign[a, b] -> u32,
         0x0605_6580 => aim::angle_between[a, b] -> u32,
         0x0605_6644 => models::pose_step[p] -> (),
+        0x0605_65f0 => models::pose_set[p, angles] -> (),
+        0x0606_28cc => actors::puff_at[p] -> (),
         0x0605_69f8 => aim::area_flags[s, top, bottom, left; right] -> u32,
         0x0605_6a24 => aim::off_screen[s] -> u32,
         0x0605_70d8 => aim::turn_toward[angle, speed, from, to; most, ease, accel] -> (),
@@ -896,6 +927,16 @@ pub fn register(n: &mut Natives) {
         0x0606_35e8 => gouraud::gouraud_tables[pd, at] -> (),
         0x0605_e6fc => screen::set_offset_a[r, g, b] -> (),
         0x0605_e648 => screen::scroll_next[] -> (),
+        0x0605_e630 => screen::screen_alt[] -> (),
+        0x0605_e27c => screen::play_screen_set[] -> (),
+        0x0605_e34c => screen::screen_reset[] -> (),
+        0x0605_e3e0 => screen::screen_start[table, a, b] -> (),
+        0x0606_00f0 => screen::planes_ab[] -> (),
+        0x0606_00d4 => screen::plane_a[] -> (),
+        0x0604_5af8 => kinds::kind_colour_bank[k] -> u32,
+        0x0605_64e0 => banner::banner_start[] -> u32,
+        0x0605_e17c => states::stage_data_set[p] -> (),
+        0x0605_fe78 => states::stage_table[i] -> u32,
         0x0606_333c => models::model_lit[kind, frame] -> (),
         0x0604_dd50 => effects::actor_init[actor] -> (),
         0x0604_6530 => effects::link_init[link, to] -> (),

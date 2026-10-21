@@ -349,6 +349,32 @@ pub fn drift_effect(cpu: &mut Cpu, e: u32) -> u32 {
     o
 }
 
+/// A still puff at the place at `p` (x, y, z): a drifting effect of colours 0x90 on, its script
+/// from a table, at a random angle, flipped at random.
+const PUFF_SCRIPT: u32 = 0x0607_3008;
+const PUFF_COLOUR: u16 = 0x90;
+
+pub fn puff_at(cpu: &mut Cpu, p: u32) {
+    let f = cpu.stack();
+    for k in 0..3 {
+        let v = cpu.read32(p + 4 * k);
+        cpu.write32(f + E_POSITION + 4 * k, v);
+    }
+    cpu.write32(f + E_SCRIPT, PUFF_SCRIPT);
+    cpu.write16(f + E_COLOUR, PUFF_COLOUR);
+    let a = nested!(cpu, 0x0604_5d90, super::math::random(cpu, 0));
+    cpu.write16(f + E_ANGLE, a as u16);
+    cpu.write32(f + E_SPEED, 0);
+    cpu.write32(f + E_SCALES + 4, 0x1_0000);
+    cpu.write32(f + E_SCALES, 0x1_0000);
+    let e = nested!(cpu, 0x0605_7454, drift_effect(cpu, f));
+    if e != 0 {
+        let flip = nested!(cpu, 0x0604_5d90, super::math::random(cpu, 0)) & 0x30;
+        let flags = cpu.read32(e + FLAGS) | flip;
+        cpu.write32(e + FLAGS, flags);
+    }
+}
+
 /// The enemies' own fields (from +0x6c to the end of their 0xbc bytes) cleared.
 pub fn enemy_clear(cpu: &mut Cpu, enemy: u32) {
     // the SH-2 code keeps the first fields' offsets in its frame

@@ -1,5 +1,10 @@
 //! SGL (Sega's graphics library, linked into the game): its work area is addressed from GBR. The
 //! matrix stack: 20 matrices deep (48 bytes each, 3x4 16.16), its depth and the current one.
+//!
+//! SGL's code is assembly: what it leaves in r1-r7, MACH/MACL and T its callers' code carries on,
+//! and some of its other functions read before they set (a polygon put reads r3 as slPushMatrix
+//! left it). Each rewrite leaves them as SGL's code does ([`Cpu::leave`]); its pushes of its
+//! arguments are made as any rewrite's prologue is (cpu.stack() is below them).
 
 use super::Cpu;
 
@@ -14,15 +19,25 @@ pub fn sl_push_matrix(cpu: &mut Cpu) -> u32 {
     let w = cpu.gbr();
     let depth = cpu.read8(w + MATRIX_DEPTH) as i8;
     if depth >= MATRIX_MOST {
+        cpu.leave(&[(2, MATRIX_MOST as u32)]);
+        cpu.leave_t(true);
         return 0;
     }
     cpu.write8(w + MATRIX_DEPTH, depth.wrapping_add(1) as u8);
     let m = cpu.read32(w + MATRIX);
-    for k in (0..MATRIX_SIZE).step_by(4) {
-        let v = cpu.read32(m + k);
-        cpu.write32(m + MATRIX_SIZE + k, v);
+    let mut last = [0; 4];
+    for k in (0..MATRIX_SIZE).step_by(16) {
+        for (i, l) in last.iter_mut().enumerate() {
+            *l = cpu.read32(m + k + 4 * i as u32);
+        }
+        for (i, &v) in last.iter().enumerate() {
+            cpu.write32(m + MATRIX_SIZE + k + 4 * i as u32, v);
+        }
     }
     cpu.write32(w + MATRIX, m + MATRIX_SIZE);
+    let [r1, r2, r3, r4] = last;
+    cpu.leave(&[(1, r1), (2, r2), (3, r3), (4, r4), (5, m + 2 * MATRIX_SIZE), (7, 0)]);
+    cpu.leave_t(true);
     1
 }
 
@@ -30,6 +45,7 @@ pub fn sl_push_matrix(cpu: &mut Cpu) -> u32 {
 pub fn sl_pop_matrix(cpu: &mut Cpu) -> u32 {
     let w = cpu.gbr();
     let depth = cpu.read8(w + MATRIX_DEPTH) as i8;
+    cpu.leave_t(depth > 0);
     if depth <= 0 {
         return 0;
     }
@@ -40,38 +56,68 @@ pub fn sl_pop_matrix(cpu: &mut Cpu) -> u32 {
 }
 
 /// 16.16 products as SGL takes them: the 64-bit product's middle (MAC's, xtrct).
-fn mul_fx(a: u32, b: u32) -> u32 {
-    ((a as i32 as i64 * b as i32 as i64) >> 16) as u32
+fn product(a: u32, b: u32) -> i64 {
+    a as i32 as i64 * b as i32 as i64
 }
 
-/// The current matrix's row `r` (4 longs: three turned, then the place).
-fn row(cpu: &mut Cpu, r: u32) -> u32 {
-    let m = cpu.read32(cpu.gbr() + MATRIX);
-    m + 16 * r
+fn middle(sum: i64) -> u32 {
+    (sum >> 16) as u32
+}
+
+/// The current matrix (its address).
+fn matrix(cpu: &mut Cpu) -> u32 {
+    let w = cpu.gbr();
+    cpu.read32(w + MATRIX)
+}
+
+/// MAC.L's step: the product added to the 64-bit sum, held to 48 bits when SR's S is set.
+const SR_S: u32 = 2;
+
+fn mac(cpu: &Cpu, sum: i64, a: u32, b: u32) -> i64 {
+    let sum = sum.wrapping_add(product(a, b));
+    if cpu.sh2.sr & SR_S != 0 {
+        sum.clamp(-0x8000_0000_0000, 0x7fff_ffff_ffff)
+    } else {
+        sum
+    }
 }
 
 /// slTranslate: the current matrix moved by (x, y, z) as it turns them (each row's place gains
-/// the row's dot with them, summed in 64 bits).
+/// the row's dot with them: x's product, then y's and z's added as MAC.L adds).
 pub fn sl_translate(cpu: &mut Cpu, x: u32, y: u32, z: u32) {
+    // the prologue pushed z and y (cpu.stack() below them)
+    let sp = cpu.stack() + 8;
+    let m = matrix(cpu);
+    let (mut sum, mut old) = (0, [0; 3]);
     for r in 0..3 {
-        let at = row(cpu, r);
-        let sum = [x, y, z].into_iter().enumerate().fold(0i64, |s, (k, v)| {
-            s.wrapping_add(v as i32 as i64 * cpu.read32(at + 4 * k as u32) as i32 as i64)
-        });
-        let place = cpu.read32(at + 12).wrapping_add((sum >> 16) as u32);
-        cpu.write32(at + 12, place);
+        let row = m + 16 * r;
+        sum = product(x, cpu.read32(row));
+        for (k, v) in [(1, y), (2, z)] {
+            let e = cpu.read32(row + 4 * k);
+            sum = mac(cpu, sum, v, e);
+        }
+        old[r as usize] = cpu.read32(row + 12);
+        cpu.write32(row + 12, old[r as usize].wrapping_add(middle(sum)));
     }
+    let (m20, m23) = (cpu.read32(m + 32), cpu.read32(m + 44));
+    cpu.leave(&[(0, m + 44), (1, old[2]), (2, (sum >> 32) as u32), (3, m23), (5, sp), (6, m20), (7, old[1])]);
+    cpu.leave_mac(sum);
 }
 
 /// slScale: the current matrix's columns scaled by (x, y, z).
 pub fn sl_scale(cpu: &mut Cpu, x: u32, y: u32, z: u32) {
+    let m = matrix(cpu);
+    let (mut p, mut old) = (0, 0);
     for r in 0..3 {
-        let at = row(cpu, r);
         for (k, s) in [x, y, z].into_iter().enumerate() {
-            let v = mul_fx(s, cpu.read32(at + 4 * k as u32));
-            cpu.write32(at + 4 * k as u32, v);
+            let at = m + 16 * r + 4 * k as u32;
+            old = cpu.read32(at);
+            p = product(s, old);
+            cpu.write32(at, middle(p));
         }
     }
+    cpu.leave(&[(0, m), (2, (p >> 32) as u32), (3, middle(p)), (7, old)]);
+    cpu.leave_mac(p);
 }
 
 /// One up the stack, the matrix there left as it was (its depth tested unsigned). Whether there
@@ -79,9 +125,12 @@ pub fn sl_scale(cpu: &mut Cpu, x: u32, y: u32, z: u32) {
 pub fn sl_push_no_copy(cpu: &mut Cpu) -> u32 {
     let w = cpu.gbr();
     let depth = cpu.read8(w + MATRIX_DEPTH) as i8;
+    cpu.leave(&[(2, MATRIX_MOST as u32)]);
     if depth as i32 as u32 >= MATRIX_MOST as u32 {
+        cpu.leave_t(true);
         return 0;
     }
+    cpu.leave_t(false);
     cpu.write8(w + MATRIX_DEPTH, depth.wrapping_add(1) as u8);
     let m = cpu.read32(w + MATRIX);
     cpu.write32(w + MATRIX, m + MATRIX_SIZE);
@@ -93,6 +142,8 @@ pub fn sl_push_unit_matrix(cpu: &mut Cpu) -> u32 {
     let w = cpu.gbr();
     let depth = cpu.read8(w + MATRIX_DEPTH) as i8;
     if depth >= MATRIX_MOST {
+        cpu.leave(&[(2, MATRIX_MOST as u32)]);
+        cpu.leave_t(true);
         return 0;
     }
     cpu.write8(w + MATRIX_DEPTH, depth.wrapping_add(1) as u8);
@@ -103,29 +154,43 @@ pub fn sl_push_unit_matrix(cpu: &mut Cpu) -> u32 {
             cpu.write32(m + 16 * r + 4 * k, if r == k { 0x1_0000 } else { 0 });
         }
     }
+    cpu.leave(&[(1, 0x1_0000), (2, 0), (4, 0)]);
+    cpu.leave_t(true);
     1
 }
 
 /// slLoadMatrix: the current matrix from SGL's MATRIX at `src` (four columns of three).
 pub fn sl_load_matrix(cpu: &mut Cpu, src: u32) {
-    let m = cpu.read32(cpu.gbr() + MATRIX);
+    let m = matrix(cpu);
+    let mut last = [0; 3];
     for k in 0..4 {
-        for r in 0..3 {
-            let v = cpu.read32(src + 12 * k + 4 * r);
-            cpu.write32(m + 16 * r + 4 * k, v);
+        for (r, l) in last.iter_mut().enumerate() {
+            *l = cpu.read32(src + 12 * k + 4 * r as u32);
+        }
+        for (r, &v) in last.iter().enumerate() {
+            cpu.write32(m + 16 * r as u32 + 4 * k, v);
         }
     }
+    let [r1, r2, r3] = last;
+    cpu.leave(&[(0, m + 16), (1, r1), (2, r2), (3, r3), (4, src + 48), (7, 0)]);
+    cpu.leave_t(true);
 }
 
 /// slGetMatrix: the current matrix to SGL's MATRIX at `dst`.
 pub fn sl_get_matrix(cpu: &mut Cpu, dst: u32) {
-    let m = cpu.read32(cpu.gbr() + MATRIX);
+    let m = matrix(cpu);
+    let mut last = [0; 4];
     for r in 0..3 {
-        for k in 0..4 {
-            let v = cpu.read32(m + 16 * r + 4 * k);
-            cpu.write32(dst + 12 * k + 4 * r, v);
+        for (k, l) in last.iter_mut().enumerate() {
+            *l = cpu.read32(m + 16 * r + 4 * k as u32);
+        }
+        for (k, &v) in last.iter().enumerate() {
+            cpu.write32(dst + 12 * k as u32 + 4 * r, v);
         }
     }
+    let [r1, r2, r3, r5] = last;
+    cpu.leave(&[(0, m + MATRIX_SIZE), (1, r1), (2, r2), (3, r3), (4, dst + 12), (5, r5), (7, 0)]);
+    cpu.leave_t(true);
 }
 
 /// The slave's command buffer (where the next command goes; each command ends with the point the
@@ -160,11 +225,16 @@ pub fn sl_put_polygon(cpu: &mut Cpu, pd: u32) -> u32 {
     let counts = cpu.read32(w + COUNTS);
     let points_after = (counts & 0xffff).wrapping_add(points);
     if points_after > limits & 0xffff {
+        cpu.leave(&[(1, points), (2, limits & 0xffff), (3, limits), (5, points_after << 16)]);
+        cpu.leave_t(true);
         return 0;
     }
     let polygons = cpu.read32(pd + PD_POLYGON_COUNT);
     let polygons_after = (counts >> 16).wrapping_add(polygons);
+    let new_counts = (polygons_after << 16) | (points_after & 0xffff);
     if polygons_after > limits >> 16 {
+        cpu.leave(&[(1, points), (2, polygons), (3, limits >> 16), (5, new_counts)]);
+        cpu.leave_t(true);
         return 0;
     }
     let c = cpu.read32(w + COMMANDS);
@@ -181,14 +251,21 @@ pub fn sl_put_polygon(cpu: &mut Cpu, pd: u32) -> u32 {
     let at = cpu.read32(pd + PD_ATTRS) & !1;
     cpu.write32(c + 20, at);
     cpu.write32(c, POLYGON_COMMAND);
-    cpu.write32(w + COUNTS, (polygons_after << 16) | (points_after & 0xffff));
-    for k in (0..MATRIX_SIZE).step_by(4) {
-        let v = cpu.read32(m + k);
-        cpu.write32(c + 24 + k, v);
+    cpu.write32(w + COUNTS, new_counts);
+    let mut last = [0; 4];
+    for k in (0..MATRIX_SIZE).step_by(16) {
+        for (i, l) in last.iter_mut().enumerate() {
+            *l = cpu.read32(m + k + 4 * i as u32);
+        }
+        for (i, &v) in last.iter().enumerate() {
+            cpu.write32(c + 24 + k + 4 * i as u32, v);
+        }
     }
     let next = c + POLYGON_COMMAND_SIZE;
     cpu.write32(w + COMMANDS, next);
     cpu.write16(SLAVE_SIGNAL, next as u16);
+    cpu.leave(&[(1, SLAVE_SIGNAL), (2, last[2]), (3, last[3]), (4, pd), (5, new_counts), (6, m), (7, c + 24)]);
+    cpu.leave_t(false);
     1
 }
 
@@ -211,7 +288,8 @@ pub fn sl_atan(cpu: &mut Cpu, x: u32, y: u32) -> u32 {
         y = y.wrapping_neg();
         y_negative = true;
     }
-    if x < y {
+    let flat = x >= y;
+    if !flat {
         std::mem::swap(&mut x, &mut y);
         steep = true;
     }
@@ -221,16 +299,32 @@ pub fn sl_atan(cpu: &mut Cpu, x: u32, y: u32) -> u32 {
     cpu.write32(DVDNTL, small << 16);
     let q = cpu.read32(DVDNTL_AGAIN) & !1;
     let t = cpu.read16(ATAN_TABLE.wrapping_add(q)) as i16 as i32 as u32;
-    match (steep, y_negative, x_negative) {
+    let (mut r4, mut r5) = (0x4000u32, 0x8000u32);
+    let a = match (steep, y_negative, x_negative) {
         (false, false, false) => t,
-        (false, false, true) => 0x8000u32.wrapping_sub(t),
+        (false, false, true) => {
+            r5 = 0x8000u32.wrapping_sub(t);
+            r5
+        }
         (false, true, false) => t.wrapping_neg() & 0xffff,
         (false, true, true) => t.wrapping_add(0x8000),
-        (true, false, false) => 0x4000u32.wrapping_sub(t),
+        (true, false, false) => {
+            r4 = 0x4000u32.wrapping_sub(t);
+            r4
+        }
         (true, false, true) => t.wrapping_add(0x4000),
-        (true, true, false) => t.wrapping_add(0xc000),
-        (true, true, true) => 0xc000u32.wrapping_sub(t),
-    }
+        (true, true, false) => {
+            r5 = 0xc000;
+            t.wrapping_add(0xc000)
+        }
+        (true, true, true) => {
+            r5 = 0xc000u32.wrapping_sub(t);
+            r5
+        }
+    };
+    cpu.leave(&[(1, 0xffff_fffe), (2, ATAN_TABLE), (3, DVSR), (4, r4), (5, r5)]);
+    cpu.leave_t(flat);
+    a
 }
 
 /// slCurWindow: window `win` (0 or 1) made current unless it is: the slave told (command 56),
@@ -258,7 +352,9 @@ const WIN_RIGHT_TOP: u32 = 0x7c;
 
 pub fn sl_cur_window(cpu: &mut Cpu, win: u32) -> u32 {
     let w = cpu.gbr();
-    if cpu.read8(w + CUR_WINDOW) as i8 as i32 as u32 == win {
+    let current = cpu.read8(w + CUR_WINDOW) as i8 as i32 as u32 == win;
+    cpu.leave_t(current);
+    if current {
         return 1;
     }
     cpu.write8(w + CUR_WINDOW, (win & 1) as u8);
@@ -294,5 +390,40 @@ pub fn sl_cur_window(cpu: &mut Cpu, win: u32) -> u32 {
     cpu.write32(w + WIN_LEFT_TOP, lt);
     let rt = (b << 16) | (t >> 16);
     cpu.write32(w + WIN_RIGHT_TOP, rt);
+    cpu.leave(&[(1, a), (2, swap(right)), (3, b), (4, lt), (5, rt), (6, right)]);
     rt
+}
+
+/// slCalcPoint: the point (x, y, z) through the current matrix to `out` (x, y, z).
+pub fn sl_calc_point(cpu: &mut Cpu, x: u32, y: u32, z: u32, out: u32) {
+    // the prologue pushed z, y and x (cpu.stack() at x)
+    let sp = cpu.stack();
+    let m = matrix(cpu);
+    let (mut sum, mut v) = (0, 0);
+    for r in 0..3 {
+        let row = m + 16 * r;
+        sum = 0;
+        for (k, a) in [x, y, z].into_iter().enumerate() {
+            let e = cpu.read32(row + 4 * k as u32);
+            sum = mac(cpu, sum, a, e);
+        }
+        v = middle(sum).wrapping_add(cpu.read32(row + 12));
+        cpu.write32(out + 4 * r, v);
+    }
+    let m23 = cpu.read32(m + 44);
+    cpu.leave(&[(0, m + MATRIX_SIZE), (1, 0), (2, (sum >> 32) as u32), (3, v), (4, sp), (5, m23), (7, out + 12)]);
+    cpu.leave_mac(sum);
+    cpu.leave_t(true);
+}
+
+/// VDP2's background display bits (its BGON as SGL keeps it, a word): `bits`'s low half set, its
+/// high half cleared.
+const BG_ON: u32 = 0xe0;
+
+pub fn sl_bg_on(cpu: &mut Cpu, bits: u32) {
+    let w = cpu.gbr();
+    let not_off = !(bits >> 16);
+    let v = (cpu.read16(w + BG_ON) as i16 as i32 as u32 | bits) & not_off;
+    cpu.write16(w + BG_ON, v as u16);
+    cpu.leave(&[(0, v), (4, not_off)]);
 }

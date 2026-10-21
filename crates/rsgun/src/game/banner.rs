@@ -479,3 +479,9 @@ pub fn banner_step_17(cpu: &mut Cpu) {
         last(5, 0x0607_2ccc, Some(0x6_0000), 3),
     ]);
 }
+
+/// A timeline event: the banner put up (done at once).
+pub fn banner_start(cpu: &mut Cpu) -> u32 {
+    nested!(cpu, 0x0605_1598, banner_set(cpu));
+    1
+}

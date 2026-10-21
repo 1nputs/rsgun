@@ -100,6 +100,35 @@ pub fn follow_parent(cpu: &mut Cpu, obj: u32) -> u32 {
     parent
 }
 
+/// Makes a group's end (a plain actor linked in after `head`, the group's start): drawn by
+/// group_end (as a model, by its own draw), ending with the head; its number the head's. It, or 0.
+const GROUP_END_SIZE: u32 = 0x40;
+const GROUP_END_LIST: u32 = 2;
+const PLAIN_EXEC: u32 = 0x0604_dcb4;
+const OWN_MODEL: u32 = 0xc0_0000;
+const GROUP_END_DRAW: u32 = 0x0605_2f3c;
+const END_WITH_PARENT: u32 = 0x0605_2f54;
+const OWN_DRAW_AT: u32 = 0x34;
+const BEHAVIOUR: u32 = 0x38;
+const NUMBER: u32 = 0x32;
+
+pub fn group_end_set(cpu: &mut Cpu, head: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, GROUP_END_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_5694, super::objects::obj_set_after(cpu, GROUP_END_LIST, blocks, PLAIN_EXEC, head));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    let flags = cpu.read32(o + FLAGS) | OWN_MODEL;
+    cpu.write32(o + FLAGS, flags);
+    cpu.write32(o + OWN_DRAW_AT, GROUP_END_DRAW);
+    cpu.write32(o + BEHAVIOUR, END_WITH_PARENT);
+    let n = cpu.read8(head + NUMBER);
+    cpu.write8(o + NUMBER, n);
+    cpu.write32(o + BOXES, head);
+    o
+}
+
 /// An actor that ends with the object at +0x3c (once that is freed or ends).
 pub fn end_with_parent(cpu: &mut Cpu, obj: u32) {
     let parent = cpu.read32(obj + BOXES);
@@ -329,6 +358,19 @@ pub fn model_draw(cpu: &mut Cpu, s: u32) {
     // inline
     part_draw(cpu, s);
     cpu.call(SL_POP_MATRIX, &[]);
+}
+
+/// A pose's joints set to the angles at `angles` (words), none turning.
+pub fn pose_set(cpu: &mut Cpu, p: u32, angles: u32) {
+    let mut i = 0u8;
+    while (i as u16) < cpu.read16(p + P_COUNT) {
+        let a = cpu.read16(angles + 2 * i as u32);
+        let at = cpu.read32(p + P_ANGLES);
+        cpu.write16(at + 2 * i as u32, a);
+        let at = cpu.read32(p + P_TURNS);
+        cpu.write16(at + 2 * i as u32, 0);
+        i = i.wrapping_add(1);
+    }
 }
 
 /// A model's pose script (the struct at `p`): the joints' count (a word), their angles and turns
@@ -775,4 +817,88 @@ pub fn model31_draw(cpu: &mut Cpu, s: u32) {
     }
     cpu.call(SL_POP_MATRIX, &[]);
     cpu.call(SL_POP_MATRIX, &[]);
+}
+
+/// A pod set up (the actor `o`, pod `n` of kind 33's models, seven parts each): drawn by pod_draw;
+/// each part's polygon data copied in (its points, polygons, attributes), pointed at its normals'
+/// table, and given Gouraud tables from the next place in VDP1's VRAM (gouraud.rs's).
+const KIND_33: u32 = MODEL_KINDS + 33 * 16;
+const POD_PARTS: [(u32, u32, u32, u32); 7] = [
+    (0, POD_BODY + 0x90, 0x0607_61a0, 0x370),
+    (1, POD_BODY, 0x0607_68b0, 0x1e0),
+    (2, 0x9c, 0x0607_5d40, 0xf0),
+    (4, 0xb4, 0x0607_66d0, 0xf0),
+    (5, 0xcc, 0x0607_5eb0, 0xf8),
+    (3, 0xe4, 0x0607_6030, 0xf0),
+    (6, POD_STRUT, 0x0607_6850, 0x40),
+];
+const PD_LONGS: u32 = 5;
+const XP_NORMALS: u32 = 0x14;
+const GOURAUD_AT: u32 = 0x0607_5c20;
+const POD_DRAW: u32 = 0x0606_4a28;
+const POD_MODELS_EACH: u32 = 7;
+const LIFT_AT: u32 = 0x33;
+
+fn pod_model_pd(cpu: &mut Cpu, i: u32) -> u32 {
+    let table = cpu.read32(KIND_33);
+    let models = cpu.read32(table + KIND_MODELS);
+    let at = cpu.read32(models + 4 * i);
+    cpu.read32(at)
+}
+
+pub fn pod_init(cpu: &mut Cpu, o: u32, n: u32) {
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    let flags = cpu.read32(o + FLAGS) | OWN_MODEL;
+    cpu.write32(o + FLAGS, flags);
+    cpu.write32(o + OWN_DRAW_AT, POD_DRAW);
+    cpu.write8(o + LIFT_AT, 0);
+    cpu.write8(o + NUMBER, 0);
+    for (part, at, normals, room) in POD_PARTS {
+        let pd = pod_model_pd(cpu, n.wrapping_mul(POD_MODELS_EACH).wrapping_add(part));
+        for k in 0..PD_LONGS {
+            let v = cpu.read32(pd + 4 * k);
+            cpu.write32(o + at + 4 * k, v);
+        }
+        cpu.write32(o + at + XP_NORMALS, normals);
+        let table = cpu.read32(GOURAUD_AT);
+        nested!(cpu, 0x0606_35e8, super::gouraud::gouraud_tables(cpu, o + at, table));
+        let next = cpu.read32(GOURAUD_AT).wrapping_add(room);
+        cpu.write32(GOURAUD_AT, next);
+    }
+}
+
+/// Makes pod `n` (list 3) with behaviour `exec`. It, or 0.
+const POD_SIZE: u32 = 300;
+const POD_LIST: u32 = 3;
+const POD_STEP: u32 = 0x3c;
+
+pub fn pod_set(cpu: &mut Cpu, exec: u32, n: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, POD_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, POD_LIST, blocks, PLAIN_EXEC));
+    if o != 0 {
+        nested!(cpu, 0x0606_4a7c, pod_init(cpu, o, n));
+        cpu.write32(o + BEHAVIOUR, exec);
+        cpu.write8(o + POD_SPRITE_COLOUR, n as u8);
+        cpu.write8(o + POD_STEP, 0);
+    }
+    o
+}
+
+/// The first pod's parts' normals' tables made from their polygons (the second part's twice).
+const POD_NORMALS: [(u32, u32); 8] = [
+    (1, 0x0607_68b0),
+    (2, 0x0607_5d40),
+    (4, 0x0607_66d0),
+    (5, 0x0607_5eb0),
+    (3, 0x0607_6030),
+    (6, 0x0607_6850),
+    (1, 0x0607_68b0),
+    (0, 0x0607_61a0),
+];
+
+pub fn pod_normals(cpu: &mut Cpu) {
+    for (part, out) in POD_NORMALS {
+        let pd = pod_model_pd(cpu, part);
+        nested!(cpu, 0x0606_34e0, super::gouraud::point_normals(cpu, pd, out));
+    }
 }

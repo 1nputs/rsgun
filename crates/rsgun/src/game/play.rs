@@ -88,6 +88,6 @@ pub fn game_start(cpu: &mut Cpu) {
     nested!(cpu, PLAYER_RESET, player_reset(cpu, 1));
     cpu.write8(PLAY_DATA + PLAY_DATA_SIZE + CONTINUES, 0xff);
     cpu.write8(PLAY_DATA + CONTINUES, 0xff);
-    cpu.call(PLAY_SCREEN_SET, &[]);
+    nested!(cpu, PLAY_SCREEN_SET, super::screen::play_screen_set(cpu));
     nested!(cpu, HITS_RESET, hits::hits_reset(cpu));
 }

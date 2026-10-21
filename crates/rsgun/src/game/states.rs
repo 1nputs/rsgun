@@ -1153,3 +1153,23 @@ fn first_stage_end(cpu: &mut Cpu, game: u32) {
         cpu.write8(play_data + super::globals::CONTINUES, 0);
     }
 }
+
+/// A stage's data block (its overlay's, at `p`): the block, and its three parts (offsets in its
+/// first three longs) made addresses.
+const STAGE_DATA: u32 = 0x0607_4800;
+const STAGE_PARTS: [u32; 3] = [0x0607_47fc, 0x0607_47f8, 0x0607_47d0];
+
+pub fn stage_data_set(cpu: &mut Cpu, p: u32) {
+    cpu.write32(STAGE_DATA, p);
+    for (k, at) in STAGE_PARTS.into_iter().enumerate() {
+        let v = cpu.read32(p + 4 * k as u32).wrapping_add(p);
+        cpu.write32(at, v);
+    }
+}
+
+/// The long at index `i` of a table the stages' code reads (not known yet).
+const STAGE_TABLE: u32 = 0x0607_358c;
+
+pub fn stage_table(cpu: &mut Cpu, i: u32) -> u32 {
+    cpu.read32(STAGE_TABLE.wrapping_add(i << 2))
+}

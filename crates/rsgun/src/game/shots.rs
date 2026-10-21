@@ -3,7 +3,7 @@
 //! itself alive in its ship each frame (the ship's limits), ended off screen or where they hit
 //! something or the ground (with a spark).
 
-use super::{actors, bg, effects, math, nested, objects, sprites, Cpu};
+use super::{actors, bg, camera, effects, math, nested, objects, sound, sprites, Cpu};
 
 /// The objects' mode byte (ending).
 const OBJ_MODE: u32 = 3;
@@ -3106,4 +3106,372 @@ fn hyper_piece_start(cpu: &mut Cpu, o: u32) {
     let left = random(cpu, 20).wrapping_add(60);
     cpu.write16(o + PIECE_LEFT, left as u16);
     cpu.write16(o + PHASE, 1);
+}
+
+/// The hyper sword: it grows to four times (a quarter of the way a frame), swings back a little
+/// and then round as its spin builds, turning toward where the ship faces until it points straight
+/// down (its sound, unless the ship is flipped), then throws pieces (and, flipped, a spark every
+/// third frame) as it drops away from the ship, ending once it has dropped 38 of its sizes. Its
+/// afterimages as the sword's; the drop (HYPER_DROP) and its swing as the sword's fields.
+const HYPER_DROP: u32 = 0x78;
+const HYPER_POINTS: [u16; 2] = [0x5000, 0xb000];
+const HYPER_START: u32 = 0x8000;
+const HYPER_GROW_TO: i32 = 0x4_1000;
+const HYPER_GROWN: i32 = 0x3_ffff;
+const HYPER_SIZE: u32 = 0x4_0000;
+const HYPER_BACK: u32 = 0xffff_ff00;
+const HYPER_ROUND: u32 = 0x800;
+const HYPER_SWING_STEP: u32 = 32;
+const HYPER_UNIT: u32 = 0x0600_0000;
+const HYPER_SWEEP: u32 = 0x80;
+const HYPER_SWEEP_HITS: i32 = 0xfff;
+const HYPER_IMAGES_FROM: i8 = 7;
+const SE_HYPER: u32 = 11;
+const FLIPPED_X: u32 = 0x10;
+const SHOT_PHASE_HIGH: u32 = PHASE;
+/// The pieces it throws (list 1, the shots' size), their power (400 and 40/3 a weapon level, all
+/// three weapons'), their speed (2 to 3 pixels a frame, out and down); the sparks.
+const HYPER_PIECE_EXEC: u32 = 0x0604_caa8;
+const PIECE_SHIP: u32 = 0xb0;
+const PIECE_SPEED: u32 = 0x5c;
+const PIECE_POWER_BASE: i32 = 400;
+const PIECE_POWER_LEVEL: i32 = 40;
+const HYPER_SPARK_LINK: u32 = 0x0607_2bbc;
+const HYPER_SPARK_COLOURS: u16 = 0x90;
+const HYPER_DROP_STEP: u32 = 0xfff8_0000;
+const HYPER_DROP_MOST: i32 = -38;
+
+fn hyper_turn_point(cpu: &mut Cpu, f: u32) {
+    cpu.call(SL_TURN, &[f]);
+}
+
+pub fn hyper_exec(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let ship = cpu.read32(o + SWORD_SHIP);
+    if cpu.read8(ship + OBJ_MODE) as i8 >= ENDING as i8 {
+        cpu.write32(o + SWORD_SHIP, 0);
+    }
+    if cpu.read32(o + SWORD_SHIP) != 0 {
+        for field in [ALIVE_SWORD, ALIVE_ALL] {
+            let p = cpu.read32(o + SWORD_SHIP);
+            let n = cpu.read8(p + field).wrapping_add(1);
+            cpu.write8(p + field, n);
+        }
+    }
+    cpu.write32(f, 0);
+    let flipped = |cpu: &mut Cpu| cpu.read32(o + FLAGS) & FLIPPED_X != 0;
+    match cpu.read8(o + PHASE_LOW) {
+        0 => {
+            for (field, v) in [(SWORD_LAST, 0xffu8), (SWORD_KEPT, 0), (SWORD_MOST, 16), (SWORD_FADE_FROM, 0), (SWORD_FADED, 0)] {
+                cpu.write8(o + field, v);
+            }
+            cpu.write16(o + SWORD_HALF_WIDTH, 0);
+            cpu.write16(o + SWORD_LENGTH, 0xffda);
+            cpu.write32(o + SWORD_UNIT, HYPER_UNIT);
+            let flags = cpu.read32(o + FLAGS) | OWN_MODEL;
+            cpu.write32(o + FLAGS, flags);
+            cpu.write32(o + BEAM_DRAW, SWORD_DRAW);
+            cpu.write16(o + SWORD_FRAMES, 0);
+            cpu.write32(o + SWORD_SWEPT, 0);
+            let a = HYPER_POINTS[flipped(cpu) as usize];
+            cpu.write16(o + ANGLE, a);
+            cpu.write16(o + SWORD_POINTS, a);
+            cpu.write16(o + SWORD_SWING, 0);
+            cpu.write32(o + SCALES, HYPER_START);
+            cpu.write16(o + PHASE, 1);
+        }
+        1 => {
+            let s = cpu.read32(o + SCALES) as i32;
+            let s = s.wrapping_add(HYPER_GROW_TO.wrapping_sub(s) / 4);
+            cpu.write32(o + SCALES, s as u32);
+            if s > HYPER_GROWN {
+                cpu.write32(o + SCALES, HYPER_SIZE);
+                cpu.write16(o + PHASE, 2);
+            }
+        }
+        2 | 3 => {
+            let swing = cpu.read16(o + SWORD_SWING) as i16 as i32 as u32;
+            if cpu.read8(o + PHASE_LOW) == 2 {
+                let s = nested!(cpu, 0x0604_6168, actors::approach(cpu, swing, HYPER_BACK, HYPER_SWING_STEP));
+                cpu.write16(o + SWORD_SWING, s as u16);
+                if s as i16 as i32 == HYPER_BACK as i32 {
+                    cpu.write16(o + PHASE, 3);
+                }
+            } else {
+                let s = nested!(cpu, 0x0604_6168, actors::approach(cpu, swing, HYPER_ROUND, HYPER_SWING_STEP));
+                cpu.write16(o + SWORD_SWING, s as u16);
+            }
+            let swing = cpu.read16(o + SWORD_SWING) as i16 as i32;
+            let turn = if swing > 0 {
+                let a = cpu.read16(o + SWORD_POINTS) as i16 as i32 as u32;
+                let d = if flipped(cpu) {
+                    nested!(cpu, 0x0604_61f0, camera::angle_behind(cpu, a, 0))
+                } else {
+                    nested!(cpu, 0x0604_61cc, camera::angle_ahead(cpu, a, 0))
+                };
+                nested!(cpu, 0x0606_4f3c, math::clamp(cpu, d, swing as u32))
+            } else if flipped(cpu) {
+                swing.wrapping_neg() as u32
+            } else {
+                swing as u32
+            };
+            cpu.write32(f, turn);
+            let a = cpu.read16(o + SWORD_POINTS).wrapping_add(cpu.read16(f + 2));
+            cpu.write16(o + SWORD_POINTS, a);
+            if a == 0 {
+                if !flipped(cpu) {
+                    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, SE_HYPER));
+                }
+                cpu.write32(o + HYPER_DROP, 0);
+                cpu.write16(o + SWORD_FRAMES, 0);
+                cpu.write16(o + PHASE, 4);
+            }
+        }
+        4 => hyper_throw(cpu, o, f),
+        _ => {}
+    }
+    hyper_tail(cpu, o, f, ship);
+}
+
+/// The hyper sword's throw (phase 4): a spark (flipped, every third frame), a piece, the drop.
+fn hyper_throw(cpu: &mut Cpu, o: u32, f: u32) {
+    let frames = cpu.read8(o + SHOT_PHASE_HIGH).wrapping_add(1);
+    cpu.write8(o + SHOT_PHASE_HIGH, frames);
+    if cpu.read32(o + FLAGS) & FLIPPED_X != 0 {
+        let n = cpu.read16(o + SWORD_FRAMES) as i16 as i32 as u32;
+        let r = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, n, 3));
+        if r == 0 {
+            hyper_spark(cpu, o, f, r);
+        }
+    }
+    cpu.write32(f + 0x10, 0x1_0000);
+    cpu.write32(f + 0x0c, 0x1_0000);
+    let flip = cpu.read32(o + FLAGS) & FLIP;
+    cpu.write32(f + 0x14, flip);
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, SHOT_SIZE)) as i8 as i32 as u32;
+    let p = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 1, blocks, ACTOR_EXEC));
+    if p != 0 {
+        nested!(cpu, 0x0604_62ac, actors::actor_setup(cpu, p));
+        cpu.write32(p + BEHAVIOUR, HYPER_PIECE_EXEC);
+        let x = cpu.read32(o + POSITION);
+        cpu.write32(p + POSITION, x);
+        let y = cpu.read32(o + POSITION + 4).wrapping_add(cpu.read32(o + HYPER_DROP));
+        cpu.write32(p + POSITION + 4, y);
+        let z = cpu.read32(o + POSITION + 8);
+        cpu.write32(p + POSITION + 8, z);
+        let n = cpu.read8(o + NUMBER);
+        cpu.write8(p + NUMBER, n);
+        let levels = LEVELS.wrapping_add((cpu.read8(o + NUMBER) as i8 as i32 * 3) as u32);
+        let sum: i32 = (0..3).map(|k| cpu.read8(levels + k) as i8 as i32).sum();
+        let power = (sum * PIECE_POWER_LEVEL / 3 + PIECE_POWER_BASE) as u16;
+        cpu.write16(p + POWER, power);
+        cpu.write8(p + KIND, 0);
+        cpu.write8(p + FRAME, 0);
+        let r = random(cpu, 0) & PIECE_POLYGON;
+        let flags = cpu.read32(p + FLAGS) | r;
+        cpu.write32(p + FLAGS, flags);
+        let ship = cpu.read32(o + SWORD_SHIP);
+        cpu.write32(p + PIECE_SHIP, ship);
+        cpu.write32(f, 0);
+        let v = random(cpu, 0x2_0000).wrapping_add(0xfffd_0000);
+        cpu.write32(f + 4, v);
+        let a = if cpu.read32(o + FLAGS) & FLIPPED_X == 0 {
+            random(cpu, 0x800).wrapping_add(0x3000)
+        } else {
+            random(cpu, 0x800).wrapping_add(0xffff_d000)
+        };
+        cpu.write16(f + 0x18, a as u16);
+        hyper_turn_point(cpu, f);
+        for k in 0..2 {
+            let v = cpu.read32(f + 4 * k);
+            cpu.write32(p + PIECE_SPEED + 4 * k, v);
+        }
+    }
+    cpu.write32(f, 0);
+    let n = cpu.read16(o + SWORD_FRAMES).wrapping_add(1);
+    cpu.write16(o + SWORD_FRAMES, n);
+    let r = random(cpu, 0x4_0000);
+    let drop = cpu.read32(o + HYPER_DROP).wrapping_add(HYPER_DROP_STEP).wrapping_sub(r);
+    cpu.write32(o + HYPER_DROP, drop);
+    let most = cpu.read32(o + SCALES + 4).wrapping_mul(HYPER_DROP_MOST as u32);
+    if drop as i32 <= most as i32 {
+        hit_set(cpu, o, 0);
+        end(cpu, o);
+    }
+}
+
+/// A spark where the pieces leave (effects.rs's effect: kind 0, frame 0 from 3/4 size and up to
+/// a 4th more, linked to its table), flung up to a pixel a frame up or down.
+fn hyper_spark(cpu: &mut Cpu, o: u32, f: u32, zero: u32) {
+    let x = cpu.read32(o + POSITION);
+    cpu.write32(f, x);
+    let y = cpu.read32(o + POSITION + 4).wrapping_add(cpu.read32(o + HYPER_DROP));
+    cpu.write32(f + 4, y);
+    let z = cpu.read32(o + POSITION + 8);
+    cpu.write32(f + 8, z);
+    let s = random(cpu, 0x4000).wrapping_add(0xc000);
+    cpu.write32(f + 0x10, s);
+    cpu.write32(f + 0x0c, s);
+    cpu.write32(f + 0x14, 11);
+    let a = random(cpu, 0);
+    cpu.write16(f + 0x18, a as u16);
+    cpu.write16(f + 0x24, 0);
+    for field in [0x26, 0x1c, 0x1d] {
+        cpu.write8(f + field, 0);
+    }
+    let colour = cpu.read16(KIND_COLOURS).wrapping_add(HYPER_SPARK_COLOURS);
+    cpu.write16(f + 0x20, colour);
+    let n = cpu.read8(o + NUMBER);
+    cpu.write8(f + 0x1e, n);
+    cpu.write32(f + 0x28, HYPER_SPARK_LINK);
+    cpu.write32(f + 0x3c, zero);
+    let e = nested!(cpu, 0x0604_e1cc, effects::effect_set(cpu, f));
+    if e == 0 {
+        return;
+    }
+    cpu.write32(f, 0);
+    let v = random(cpu, 0x1_0000).wrapping_sub(0x1_0000);
+    cpu.write32(f + 4, v);
+    let a = if random(cpu, 0) & 0x10 == 0 {
+        random(cpu, 0x1000).wrapping_add(0x4000)
+    } else {
+        random(cpu, 0x1000).wrapping_add(0xffff_c000)
+    };
+    cpu.write16(f + 0x18, a as u16);
+    hyper_turn_point(cpu, f);
+    for k in 0..2 {
+        let v = cpu.read32(f + 4 * k);
+        cpu.write32(e + 0x44 + 4 * k, v);
+    }
+}
+
+/// The hyper sword's every frame: its depth scale its size, its sweep (as the sword's, by 0x80 and
+/// the turn a frame, all hit again past 0xfff), its angle, its place out from the ship, its spin,
+/// and its afterimages (kept from its turning on while it has thrown for 7 frames or fewer).
+fn hyper_tail(cpu: &mut Cpu, o: u32, f: u32, ship: u32) {
+    let s = cpu.read32(o + SCALES);
+    cpu.write32(o + SCALES + 8, s);
+    cpu.write32(o + SCALES + 4, s);
+    let turn = cpu.read32(f) as i32;
+    if cpu.read32(o + HIT_SET) != u32::MAX || cpu.read32(o + HIT_SET + 4) != u32::MAX {
+        let n = cpu.read32(o + SWORD_SWEPT).wrapping_add(HYPER_SWEEP).wrapping_add(turn.wrapping_abs() as u32);
+        cpu.write32(o + SWORD_SWEPT, n);
+    }
+    if cpu.read32(o + SWORD_SWEPT) as i32 > HYPER_SWEEP_HITS {
+        hit_set(cpu, o, u32::MAX);
+        cpu.write32(o + SWORD_SWEPT, 0);
+    }
+    let turn = cpu.read32(f) as i32;
+    if turn.wrapping_abs() > FAST_TURN {
+        let lead = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, turn as u32, SWORD_LEAD));
+        let a = cpu.read16(o + SWORD_POINTS).wrapping_sub(lead as u16);
+        cpu.write16(o + ANGLE, a);
+    } else {
+        let (from, to) = (cpu.read16(o + ANGLE) as i16 as i32 as u32, cpu.read16(o + SWORD_POINTS) as i16 as i32 as u32);
+        let d = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, from, to)) as i32;
+        let a = cpu.read16(o + ANGLE).wrapping_add((d / 4) as u16);
+        cpu.write16(o + ANGLE, a);
+    }
+    cpu.write32(f, 0);
+    cpu.write32(f + 4, SWORD_REACH);
+    for k in 0..2 {
+        let v = cpu.read32(ship + SCALES + 4 * k);
+        cpu.write32(f + 0x0c + 4 * k, v);
+    }
+    let flip = cpu.read32(o + FLAGS) & FLIP;
+    cpu.write32(f + 0x14, flip);
+    let a = cpu.read16(o + SWORD_POINTS);
+    cpu.write16(f + 0x18, a);
+    hyper_turn_point(cpu, f);
+    for k in 0..2 {
+        let p = cpu.read32(ship + POSITION + 4 * k).wrapping_add(cpu.read32(f + 4 * k));
+        cpu.write32(o + POSITION + 4 * k, p);
+    }
+    let z = cpu.read32(ship + POSITION + 8);
+    cpu.write32(o + POSITION + 8, z);
+    let spin = cpu.read16(o + SPIN).wrapping_add(SWORD_SPIN);
+    cpu.write16(o + SPIN, spin);
+    if cpu.read8(o + PHASE_LOW) as i8 > 1 && cpu.read8(o + SHOT_PHASE_HIGH) as i8 <= HYPER_IMAGES_FROM {
+        let last = cpu.read8(o + SWORD_LAST).wrapping_add(1);
+        cpu.write8(o + SWORD_LAST, last);
+        let last = (cpu.read8(o + SWORD_LAST) as i8 as i32 % SWORD_IMAGE_COUNT) as u8;
+        cpu.write8(o + SWORD_LAST, last);
+        let image = |cpu: &mut Cpu| o.wrapping_add((cpu.read8(o + SWORD_LAST) as i8 as i32 * 8) as u32) + SWORD_IMAGES;
+        let x = pixels(cpu.read32(o + POSITION));
+        let at = image(cpu);
+        cpu.write16(at + 4, x);
+        let y = pixels(cpu.read32(o + POSITION + 4));
+        let at = image(cpu);
+        cpu.write16(at + 6, y);
+        let a = cpu.read16(o + ANGLE);
+        let at = image(cpu);
+        cpu.write16(at + 2, a);
+        for k in 0..2 {
+            let (scale, unit) = (cpu.read32(o + SCALES + 4 * k), cpu.read32(o + SWORD_UNIT));
+            let v = nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, scale, unit));
+            let at = image(cpu);
+            cpu.write8(at + k, v as u8);
+        }
+        let (kept, most) = (cpu.read8(o + SWORD_KEPT) as i8 as i32 + 1, cpu.read8(o + SWORD_MOST) as i8 as i32 as u32);
+        let kept = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, kept as u32, most));
+        cpu.write8(o + SWORD_KEPT, kept as u8);
+        cpu.write8(o + SWORD_FADED, 0);
+    } else {
+        let kept = cpu.read8(o + SWORD_KEPT);
+        if kept as i8 > 0 {
+            cpu.write8(o + SWORD_KEPT, kept - 1);
+        }
+        let faded = cpu.read8(o + SWORD_FADED);
+        if (faded as i8) < cpu.read8(o + SWORD_MOST) as i8 {
+            cpu.write8(o + SWORD_FADED, faded.wrapping_add(1));
+        }
+    }
+}
+
+/// The hyper sword's maker: two swords at ship `p` (the second flipped), of the hyper sword's type
+/// and power. The second, or 0 (the first freed if the second cannot be made).
+const HYPER_SIZE_BYTES: u32 = 0x184;
+const HYPER_EXEC: u32 = 0x0604_cd28;
+const HYPER_BOXES: u32 = 0x0607_2884;
+
+fn hyper_one(cpu: &mut Cpu, p: u32, flags: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, HYPER_SIZE_BYTES)) as i8 as i32 as u32;
+    let s = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 1, blocks, ACTOR_EXEC));
+    if s == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_62ac, actors::actor_setup(cpu, s));
+    cpu.write32(s + BEHAVIOUR, HYPER_EXEC);
+    let f = cpu.read32(s + FLAGS) | flags;
+    cpu.write32(s + FLAGS, f);
+    cpu.write32(s + SWORD_MODEL_AT, SWORD_MODEL);
+    let model = cpu.read32(SWORD_MODEL);
+    cpu.write32(s + BEAM_DRAW, model);
+    for k in 0..3 {
+        let v = cpu.read32(p + POSITION + 4 * k);
+        cpu.write32(s + POSITION + 4 * k, v);
+    }
+    cpu.write8(s + LIFT, 0);
+    let n = cpu.read8(p + NUMBER);
+    cpu.write8(s + NUMBER, n);
+    cpu.write8(s + SIDE, 0);
+    cpu.write8(s + TYPE, HYPER_TYPE);
+    let levels = LEVELS.wrapping_add((cpu.read8(p + NUMBER) as i8 as i32 * 3) as u32);
+    let sum = (0..3).map(|k| cpu.read8(levels + k) as i8 as i32).sum::<i32>();
+    cpu.write16(s + POWER, (sum * PIECE_POWER_LEVEL / 3 + PIECE_POWER_BASE) as u16);
+    cpu.write32(s + BOXES, HYPER_BOXES);
+    cpu.write32(s + SWORD_SHIP, p);
+    s
+}
+
+pub fn hyper_set(cpu: &mut Cpu, p: u32) -> u32 {
+    let first = hyper_one(cpu, p, IS_MODEL);
+    if first == 0 {
+        return 0;
+    }
+    let second = hyper_one(cpu, p, IS_MODEL | FLIPPED_X);
+    if second == 0 {
+        nested!(cpu, 0x0600_579c, objects::obj_free(cpu, first));
+    }
+    second
 }
