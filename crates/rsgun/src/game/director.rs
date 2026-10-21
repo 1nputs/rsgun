@@ -164,7 +164,7 @@ fn run(cpu: &mut Cpu, game: u32) {
     // end; the history held, the mode byte's address): the state's prologue pushes them (read
     // later as an unset field)
     let r9 = if moved { game } else { game + 3 };
-    cpu.holding(8, game, |cpu| cpu.holding(9, r9, |cpu| cpu.call(f, &[game])));
+    cpu.holding(&[(8, game), (9, r9)], |cpu| cpu.call(f, &[game]));
     // paused, a debug step
     let debug = cpu.read32(DEBUG_FLAGS);
     if debug & 8 != 0 && debug & 4 == 0 {

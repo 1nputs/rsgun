@@ -86,7 +86,7 @@ fn send_setting(cpu: &mut Cpu, len: u32, at: u32) {
 /// The command built at COMMAND, sent to a sequence slot (waiting for one). The SH-2 code calls
 /// send through r8, which send's prologue pushes (read later as an unset field, by 0x06063620).
 fn send_sequence(cpu: &mut Cpu, len: u32, at: u32) {
-    cpu.holding(8, SEND, |cpu| {
+    cpu.holding(&[(8, SEND)], |cpu| {
         while nested!(cpu, SEND, send(cpu, COMMAND, len)) == 0 {
             cpu.wait(at, WAIT_PASS);
         }
@@ -392,16 +392,19 @@ pub fn se_set(cpu: &mut Cpu, se: u32) -> u32 {
     if cpu.read16(m + STARTED) as i16 >= STARTED_MAX {
         return -4i32 as u32;
     }
-    // (with no table, se_control's -3 goes on as a control, as the SH-2 code had it)
-    let control = nested!(cpu, 0x0600_4f3c, se_control(cpu, n as u32)) as u8;
+    // (with no table, se_control's -3 goes on as a control, as the SH-2 code had it; the SH-2
+    // code holds the effect in r8, for start_seq the entry, the control, the entry's offset and
+    // the table in r8-r11: the callees' prologues push them, read later as unset fields)
+    let control = cpu.holding(&[(8, n as u32)], |cpu| nested!(cpu, 0x0600_4f3c, se_control(cpu, n as u32))) as u8;
     if control == 0 {
         return 0;
     }
-    let (_, entry) = se_place(cpu, n as u32);
+    let (table, entry) = se_place(cpu, n as u32);
     // the entry's sequence: the song in its high byte, the driver's priority in its low
     let sequence = cpu.read16(entry) as i16 as i32;
     let (song, driver_priority) = (sequence / 256, cpu.read8(entry + 1));
-    nested!(cpu, 0x0600_4b88, start_seq(cpu, control as i8 as i32 as u32, song as i8 as i32 as u32, driver_priority as u32));
+    let regs = [(8, entry), (9, control as u32), (10, entry.wrapping_sub(table)), (11, table)];
+    cpu.holding(&regs, |cpu| nested!(cpu, 0x0600_4b88, start_seq(cpu, control as i8 as i32 as u32, song as i8 as i32 as u32, driver_priority as u32)));
     let m = manager(cpu);
     let c = control as u32;
     let song = cpu.read16(entry);

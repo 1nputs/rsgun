@@ -182,8 +182,13 @@ const SL_SCALE: u32 = 0x0606_73ec;
 const SL_PUT_POLYGON: u32 = 0x0606_745c;
 const SL_POP_MATRIX: u32 = 0x0606_7200;
 
-/// Draws the model at `s`.
+/// Draws the model at `s`. (The SH-2 code holds `s` in r8 throughout: its own draw's prologue
+/// pushes it, read later as an unset field.)
 pub fn draw_model(cpu: &mut Cpu, s: u32) {
+    cpu.holding(&[(8, s)], |cpu| model(cpu, s));
+}
+
+fn model(cpu: &mut Cpu, s: u32) {
     if cpu.read32(s + FLAGS) & OWN_DRAW != 0 {
         let draw = cpu.read32(s + MODEL);
         cpu.call(draw, &[s]);

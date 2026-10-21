@@ -107,15 +107,35 @@ impl Cpu<'_> {
         self.sh2.r[15]
     }
 
-    /// Runs `f` with register `n` (r8-r13) holding `value`, as the SH-2 code holds it there
-    /// across a call: the callee's prologue pushes it, and the game reads the stack it leaves
+    /// Runs `f` with registers (r8-r13) holding values (`(n, value)`), as the SH-2 code holds them
+    /// across a call: the callees' prologues push them, and the game reads the stack they leave
     /// (a struct field never set). Used where such a read was seen.
-    pub fn holding<R>(&mut self, n: usize, value: u32, f: impl FnOnce(&mut Cpu) -> R) -> R {
-        let kept = self.sh2.r[n];
-        self.sh2.r[n] = value;
+    pub fn holding<R>(&mut self, regs: &[(usize, u32)], f: impl FnOnce(&mut Cpu) -> R) -> R {
+        let kept = self.sh2.r;
+        for &(n, value) in regs {
+            self.sh2.r[n] = value;
+        }
         let r = f(self);
-        self.sh2.r[n] = kept;
+        for &(n, _) in regs {
+            self.sh2.r[n] = kept[n];
+        }
         r
+    }
+
+    /// Pushes `values` (the first at the new stack pointer), as the SH-2 code pushes a call's
+    /// arguments past the fourth where it leaves them until a later [`Cpu::pop`] (or its return):
+    /// the next call's go below them.
+    pub fn push(&mut self, values: &[u32]) {
+        let top = self.sh2.r[15].wrapping_sub(4 * values.len() as u32);
+        for (i, &v) in values.iter().enumerate() {
+            self.bus.write32(top.wrapping_add(4 * i as u32), v);
+        }
+        self.sh2.r[15] = top;
+    }
+
+    /// Takes `bytes` of pushed arguments off the stack.
+    pub fn pop(&mut self, bytes: u32) {
+        self.sh2.r[15] = self.sh2.r[15].wrapping_add(bytes);
     }
 
     /// `nested` for a callee that takes arguments past the fourth: `stack_args` pushed first (the
