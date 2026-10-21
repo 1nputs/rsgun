@@ -305,6 +305,11 @@ pub fn turn_toward(cpu: &mut Cpu, angle: u32, speed: u32, from: u32, to: u32, mo
     let most = most & 0xffff;
     let ease = ease as i16 as i32;
     let accel = accel as i16 as i32;
+    // its frame as the SH-2 code fills it (a caller's struct later reads one of these slots)
+    let f = cpu.stack();
+    for (at, v) in [(0, angle), (12, accel as u32), (4, ease as u32), (8, accel as u32)] {
+        cpu.write32(f + at, v);
+    }
     let d = nested!(cpu, ANGLE_BETWEEN, angle_between(cpu, from, to)) as i16 as i32;
     let left = (d.unsigned_abs() & 0xffff).min(most);
     let sign = nested!(cpu, TURN_SIGN, turn_sign(cpu, to, from)) as i32;

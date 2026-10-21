@@ -80,7 +80,13 @@ fn start(cpu: &mut Cpu, actor: u32) -> bool {
 
 /// An actor's frame (its exec): while the game is not held, its behaviour (unless it ends by the
 /// flags), the flash, its boxes registered; then its colour or model for the flash, and drawn.
+/// (The execs' SH-2 code keeps the actor in r8, which their callees push: the game reads such
+/// slots later as fields it never set, so the three execs hold it.)
 pub fn actor_exec(cpu: &mut Cpu, actor: u32) {
+    cpu.holding(&[(8, actor)], |cpu| actor_exec_held(cpu, actor));
+}
+
+fn actor_exec_held(cpu: &mut Cpu, actor: u32) {
     match cpu.read8(actor + OBJ_MODE) {
         1 => {}
         0 if start(cpu, actor) => {}
@@ -100,6 +106,10 @@ pub fn actor_exec(cpu: &mut Cpu, actor: u32) {
 /// A numbered actor's frame (one with a number among the numbered objects): as actor_exec's, but
 /// ending it frees its number (or, ending by ENDING_KEEP, keeps it).
 pub fn numbered_exec(cpu: &mut Cpu, actor: u32) {
+    cpu.holding(&[(8, actor)], |cpu| numbered_exec_held(cpu, actor));
+}
+
+fn numbered_exec_held(cpu: &mut Cpu, actor: u32) {
     match cpu.read8(actor + OBJ_MODE) {
         1 => {}
         0 if start(cpu, actor) => {}
@@ -129,6 +139,10 @@ pub fn numbered_exec(cpu: &mut Cpu, actor: u32) {
 /// A plain actor's frame (no boxes, no flash): while the game is not held, its behaviour (unless it
 /// ends by the flags); drawn.
 pub fn plain_exec(cpu: &mut Cpu, actor: u32) {
+    cpu.holding(&[(8, actor)], |cpu| plain_exec_held(cpu, actor));
+}
+
+fn plain_exec_held(cpu: &mut Cpu, actor: u32) {
     match cpu.read8(actor + OBJ_MODE) {
         1 => {}
         0 if start(cpu, actor) => {}
