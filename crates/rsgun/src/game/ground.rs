@@ -438,3 +438,71 @@ pub fn ground_exec(cpu: &mut Cpu, o: u32) {
     cpu.write16(f + S_ANGLE, a as u16);
     nested!(cpu, 0x0605_3f48, super::bullets::bullet_set_plain(cpu, f));
 }
+
+/// A ground gun (on a tank or the like): along its route script as ground_exec, its gun turned by
+/// its aim script; while firing, if its route flags say so, it tracks the player instead (turning
+/// toward where the player was 10 frames ago, at most 0x1000 a frame, easing over 10, by 0x18 at
+/// most). Off its area (if its route says so) it ends; out of life it blows up.
+const TRACKS: u16 = 0x20;
+const TRACKING: u16 = 0x40;
+const GUN_AREA: [u32; 4] = [0xff40_0000, 0x00c0_0000, 0xff10_0000, 0x00f0_0000];
+/// The gun's aim script, and its turn and turning speed while tracking (words).
+const AIM_SCRIPT: u32 = 0x70;
+const TRACK_TURN: u32 = 0xa2;
+const TRACK_SPEED: u32 = 0xa4;
+const TRACK_DELAY: u32 = 10;
+const TRACK_MOST: u32 = 0x1000;
+const TRACK_EASE: u32 = 10;
+const TRACK_ACCEL: u32 = 0x18;
+const TURN_TOWARD: u32 = 0x0605_70d8;
+static TURN_TOWARD_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
+
+pub fn gun_exec(cpu: &mut Cpu, o: u32) {
+    let alive = |cpu: &mut Cpu| cpu.read32(o + LIFE) as i32 > 0;
+    let leaves = alive(cpu)
+        && cpu.read16(o + ROUTE_FLAGS) & ROUTE_1000 != 0
+        && {
+            let [top, bottom, left, right] = GUN_AREA;
+            cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + SPRITE, top, bottom, left, right)) as u8 != 0
+        };
+    if !alive(cpu) || leaves {
+        if !alive(cpu) {
+            cpu.call(BLOWN_UP_1, &[o]);
+        }
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    let script = cpu.read32(o + SCRIPT);
+    match nested!(cpu, 0x0605_a000, route_step(cpu, o, script)) & 0xff {
+        START_FIRING => {
+            let fl = cpu.read16(o + ROUTE_FLAGS) | FIRING;
+            cpu.write16(o + ROUTE_FLAGS, fl);
+            if fl & TRACKS != 0 {
+                cpu.write16(o + ROUTE_FLAGS, fl | TRACKING);
+            }
+        }
+        STOP_FIRING => {
+            let fl = cpu.read16(o + ROUTE_FLAGS) & !FIRING & !TRACKING;
+            cpu.write16(o + ROUTE_FLAGS, fl);
+        }
+        _ => {}
+    }
+    nested!(cpu, 0x0605_a460, route_move(cpu, o));
+    let mirror = |cpu: &mut Cpu| cpu.read8(o + MIRROR) as i8 as i16;
+    if cpu.read16(o + ROUTE_FLAGS) & TRACKING != 0 {
+        let to = nested!(cpu, 0x0605_6ad4, aim::angle_to_target(cpu, o, TRACK_DELAY)) & 0xffff;
+        let from = (mirror(cpu).wrapping_mul(cpu.read16(o + AIM) as i16) as u16) as u32;
+        let (turn, speed) = (o + TRACK_TURN, o + TRACK_SPEED);
+        cpu.nested_with_stack(&TURN_TOWARD_PROLOGUE, TURN_TOWARD, &[TRACK_MOST, TRACK_EASE, TRACK_ACCEL], |cpu| aim::turn_toward(cpu, turn, speed, from, to, TRACK_MOST, TRACK_EASE, TRACK_ACCEL));
+        let by = mirror(cpu).wrapping_mul(cpu.read16(o + TRACK_TURN) as i16) as u16;
+        let a = by.wrapping_add(cpu.read16(o + AIM));
+        cpu.write16(o + AIM, a);
+    } else {
+        cpu.write16(o + TRACK_TURN, 0);
+        cpu.write16(o + TRACK_SPEED, 0);
+        let script = cpu.read32(o + AIM_SCRIPT);
+        nested!(cpu, 0x0605_a340, aim_step(cpu, o, script, 1));
+    }
+    let a = mirror(cpu).wrapping_mul(cpu.read16(o + AIM) as i16) as u16;
+    cpu.write16(o + ANGLE, a);
+}
