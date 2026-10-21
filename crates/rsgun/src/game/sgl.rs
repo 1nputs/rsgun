@@ -203,6 +203,151 @@ pub fn sl_priority(cpu: &mut Cpu, screen: u32, pri: u32) {
     cpu.leave(&[(0, PRINA_IMAGE)]);
 }
 
+/// SGL's other per-screen bytes in its VDP2 image, the screen numbered as slPriority's (the
+/// byte's offset in the register): the windows' control (WCTLA-WCTLD), the line and cell scroll
+/// control (SCRCTL: NBG1 0, NBG0 1), the colour calculation ratios (slColRate: CCRNA on).
+const WCTLA_IMAGE: u32 = 0x060f_fd90;
+const SCRCTL_IMAGE: u32 = 0x060f_fd5a;
+const CCRNA_IMAGE: u32 = 0x060f_fdc8;
+
+fn screen_byte(cpu: &mut Cpu, base: u32, screen: u32, v: u32) {
+    cpu.write8(base.wrapping_add(screen), v as u8);
+    cpu.leave(&[(0, base)]);
+}
+
+pub fn sl_window_control(cpu: &mut Cpu, screen: u32, v: u32) {
+    screen_byte(cpu, WCTLA_IMAGE, screen, v);
+}
+
+pub fn sl_line_scroll_control(cpu: &mut Cpu, screen: u32, v: u32) {
+    screen_byte(cpu, SCRCTL_IMAGE, screen, v);
+}
+
+pub fn sl_col_rate(cpu: &mut Cpu, screen: u32, v: u32) {
+    screen_byte(cpu, CCRNA_IMAGE, screen, v);
+}
+
+/// slScrPosNbg0/1, slZoomNbg0/1: the scroll screen's place and zoom (x, y: 16.16) in the VDP2
+/// image (SCXIN0-SCYDN0, ZMXIN0-ZMYDN0, and NBG1's).
+const SCROLL_NBG0: u32 = 0x130;
+const ZOOM_NBG0: u32 = 0x138;
+const SCROLL_NBG1: u32 = 0x140;
+const ZOOM_NBG1: u32 = 0x148;
+
+fn screen_pair(cpu: &mut Cpu, at: u32, x: u32, y: u32) {
+    let w = cpu.gbr();
+    cpu.write32(w + at, x);
+    cpu.write32(w + at + 4, y);
+    cpu.leave(&[(0, y)]);
+}
+
+pub fn sl_scr_pos_nbg0(cpu: &mut Cpu, x: u32, y: u32) {
+    screen_pair(cpu, SCROLL_NBG0, x, y);
+}
+
+pub fn sl_zoom_nbg0(cpu: &mut Cpu, x: u32, y: u32) {
+    screen_pair(cpu, ZOOM_NBG0, x, y);
+}
+
+pub fn sl_scr_pos_nbg1(cpu: &mut Cpu, x: u32, y: u32) {
+    screen_pair(cpu, SCROLL_NBG1, x, y);
+}
+
+pub fn sl_zoom_nbg1(cpu: &mut Cpu, x: u32, y: u32) {
+    screen_pair(cpu, ZOOM_NBG1, x, y);
+}
+
+/// The colour offsets used on the screens of `on` and `b` (CLOFEN), offset B on `b`'s (CLOFSL).
+const CLOFEN: u32 = 0x1d0;
+const CLOFSL: u32 = 0x1d2;
+
+pub fn sl_col_offset_on(cpu: &mut Cpu, on: u32, b: u32) {
+    let w = cpu.gbr();
+    cpu.write16(w + CLOFSL, b as u16);
+    cpu.write16(w + CLOFEN, (b | on) as u16);
+    cpu.leave(&[(0, b | on)]);
+}
+
+/// The colour calculation's control (CCCTL) but its top four bits set to `v`.
+const CCCTL: u32 = 0x1ac;
+const CCCTL_KEPT: u32 = 0xffff_f000;
+
+pub fn sl_color_calc(cpu: &mut Cpu, v: u32) {
+    let w = cpu.gbr();
+    let c = (cpu.read16(w + CCCTL) as i16 as i32 as u32 & CCCTL_KEPT) | v;
+    cpu.write16(w + CCCTL, c as u16);
+    cpu.leave(&[(0, c), (1, CCCTL_KEPT)]);
+}
+
+/// The special colour calculation mode (SFCCMD): the field of two bits at `shift` (NBG0 0, NBG1
+/// 2, NBG2 4, NBG3 6; the whole high byte for 8) set to `v`; the entries share their tail.
+const SFCCMD: u32 = 0x1ae;
+
+fn special_mode(cpu: &mut Cpu, keep: u32, v: u32) {
+    let w = cpu.gbr();
+    let c = (cpu.read16(w + SFCCMD) as i16 as i32 as u32 & keep) | v;
+    cpu.write16(w + SFCCMD, c as u16);
+    cpu.leave(&[(0, c), (1, keep), (4, v)]);
+}
+
+pub fn sl_special_mode_nbg0(cpu: &mut Cpu, v: u32) {
+    special_mode(cpu, !0x3, v);
+}
+
+pub fn sl_special_mode_nbg1(cpu: &mut Cpu, v: u32) {
+    special_mode(cpu, !0xc, v << 2);
+}
+
+pub fn sl_special_mode_nbg2(cpu: &mut Cpu, v: u32) {
+    special_mode(cpu, !0x30, v << 4);
+}
+
+pub fn sl_special_mode_nbg3(cpu: &mut Cpu, v: u32) {
+    // its mask made by a rotate, which leaves T set
+    special_mode(cpu, !0xc0, (v << 8) >> 2);
+    cpu.leave_t(true);
+}
+
+pub fn sl_special_mode_high(cpu: &mut Cpu, v: u32) {
+    special_mode(cpu, 0xff, v << 8);
+}
+
+/// The 32-bit integer square root (two bits a step, 16 steps; halved at the end, T the bit
+/// dropped), and SGL's square root of a 16.16 value from it.
+pub fn sl_isqrt(cpu: &mut Cpu, v: u32) -> u32 {
+    let (mut root, mut rest, mut bits) = (0u32, 0u32, v);
+    for _ in 0..16 {
+        for _ in 0..2 {
+            rest = (rest << 1) | (bits >> 31);
+            bits <<= 1;
+        }
+        root = root.wrapping_add(root).wrapping_add(1);
+        if root > rest {
+            root = root.wrapping_sub(1);
+        } else {
+            rest = rest.wrapping_sub(root);
+            root = root.wrapping_add(1);
+        }
+    }
+    cpu.leave(&[(1, 0), (2, rest), (4, 0)]);
+    cpu.leave_t(root & 1 != 0);
+    root >> 1
+}
+
+pub fn sl_sqrt(cpu: &mut Cpu, v: u32) -> u32 {
+    nested!(cpu, 0x0607_147c, sl_isqrt(cpu, v)) << 8
+}
+
+/// slDivFX: `b` over `a` (16.16), on the divide unit.
+pub fn sl_div_fx(cpu: &mut Cpu, a: u32, b: u32) -> u32 {
+    cpu.write32(DVSR, a);
+    let high = (b as i32 >> 16) as u32;
+    cpu.write32(DVDNTH, high);
+    cpu.write32(DVDNTL, b << 16);
+    cpu.leave(&[(2, high), (3, DVSR), (5, b << 16)]);
+    cpu.read32(DVDNTL_AGAIN)
+}
+
 /// slColOffsetA, slColOffsetB: colour offset A's (or B's) red, green and blue in the image of
 /// VDP2's registers (COAR-COAB, COBR-COBB).
 const COLOUR_OFFSET_A: u32 = 0x1d4;
@@ -714,6 +859,101 @@ pub fn sl_check_on_screen(cpu: &mut Cpu, p: u32, size: u32) -> u32 {
     cpu.leave(&[(1, (yq >> 32) as u32), (2, sy.wrapping_sub(half))]);
     cpu.leave_t(false);
     past
+}
+
+/// slDispSprite: the sprite at `pos` (x, y, z through the current matrix, and a scale: its size
+/// at the window's depth, its sign ignored) with the attributes at `attr` (as slPutSprite's)
+/// turned by `angle`: put where it projects (its place and size times the window's depth over
+/// its depth, on the divide unit), as slPutSprite sends it; not when its depth past the window's
+/// near is beyond the far limit (compared unsigned: one nearer than the near is too) or once the
+/// frame's polygons are at their limit (else counted as one). 1 either way, the put flag set.
+pub fn sl_disp_sprite(cpu: &mut Cpu, pos: u32, attr: u32, angle: u32) -> u32 {
+    let w = cpu.gbr();
+    let n = cpu.read16(w + POLYGONS_PUT).wrapping_add(1);
+    cpu.write16(w + POLYGONS_PUT, n);
+    let m = matrix(cpu);
+    let pos = pos & !3;
+    let pt = [0, 1, 2].map(|k| cpu.read32(pos + 4 * k));
+    let row = |cpu: &mut Cpu, r: u32| {
+        let mut sum = 0;
+        for (k, &v) in pt.iter().enumerate() {
+            let e = cpu.read32(m + 16 * r + 4 * k as u32);
+            sum = mac(cpu, sum, v, e);
+        }
+        (sum, cpu.read32(m + 16 * r + 12))
+    };
+    let depth = cpu.read32(w + WIN_DEPTH);
+    let (zsum, m23) = row(cpu, 2);
+    let shift = cpu.read8(w + WIN_FLAG) as i8 as i32;
+    let near = if (1..32).contains(&shift) { depth >> shift } else { 0 };
+    let z = middle(zsum).wrapping_add(m23);
+    let past = z.wrapping_sub(near);
+    let done = |cpu: &mut Cpu, regs: &[(usize, u32)]| {
+        cpu.leave(regs);
+        cpu.leave_mac(zsum);
+        cpu.leave_t(true);
+        cpu.write8(w + PUT_FLAG, 1);
+        1
+    };
+    if past > (cpu.read16(w + FAR) as u32) << 16 {
+        return done(cpu, &[(1, (zsum >> 32) as u32), (2, m23), (3, past), (4, pos), (7, z)]);
+    }
+    cpu.write32(DVSR, z);
+    cpu.write32(DVDNTH, (depth as i32 >> 16) as u32);
+    cpu.write32(DVDNTL, depth << 16);
+    let limit = cpu.read16(w + LIMITS) as u32;
+    let count = cpu.read16(w + COUNTS) as u32;
+    if count >= limit {
+        let r7 = (depth as i32 >> 16) as u32;
+        return done(cpu, &[(1, -2i32 as u32), (2, m23), (3, past), (4, pos), (7, r7)]);
+    }
+    cpu.write16(w + COUNTS, (count + 1) as u16);
+    let attr = attr & !1;
+    let c = cpu.read32(w + COMMANDS);
+    let dir = cpu.read16(attr + 8) as u32;
+    cpu.write32(c + 4, (dir << 16) | (past >> 16));
+    let (xsum, m03) = row(cpu, 0);
+    let x = middle(xsum).wrapping_add(m03);
+    let word = |cpu: &mut Cpu, k: u32| cpu.read16(attr + 2 * k) as i16 as i32 as u32;
+    let (texno, atrb, colno, gstb) = (word(cpu, 0), word(cpu, 1), word(cpu, 2), word(cpu, 3));
+    let (ysum, m13) = row(cpu, 1);
+    let y = middle(ysum).wrapping_add(m13);
+    let scale = (cpu.read32(pos + 12) as i32).unsigned_abs();
+    cpu.write32(c + 12, (atrb << 16) | (colno & 0xffff));
+    let q = cpu.read32(DVDNTL_AGAIN);
+    cpu.write32(c + 8, (texno << 16) | (gstb & 0xffff));
+    cpu.write32(c + 24, middle(product(q, scale)));
+    cpu.write32(c + 16, middle(product(q, x)));
+    let yq = product(q, y);
+    let sy = middle(yq);
+    cpu.write32(c + 20, sy);
+    cpu.leave_mac(yq);
+    let angle = angle & 0xffff;
+    let (code, regs) = if angle == 0 {
+        (SPRITE_COMMAND, [(2, (yq >> 32) as u32), (4, 0), (5, attr + 8)])
+    } else {
+        let e = SPRITE_QUADRANTS + ((angle >> 14) & 3) * 4;
+        let byte = |cpu: &mut Cpu, k: u32| cpu.read8(e + k) as i8 as i32 as u32;
+        let mut v = [0; 2];
+        for (k, v) in v.iter_mut().enumerate() {
+            let k = k as u32;
+            let i = (angle ^ byte(cpu, k)) & SIN_COS_STEPS;
+            let step = cpu.read16(SIN_COS_TABLE + i) as u32;
+            *v = step.wrapping_add(2) ^ byte(cpu, 2 + k);
+        }
+        cpu.write32(c + 28, v[0]);
+        cpu.write32(c + 32, v[1]);
+        (TURNED_SPRITE_COMMAND, [(2, e + 4), (4, v[0]), (5, v[1])])
+    };
+    cpu.write32(c, code);
+    let next = c + if angle == 0 { 28 } else { 36 };
+    cpu.write32(w + COMMANDS, next);
+    cpu.write16(SLAVE_SIGNAL, next as u16);
+    cpu.leave(&regs);
+    cpu.leave(&[(1, SLAVE_SIGNAL), (3, sy), (7, y)]);
+    cpu.leave_t(angle == 0);
+    cpu.write8(w + PUT_FLAG, 1);
+    1
 }
 
 /// slAtan: the angle of (x, y): the smaller part over the larger (on the divide unit, 64 by 32,

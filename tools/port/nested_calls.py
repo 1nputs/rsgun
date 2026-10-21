@@ -1,7 +1,7 @@
 """Checks each `nested!` call in crates/rsgun's game/ against the SH-2 code: the rewrite's SH-2
 function (or, for a helper, the rewrites that call it) must call that entry: its address is among
-the function's literals (the code from its entry to the next function's, in work RAM-H's dump; the
-game's code calls through a literal). A nested call the SH-2 function does not make (the callee's
+the function's literals or its bsr targets (the code from its entry to the next function's, in
+work RAM-H's dump; the game's code calls through a literal, SGL's asm by bsr too). A nested call the SH-2 function does not make (the callee's
 code inline in it) gives the callee a frame the SH-2 code never had: make it a plain call marked
 `// inline`. Exit status 1 if any are listed.
 
@@ -32,6 +32,13 @@ def literals_by_function(image, entries):
         end = entries[j] if j < len(entries) else e + 0x1000
         a, b = e - 0x06000000, min(end, e + 0x4000) - 0x06000000
         out[e] = {int.from_bytes(image[i:i + 4], "big") for i in range(a & ~3, b, 4)}
+        # and what it calls by bsr (PC-relative: no literal)
+        for i in range(a, b, 2):
+            op = int.from_bytes(image[i:i + 2], "big")
+            if op & 0xF000 == 0xB000:
+                disp = op & 0xFFF
+                disp -= 0x1000 if disp & 0x800 else 0
+                out[e].add(0x06000000 + i + 4 + 2 * disp)
     return out
 
 

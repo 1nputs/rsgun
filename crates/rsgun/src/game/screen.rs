@@ -190,15 +190,15 @@ pub fn fade_exec(cpu: &mut Cpu, fade: u32) {
     }
 }
 
-/// SGL's VDP2 settings for the text plane (its calls, not rewritten yet; as far as can be told
-/// NBG2, its cells at 0x25e78000 and its map at 0x25e7e000), its priority 7 (on top), the plane
-/// cleared.
+/// SGL's VDP2 settings for the text plane (its calls, some not rewritten yet; as far as can be
+/// told NBG2, its cells at 0x25e78000 and its map at 0x25e7e000), its priority 7 (on top), its
+/// colour calculation ratio 12 and special mode 3, the plane cleared.
 const SL_E_E2A0: u32 = 0x0606_e2a0;
 const SL_E_E2EC: u32 = 0x0606_e2ec;
 const SL_E_E39C: u32 = 0x0606_e39c;
 const SL_E_E3AC: u32 = 0x0606_e3ac;
-const SL_E_E1A6: u32 = 0x0606_e1a6;
-const SL_E_E45C: u32 = 0x0606_e45c;
+const SL_SPECIAL_MODE_NBG2: u32 = 0x0606_e1a6;
+const SL_COL_RATE: u32 = 0x0606_e45c;
 
 pub fn text_plane_set(cpu: &mut Cpu) {
     cpu.call(SL_E_E2A0, &[0, 0]);
@@ -206,8 +206,8 @@ pub fn text_plane_set(cpu: &mut Cpu) {
     cpu.call(SL_E_E39C, &[0]);
     cpu.call(SL_E_E3AC, &[TEXT_MAP; 4]);
     cpu.call(SL_PRIORITY, &[3, 7]);
-    cpu.call(SL_E_E1A6, &[3]);
-    cpu.call(SL_E_E45C, &[3, 0xc]);
+    cpu.call(SL_SPECIAL_MODE_NBG2, &[3]);
+    cpu.call(SL_COL_RATE, &[3, 0xc]);
     nested!(cpu, 0x0605_fdfc, clear_text_plane(cpu));
 }
 
@@ -310,8 +310,9 @@ const TEXT_PLANE: u32 = 0x25e7_e000;
 const TEXT_ROW: u32 = 0x80;
 const TEXT_ROWS: u32 = 28;
 const TEXT_ROW_SHOWN: u32 = 0x54;
-/// SGL's: VDP2's colour calculation settings (cleared with 0x73, 0).
-const SL_COLOR_CALC: u32 = 0x0606_e25c;
+/// SGL's: the screens the colour offsets are used on (0x73: NBG0, NBG1, RBG0, the back and the
+/// sprites; none on offset B).
+const SL_COL_OFFSET_ON: u32 = 0x0606_e25c;
 
 /// The screen's fields to their start: no hook, the first scroll, the offsets zero, the text plane
 /// the text's own.
@@ -333,7 +334,7 @@ const OWN: u32 = u32::MAX;
 
 /// VDP2's colour offsets back to none (SGL's colour calculation).
 pub fn offsets_clear(cpu: &mut Cpu) {
-    cpu.call(SL_COLOR_CALC, &[0x73, 0]);
+    cpu.call(SL_COL_OFFSET_ON, &[0x73, 0]);
 }
 
 /// The text plane's shared flag moved on a frame.
@@ -815,7 +816,7 @@ const SL_0_0C4C: u32 = 0x0607_0c4c;
 const SL_0_0CFC: u32 = 0x0607_0cfc;
 const SL_0_0D0C: u32 = 0x0607_0d0c;
 const SL_0_0D1C: u32 = 0x0607_0d1c;
-const SL_0_0DDC: u32 = 0x0607_0ddc;
+const SL_COLOR_CALC: u32 = 0x0607_0ddc;
 const SL_0_0DEC: u32 = 0x0607_0dec;
 const SL_SCR_POS_NBG0: u32 = 0x0606_e47c;
 const SL_ZOOM_NBG0: u32 = 0x0606_e46c;
@@ -848,12 +849,12 @@ pub fn picture_screen_set(cpu: &mut Cpu) {
     cpu.call(SL_SCR_POS_NBG1, &[0, 0]);
     cpu.call(SL_ZOOM_NBG1, &[ONE as u32, ONE as u32]);
     cpu.call(SL_E_DD5C, &[2]);
-    cpu.call(SL_0_0DDC, &[0]);
+    cpu.call(SL_COLOR_CALC, &[0]);
     cpu.call(SL_PRIORITY, &[1, 7]);
     cpu.call(SL_PRIORITY, &[0, 4]);
     cpu.call(SL_0_0DEC, &[BACK_COLOUR_AT, 0]);
     cpu.call(SL_E_DD6C, &[3]);
-    cpu.call(SL_COLOR_CALC, &[0x42, 0]);
+    cpu.call(SL_COL_OFFSET_ON, &[0x42, 0]);
     nested!(cpu, 0x0605_e34c, screen_reset(cpu));
     nested!(cpu, 0x0605_e2dc, screen_fields(cpu));
     cpu.write32(SCROLL_TABLE, PICTURES_SCROLL);
@@ -900,24 +901,25 @@ pub fn picture_load(cpu: &mut Cpu, p: u32, bytes: u32, count: u32) {
     }
 }
 
-/// SGL's VDP2 settings back to their start (its calls: the planes' eight settings, three more,
-/// two more for each rotation plane), with window 0's setting between the window switches.
-const SL_E_E17C: u32 = 0x0606_e17c;
-const SL_E_E19E: u32 = 0x0606_e19e;
-const SL_E_E18C: u32 = 0x0606_e18c;
-const SL_E_E190: u32 = 0x0606_e190;
-const SL_E_E1BC: u32 = 0x0606_e1bc;
+/// SGL's VDP2 settings back to their start: the eight screens' window controls, three of the
+/// special colour calculation modes, NBG1's and NBG0's line scroll controls, with window 0's
+/// setting between the window switches.
+const SL_WINDOW_CONTROL: u32 = 0x0606_e17c;
+const SL_SPECIAL_MODE_HIGH: u32 = 0x0606_e19e;
+const SL_SPECIAL_MODE_NBG0: u32 = 0x0606_e18c;
+const SL_SPECIAL_MODE_NBG1: u32 = 0x0606_e190;
+const SL_LINE_SCROLL_CONTROL: u32 = 0x0606_e1bc;
 const SL_E_E1CC: u32 = 0x0606_e1cc;
 
 pub fn screen_reset(cpu: &mut Cpu) {
     for plane in [1, 0, 3, 2, 5, 4, 7, 6] {
-        cpu.call(SL_E_E17C, &[plane, 0]);
+        cpu.call(SL_WINDOW_CONTROL, &[plane, 0]);
     }
-    for f in [SL_E_E19E, SL_E_E18C, SL_E_E190] {
+    for f in [SL_SPECIAL_MODE_HIGH, SL_SPECIAL_MODE_NBG0, SL_SPECIAL_MODE_NBG1] {
         cpu.call(f, &[0]);
     }
     for plane in [1, 0] {
-        cpu.call(SL_E_E1BC, &[plane, 0]);
+        cpu.call(SL_LINE_SCROLL_CONTROL, &[plane, 0]);
     }
     nested!(cpu, 0x0606_713c, super::sgl::sl_cur_window(cpu, 0));
     cpu.call(SL_E_E1CC, &[0x4000]);
