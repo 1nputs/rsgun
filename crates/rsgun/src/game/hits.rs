@@ -1113,3 +1113,26 @@ pub fn hit_init(cpu: &mut Cpu, h: u32) {
     cpu.write16(h + 0x1a, 0);
     cpu.write16(h + 0x1c, 100);
 }
+
+/// An object's box list (as at BOXES: 8 bytes a box, the last with LAST_BOX) copied from `from` to
+/// `to`.
+const LIST_BOX: u32 = 8;
+
+pub fn boxes_copy(cpu: &mut Cpu, to: u32, from: u32) {
+    let (mut to, mut from) = (to, from);
+    loop {
+        for at in [0, 1, 6, 7] {
+            let v = cpu.read8(from + at);
+            cpu.write8(to + at, v);
+        }
+        for at in [2, 4] {
+            let v = cpu.read16(from + at);
+            cpu.write16(to + at, v);
+        }
+        if cpu.read8(from) & LAST_BOX != 0 {
+            return;
+        }
+        to += LIST_BOX;
+        from += LIST_BOX;
+    }
+}

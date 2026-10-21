@@ -507,6 +507,410 @@ pub fn gun_exec(cpu: &mut Cpu, o: u32) {
     cpu.write16(o + ANGLE, a);
 }
 
+/// A ground gun's barrel (a sprite of its own): kept out from the gun along the angle the gun had
+/// (turned by its own), flashing and coloured with the gun; it ends with the gun. Once the gun
+/// fires, after 16 frames it fires as its kind does, each shot kicking it back and setting the
+/// wait for the next (its rate less the difficulty, by the kind); between shots and at rest it
+/// eases to where its kind keeps it. The plain kind's barrel carries two of its gun's boxes with
+/// it, and the other two at 36 pixels behind.
+const B_GUN: u32 = 0x6c;
+const B_FIRING: u32 = 0x7c;
+const B_SHOTS: u32 = 0x89;
+const B_OUT: u32 = 0x8a;
+const B_WAIT: u32 = 0x8c;
+const B_RATE: u32 = 0xa2;
+const B_TURN: u32 = 0xa6;
+const B_KIND: u32 = 0xa8;
+const B_FIRST_WAIT: u16 = 16;
+/// Where each kind's barrel eases to (how far out, by how much a frame): at rest, and between
+/// shots (the plain kind's then comes all the way out).
+const B_REST: [(i32, u32); 4] = [(-16, 2), (-16, 1), (4, 1), (14, 2)];
+const B_BETWEEN: [(i32, u32); 4] = [(0, 2), (-16, 1), (4, 1), (14, 2)];
+/// The frame's slot the SH-2 code keeps the gun in (the gun's angle's address at the end).
+const F_GUN: u32 = 0x40;
+/// The plain kind (0): a rocket 30 pixels out, the barrel kicked in to -4; the next after 12
+/// frames for each step of its rate above the difficulty, and 8 (12 at least).
+const B_ROCKET_OUT: i32 = 30;
+const B_ROCKET_KICK: u16 = 0xfffc;
+/// The second kind (1): two missiles 16 pixels either side of a point 20 out, turned 0x2000 out
+/// from the barrel's angle, speeding up (by the difficulty) and homing; the barrel kicked back 5.
+/// The second and third kinds' next shot waits 8 frames a step, and 8 (16 at least).
+const MISSILE: u32 = 0x0605_49f8;
+const B_MISSILE_OUT: i32 = 20;
+const B_MISSILE_ASIDE: i32 = 16;
+const B_MISSILE_TURNS: [(u16, u16); 2] = [(0x4000, 0x2000), (0xc000, 0xc000)];
+const B_MISSILE_FLAGS: u32 = 0x24000;
+const B_MISSILE_SPEEDS: u32 = 0x0607_34e0;
+const B_MISSILE_TURN: u16 = 0x100;
+const MS_SPEED: u32 = 0x2e;
+const MS_TURN: u32 = 0x32;
+const MS_ANGLE: u32 = 0x34;
+const MS_FLAGS: u32 = 0x38;
+const F_MISSILE_X: u32 = 0x44;
+const F_MISSILE_ANGLE_AT: u32 = 0x48;
+const B_KICK: u16 = 5;
+/// The third kind (2): a shell 30 pixels out, within 0x2000 of the barrel's angle at random, its
+/// colour by the gun's type.
+const SHELL: u32 = 0x0605_587c;
+const B_SHELL_OUT: i32 = 30;
+const B_SHELL_SPREAD: u16 = 0x2000;
+const B_SHELL_RANDOM: u32 = 0x3fff;
+const B_SHELL_SPEED: u32 = 0xa000;
+const B_SHELL_SCALE: u32 = 0x1_0000;
+const B_SHELL_COLOURS: u32 = 0x0607_34e8;
+const SH_ANGLE: u32 = 0x2e;
+const SH_SPEED: u32 = 0x30;
+const SH_SCALE: u32 = 0x34;
+const SH_COLOUR: u32 = 0x38;
+/// The fourth kind (3): two barrels (frames 3 and 4) taking turns, a heavy bullet 24 out (the
+/// second's with the sound); the next after the rate and 4 frames; the barrel kicked to 12.
+const B_HEAVY_OUT: i32 = 24;
+const B_HEAVY_KICK: u16 = 12;
+const B_HEAVY_FRAMES: [u8; 2] = [3, 4];
+/// The plain gun's boxes (8 bytes, from 0xbc): each one's y, the first two at 12 less the
+/// barrel's place, the others 36 behind.
+const G_BOXES: u32 = 0xbc;
+const BOX_SIZE: u32 = 8;
+const BOX_Y: u32 = 4;
+const G_BOX_YS: [u16; 4] = [12, 12, 0xffe8, 0xffe8];
+
+/// The barrel eased toward where its kind keeps it (by `to`).
+fn barrel_ease(cpu: &mut Cpu, o: u32, to: &[(i32, u32); 4]) {
+    if let Some(&(to, step)) = to.get(cpu.read16(o + B_KIND) as usize) {
+        let out = cpu.read16(o + B_OUT) as i16 as i32 as u32;
+        let out = nested!(cpu, 0x0604_6168, actors::approach(cpu, out, to as u32, step));
+        cpu.write16(o + B_OUT, out as u16);
+    }
+}
+
+/// The barrel's wait before its next shot: `per` frames for each step of its rate above the
+/// difficulty, and 8; `least` at least.
+fn barrel_wait(cpu: &mut Cpu, o: u32, per: i32, least: i16) {
+    let steps = cpu.read16(o + B_RATE) as i16 as i32 - cpu.read8(DIFFICULTY) as i8 as i32;
+    let wait = (steps * per + 8) as i16;
+    cpu.write16(o + B_WAIT, wait.max(least) as u16);
+}
+
+/// A shot from the barrel, as its kind fires (the shot's description at `f`).
+fn barrel_fire(cpu: &mut Cpu, o: u32, f: u32) {
+    let shots = cpu.read8(o + B_SHOTS).wrapping_add(1);
+    cpu.write8(o + B_SHOTS, shots);
+    let n = cpu.read8(o + NUMBER);
+    cpu.write8(f + S_NUMBER, n);
+    let a = cpu.read16(o + ANGLE);
+    cpu.write16(f + S_ANGLE, a);
+    let z = |cpu: &mut Cpu| cpu.read32(o + POSITION + 8);
+    match cpu.read16(o + B_KIND) {
+        0 => {
+            barrel_wait(cpu, o, 12, 12);
+            cpu.write16(o + B_OUT, B_ROCKET_KICK);
+            nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_ROCKETS));
+            shot_out(cpu, o, f, a, B_ROCKET_OUT);
+            let z = z(cpu);
+            cpu.write32(f + 8, z);
+            nested!(cpu, 0x0605_5d84, super::bullets::rocket_set_plain(cpu, f));
+        }
+        1 => {
+            barrel_wait(cpu, o, 8, 16);
+            let out = cpu.read16(o + B_OUT).wrapping_sub(B_KICK);
+            cpu.write16(o + B_OUT, out);
+            nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_HEAVY));
+            let z = z(cpu);
+            cpu.write32(f + 8, z);
+            shot_out(cpu, o, f, a, B_MISSILE_OUT);
+            let (x, y) = (cpu.read32(f), cpu.read32(f + 4));
+            cpu.write32(f + F_MISSILE_X, x);
+            cpu.write32(f + MS_FLAGS, B_MISSILE_FLAGS);
+            let d = cpu.read8(DIFFICULTY) as i8 as i32 as u32;
+            let speed = cpu.read8(B_MISSILE_SPEEDS.wrapping_add(d));
+            cpu.write16(f + MS_SPEED, speed as u16);
+            cpu.write16(f + MS_TURN, B_MISSILE_TURN);
+            cpu.write32(f + F_MISSILE_ANGLE_AT, f + MS_ANGLE);
+            for (k, (aside, turn)) in B_MISSILE_TURNS.into_iter().enumerate() {
+                let b = cpu.read16(o + ANGLE).wrapping_add(aside) as i16 as i32 as u32;
+                let s = cpu.call(SL_SIN, &[b]) as i32;
+                let sx = x.wrapping_add(s.wrapping_mul(B_MISSILE_ASIDE) as u32);
+                if k == 1 {
+                    // the SH-2 code keeps the second missile's x in its frame
+                    cpu.write32(f + F_MISSILE_X, sx);
+                }
+                cpu.write32(f, sx);
+                let c = cpu.call(SL_COS, &[b]) as i32;
+                let sy = y.wrapping_sub(c.wrapping_mul(B_MISSILE_ASIDE) as u32);
+                cpu.write32(f + 4, sy);
+                let angle = cpu.read16(f + S_ANGLE).wrapping_add(turn);
+                cpu.write16(f + S_ANGLE, angle);
+                cpu.write16(f + MS_ANGLE, angle);
+                cpu.call(MISSILE, &[f]);
+            }
+        }
+        2 => {
+            barrel_wait(cpu, o, 8, 16);
+            let out = cpu.read16(o + B_OUT).wrapping_sub(B_KICK);
+            cpu.write16(o + B_OUT, out);
+            nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_HEAVY));
+            let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+            let angle = cpu.read16(f + S_ANGLE).wrapping_add(B_SHELL_SPREAD).wrapping_sub((r & B_SHELL_RANDOM) as u16);
+            cpu.write16(f + S_ANGLE, angle);
+            shot_out(cpu, o, f, a, B_SHELL_OUT);
+            let z = z(cpu);
+            cpu.write32(f + 8, z);
+            cpu.write32(f + SH_SPEED, B_SHELL_SPEED);
+            cpu.write16(f + SH_ANGLE, angle);
+            let gun = cpu.read32(f + F_GUN);
+            let t = cpu.read8(gun + TYPE) as i8 as i32 as u32;
+            let colour = cpu.read8(B_SHELL_COLOURS.wrapping_add(t));
+            cpu.write16(f + SH_COLOUR, colour as u16);
+            cpu.write32(f + SH_SCALE, B_SHELL_SCALE);
+            cpu.call(SHELL, &[f]);
+        }
+        3 => {
+            let wait = cpu.read16(o + B_RATE).wrapping_add(4);
+            cpu.write16(o + B_WAIT, wait);
+            let second = shots & 1 != 0;
+            if cpu.read8(o + FRAME) == B_HEAVY_FRAMES[!second as usize] {
+                return;
+            }
+            if second {
+                nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_HEAVY));
+            }
+            cpu.write16(o + B_OUT, B_HEAVY_KICK);
+            shot_out(cpu, o, f, a, B_HEAVY_OUT);
+            let z = z(cpu);
+            cpu.write32(f + 8, z);
+            cpu.call(HEAVY_BULLET, &[f]);
+        }
+        _ => {}
+    }
+}
+
+pub fn barrel_exec(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let gun = cpu.read32(o + B_GUN);
+    cpu.write32(f + F_GUN, gun);
+    if cpu.read8(gun + OBJ_MODE) as i8 >= ENDING as i8 {
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    let h = cpu.read16(o + HIT_FLAGS) & !FLASH;
+    cpu.write16(o + HIT_FLAGS, h);
+    let flash = cpu.read16(gun + HIT_FLAGS) & FLASH;
+    cpu.write16(o + HIT_FLAGS, h | flash);
+    let colour = cpu.read16(gun + OWN_COLOUR);
+    cpu.write16(o + OWN_COLOUR, colour);
+    let gun_fires = |cpu: &mut Cpu| cpu.read16(gun + ROUTE_FLAGS) & FIRING != 0;
+    let firing = cpu.read8(o + B_FIRING);
+    if firing == 0 {
+        barrel_ease(cpu, o, &B_REST);
+        if gun_fires(cpu) {
+            cpu.write8(o + B_FIRING, firing.wrapping_add(1));
+            cpu.write16(o + B_WAIT, B_FIRST_WAIT);
+        }
+    } else {
+        if !gun_fires(cpu) {
+            cpu.write8(o + B_FIRING, firing.wrapping_sub(1));
+        }
+        let wait = cpu.read16(o + B_WAIT);
+        if wait != 0 {
+            let wait = nested!(cpu, 0x0604_6168, actors::approach(cpu, wait as i16 as i32 as u32, 0, 1));
+            cpu.write16(o + B_WAIT, wait as u16);
+            barrel_ease(cpu, o, &B_BETWEEN);
+        } else {
+            barrel_fire(cpu, o, f);
+        }
+    }
+    if cpu.read16(o + B_KIND) == 0 {
+        for (k, y) in G_BOX_YS.into_iter().enumerate() {
+            let y = y.wrapping_sub(cpu.read16(o + B_OUT));
+            cpu.write16(gun + G_BOXES + BOX_SIZE * k as u32 + BOX_Y, y);
+        }
+    }
+    let a = cpu.read16(o + ANGLE).wrapping_add(cpu.read16(o + B_TURN)) as i16 as i32 as u32;
+    let out = cpu.read16(o + B_OUT) as i16 as i32;
+    let s = cpu.call(SL_SIN, &[a]) as i32;
+    let x = cpu.read32(gun + POSITION).wrapping_add(s.wrapping_mul(out) as u32);
+    cpu.write32(o + POSITION, x);
+    let c = cpu.call(SL_COS, &[a]) as i32;
+    let y = cpu.read32(gun + POSITION + 4).wrapping_add(c.wrapping_neg().wrapping_mul(out) as u32);
+    cpu.write32(o + POSITION + 4, y);
+    let z = cpu.read32(gun + POSITION + 8);
+    cpu.write32(o + POSITION + 8, z);
+    cpu.write32(f + F_GUN, gun + ANGLE);
+    let a = cpu.read16(gun + ANGLE);
+    cpu.write16(o + ANGLE, a);
+}
+
+/// Sets up the barrel `o` of gun `gun`: its sprite and boxes, its fields cleared, its exec; in
+/// the gun's place, with its number and colour, of its kind, at its rate.
+pub fn barrel_init(cpu: &mut Cpu, o: u32, gun: u32) {
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, o + SPRITE));
+    nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, o + BOXES));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + BEHAVIOUR, BARREL_EXEC);
+    let n = cpu.read8(gun + NUMBER);
+    cpu.write8(o + NUMBER, n);
+    for k in 0..3 {
+        let v = cpu.read32(gun + POSITION + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    let colour = cpu.read16(gun + OWN_COLOUR);
+    cpu.write16(o + OWN_COLOUR, colour);
+    cpu.write16(o + COLOUR, colour);
+    cpu.write32(o + B_GUN, gun);
+    let kind = cpu.read16(gun + KIND_OF);
+    cpu.write16(o + B_KIND, kind);
+    let rate = cpu.read8(gun + SETTINGS) as i8 as u16 & FIRE_EVERY as u16;
+    cpu.write16(o + B_RATE, rate);
+}
+
+const BARREL_EXEC: u32 = 0x0605_aae8;
+const BEHAVIOUR: u32 = 0x38;
+const COLOUR: u32 = 0x28;
+
+/// A ground gun's description (as the timeline gives it): its place, mirror (a byte, -1 the
+/// left), kind (a word: 0 plain, 1-3 bigger), colour (the word from +0x2c: 16 colours a step, its
+/// low byte the type), type, base direction (a word) and settings (a byte: the low 4 bits its
+/// rate).
+const D_MIRROR: u32 = 0x17;
+const D_KIND: u32 = 0x1a;
+const D_COLOUR: u32 = 0x2c;
+const D_TYPE: u32 = 0x2d;
+const D_DIRECTION: u32 = 0x2e;
+const D_SETTINGS: u32 = 0x31;
+/// The gun (numbered, list 2, unhittable at first, of the enemies' side, below the ships): its
+/// size, exec, boxes (at 0xbc), the barrels' size and exec; by kind its life, sprite kind,
+/// colour (the sprite kind's, KINDS's +0xc), box list, the barrel's frame, lift, turn and place.
+const GUN_SIZE: u32 = 0xfc;
+const GUN_EXEC: u32 = 0x0605_a970;
+/// The numbers the enemies take (from 2: the players' are 0 and 1).
+const ENEMY_NUMBERS: u32 = 2;
+const BARREL_SIZE: u32 = 0xbc;
+const NUMBERED_EXEC: u32 = 0x0604_d600;
+const ACTOR_EXEC: u32 = 0x0604_d780;
+const GUN_LIST: u32 = 2;
+const GUN_FLAGS: u32 = 0x8_0000;
+const FLIPPED_X: u32 = 0x10;
+const SIDE: u32 = 0x54;
+const ENEMIES: u8 = 1;
+const LIFT: u32 = 0x33;
+const GUN_LIFT: u8 = 0xf8;
+const KIND_COLOURS: [u32; 2] = [0x0607_42bc, 0x0607_42cc];
+const GUN_LIVES: [u32; 2] = [2000, 3000];
+const GUN_KINDS: [u8; 2] = [12, 13];
+/// By kind (0-3): the box list, the barrel's frame, lift and place (B_OUT).
+const GUN_BOXES: [u32; 4] = [0x0607_3298, 0x0607_32c8, 0x0607_32f8, 0x0607_3318];
+const BARREL_FRAMES: [u8; 4] = [1, 1, 2, 3];
+const BARREL_LIFTS: [u8; 4] = [0xf7, 0xf9, 0xf7, 0xf9];
+const BARREL_OUTS: [u16; 4] = [0, 0xfff0, 4, 14];
+/// The fourth kind's two barrels: turned a quarter either way; the second's frame.
+const TWIN_TURNS: [u16; 2] = [0x4000, 0xc000];
+const TWIN_FRAME: u8 = 4;
+/// The frame's slots: the scripts, the number, and the turn's field (B_TURN).
+const F_SCRIPT: u32 = 0;
+const F_AIM: u32 = 4;
+const F_NUMBER: u32 = 8;
+const F_TURN_FIELD: u32 = 0xc;
+
+/// Makes the ground gun described at `d`, moving by route `script` and aiming by `aim`, with its
+/// barrel (two for the fourth kind). The gun, or 0 when there is no number or room.
+pub fn gun_set(cpu: &mut Cpu, d: u32, script: u32, aim: u32) -> u32 {
+    let f = cpu.stack();
+    cpu.write32(f + F_SCRIPT, script);
+    cpu.write32(f + F_AIM, aim);
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, ENEMY_NUMBERS)) as i8;
+    cpu.write32(f + F_NUMBER, n as i32 as u32);
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, GUN_SIZE)) as i8 as i32 as u32;
+    let gun = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, GUN_LIST, blocks, NUMBERED_EXEC));
+    if gun == 0 {
+        return 0;
+    }
+    let mut twin = 0;
+    if cpu.read16(d + D_KIND) as i16 == 3 {
+        let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, BARREL_SIZE)) as i8 as i32 as u32;
+        twin = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, GUN_LIST, blocks, ACTOR_EXEC));
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, BARREL_SIZE)) as i8 as i32 as u32;
+    let barrel = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, GUN_LIST, blocks, ACTOR_EXEC));
+    if barrel == 0 {
+        if twin != 0 {
+            cpu.write8(twin + OBJ_MODE, ENDING);
+        }
+        cpu.write8(gun + OBJ_MODE, ENDING);
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, gun + SPRITE));
+    nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, gun + BOXES));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, gun));
+    cpu.write32(gun + BEHAVIOUR, GUN_EXEC);
+    cpu.write32(gun + FLAGS, GUN_FLAGS);
+    let n = cpu.read8(f + F_NUMBER + 3);
+    cpu.write8(gun + NUMBER, n);
+    let n = cpu.read8(gun + NUMBER) as i8 as i32;
+    cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), gun);
+    cpu.write32(gun + BOXES, gun + G_BOXES);
+    cpu.write8(gun + SIDE, ENEMIES);
+    let t = cpu.read8(d + D_TYPE);
+    cpu.write8(gun + TYPE, t);
+    for k in 0..3 {
+        let v = cpu.read32(d + 4 * k);
+        cpu.write32(gun + POSITION + 4 * k, v);
+    }
+    cpu.write8(gun + LIFT, GUN_LIFT);
+    let mirror = cpu.read8(d + D_MIRROR);
+    cpu.write8(gun + MIRROR, mirror);
+    if (mirror as i8) < 0 {
+        let flags = cpu.read32(gun + FLAGS) | FLIPPED_X;
+        cpu.write32(gun + FLAGS, flags);
+    }
+    cpu.write32(gun + G_SCRIPT, script);
+    cpu.write32(gun + AIM_SCRIPT, aim);
+    cpu.write32(f + F_TURN_FIELD, B_TURN);
+    let kind = cpu.read16(d + D_KIND);
+    cpu.write16(gun + KIND_OF, kind);
+    let direction = cpu.read16(d + D_DIRECTION);
+    cpu.write16(gun + BASE_DIRECTION, direction);
+    let settings = cpu.read8(d + D_SETTINGS);
+    cpu.write8(gun + SETTINGS, settings);
+    // the rate, where the makers keep every enemy's (the gun's tracking turn later)
+    cpu.write16(gun + TRACK_TURN, (settings & FIRE_EVERY) as i8 as u16);
+    let kind = cpu.read16(d + D_KIND) as i16;
+    let big = (1..=3).contains(&kind) as usize;
+    cpu.write32(gun + LIFE, GUN_LIVES[big]);
+    cpu.write8(gun + KIND, GUN_KINDS[big]);
+    cpu.write8(gun + FRAME, 0);
+    let colour = cpu.read16(KIND_COLOURS[big]).wrapping_add(cpu.read16(d + D_COLOUR).wrapping_mul(16));
+    cpu.write16(gun + OWN_COLOUR, colour);
+    cpu.write16(gun + COLOUR, colour);
+    let kind = if big == 0 { 0 } else { kind as usize };
+    if big == 0 {
+        nested!(cpu, 0x0605_6440, super::hits::boxes_copy(cpu, gun + G_BOXES, GUN_BOXES[0]));
+    }
+    nested!(cpu, 0x0605_b0d4, barrel_init(cpu, barrel, gun));
+    cpu.write8(barrel + KIND, GUN_KINDS[big]);
+    if big != 0 {
+        nested!(cpu, 0x0605_6440, super::hits::boxes_copy(cpu, gun + G_BOXES, GUN_BOXES[kind]));
+    }
+    cpu.write8(barrel + FRAME, BARREL_FRAMES[kind]);
+    cpu.write8(barrel + LIFT, BARREL_LIFTS[kind]);
+    if kind == 3 {
+        cpu.write16(barrel + B_TURN, TWIN_TURNS[0]);
+        cpu.write16(barrel + B_OUT, BARREL_OUTS[3]);
+        nested!(cpu, 0x0605_b0d4, barrel_init(cpu, twin, gun));
+        cpu.write8(twin + KIND, GUN_KINDS[1]);
+        cpu.write8(twin + FRAME, TWIN_FRAME);
+        cpu.write8(twin + LIFT, BARREL_LIFTS[3]);
+        cpu.write16(twin + B_TURN, TWIN_TURNS[1]);
+        cpu.write16(twin + B_OUT, BARREL_OUTS[3]);
+    } else {
+        cpu.write16(barrel + B_TURN, 0);
+        cpu.write16(barrel + B_OUT, BARREL_OUTS[kind]);
+    }
+    gun
+}
+
 /// A ground enemy that shows its wounds: along its route script as route_exec does; once below
 /// 2500 life it smokes (a puff each 8 frames, near it, flipped at random) and, while firing,
 /// unless it is the plain kind (its boxes), it fires pairs of shots 24 pixels either side, twice
@@ -853,6 +1257,128 @@ pub fn turret_exec(cpu: &mut Cpu, o: u32) {
     }
     cpu.write32(o + LIFE, ONE);
     nested!(cpu, 0x0604_666c, super::parts::flash_with(cpu, o, v));
+}
+
+/// Makes a rocket launcher from the description at `d` (carrier_set's turret description: its
+/// offset (pixels; on the ground its place), a word (0: it gets a turret), angle, rate, colour
+/// (16 colours a step; 0x2000 more with the word at +0x34), type), on `carrier` (0: standing on
+/// the ground), and its turret (turret_exec's, on it and firing for it) unless told not to. 1, or
+/// 0 when there is no number or room.
+const LAUNCHER_EXEC: u32 = 0x0605_bf28;
+const TURRET_EXEC: u32 = 0x0605_c1d4;
+const LAUNCHER_KIND: u8 = 9;
+const LAUNCHER_LIFE: u32 = 900;
+const LAUNCHER_LIFT: u8 = 0xf9;
+/// With a turret and without: the launcher's frame and boxes.
+const LAUNCHER_FRAMES: [u8; 2] = [2, 4];
+const LAUNCHER_BOXES: [u32; 2] = [0x0607_3398, 0x0607_33a8];
+const LAUNCHER_MOUNTED: u32 = 0x8_0000;
+const LAUNCHER_ALT_COLOUR: u16 = 0x2000;
+const L_WAIT_FIRST: u32 = 0x8c;
+/// The turret: unturned, its life, frame, lift, boxes.
+const TURRET_FLAGS: u32 = 0x2_0000;
+const TURRET_LIFE: u32 = 0x1_0000;
+const TURRET_FRAME: u8 = 3;
+const TURRET_LIFT: u8 = 0xf7;
+const TURRET_BOXES: u32 = 0x0607_33b8;
+const TD_ALT: u32 = 0x34;
+const TD_TYPE: u32 = 0x33;
+
+pub fn launcher_set(cpu: &mut Cpu, d: u32, carrier: u32) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, ENEMY_NUMBERS)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, BARREL_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, GUN_LIST, blocks, NUMBERED_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, o + SPRITE));
+    nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, o + BOXES));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + BEHAVIOUR, LAUNCHER_EXEC);
+    cpu.write8(o + NUMBER, n as u8);
+    let n = cpu.read8(o + NUMBER) as i8 as i32;
+    cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), o);
+    cpu.write32(o + L_CARRIER, carrier);
+    cpu.write8(o + KIND, LAUNCHER_KIND);
+    let mut colour = cpu.read16(d + TD_COLOUR).wrapping_mul(16).wrapping_add(cpu.read16(KIND_COLOURS[0]));
+    cpu.write16(o + OWN_COLOUR, colour);
+    if cpu.read16(d + TD_ALT) != 0 {
+        colour |= LAUNCHER_ALT_COLOUR;
+        cpu.write16(o + OWN_COLOUR, colour);
+    }
+    let colour = cpu.read16(o + OWN_COLOUR);
+    cpu.write16(o + COLOUR, colour);
+    let alone = (cpu.read16(d + TD_ONE) != 0) as usize;
+    cpu.write8(o + FRAME, LAUNCHER_FRAMES[alone]);
+    cpu.write32(o + BOXES, LAUNCHER_BOXES[alone]);
+    cpu.write32(o + LIFE, LAUNCHER_LIFE);
+    cpu.write8(o + SIDE, ENEMIES);
+    let t = cpu.read8(d + TD_TYPE);
+    cpu.write8(o + TYPE, t);
+    cpu.write8(o + LIFT, LAUNCHER_LIFT);
+    let a = cpu.read16(d + TD_ANGLE);
+    cpu.write16(o + ANGLE, a);
+    let rate = cpu.read16(d + TD_RATE);
+    cpu.write16(o + L_RATE, rate);
+    let a = cpu.read16(d + TD_ANGLE);
+    cpu.write16(o + L_TURN, a);
+    if carrier != 0 {
+        cpu.write32(o + FLAGS, LAUNCHER_MOUNTED);
+        for k in 0..2 {
+            let v = (cpu.read32(d + 4 * k) << 16).wrapping_add(cpu.read32(carrier + POSITION + 4 * k));
+            cpu.write32(o + POSITION + 4 * k, v);
+        }
+        let x = cpu.read16(d + 2);
+        cpu.write16(o + L_OFFSET, x);
+        let y = cpu.read16(d + 6);
+        cpu.write16(o + L_WAIT_FIRST, y);
+    } else {
+        for k in 0..2 {
+            let v = cpu.read32(d + 4 * k);
+            cpu.write32(o + POSITION + 4 * k, v);
+        }
+        cpu.write32(o + POSITION + 8, carrier);
+    }
+    if cpu.read16(d + TD_ONE) != 0 {
+        return 1;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, BARREL_SIZE)) as i8 as i32 as u32;
+    let t = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, GUN_LIST, blocks, ACTOR_EXEC));
+    if t == 0 {
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return 0;
+    }
+    cpu.write32(o + L_FLASH_WITH, t);
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, t + SPRITE));
+    nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, t + BOXES));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, t));
+    cpu.write32(t + BEHAVIOUR, TURRET_EXEC);
+    cpu.write32(t + FLAGS, TURRET_FLAGS);
+    let n = cpu.read8(o + NUMBER);
+    cpu.write8(t + NUMBER, n);
+    cpu.write32(t + RIDES_ON, o);
+    cpu.write32(t + BOXES, TURRET_BOXES);
+    cpu.write32(t + LIFE, TURRET_LIFE);
+    for field in [SIDE, TYPE] {
+        let v = cpu.read8(o + field);
+        cpu.write8(t + field, v);
+    }
+    cpu.write8(t + KIND, LAUNCHER_KIND);
+    cpu.write8(t + FRAME, TURRET_FRAME);
+    let colour = cpu.read16(o + OWN_COLOUR);
+    cpu.write16(t + OWN_COLOUR, colour);
+    cpu.write16(t + COLOUR, colour);
+    cpu.write8(t + LIFT, TURRET_LIFT);
+    let a = cpu.read16(o + ANGLE);
+    cpu.write16(t + ANGLE, a);
+    let a = cpu.read16(o + ANGLE);
+    cpu.write16(t + T_FACING, a);
+    let rate = cpu.read16(d + TD_RATE);
+    cpu.write16(t + T_RATE, rate);
+    1
 }
 
 /// A big gun's body check: the gun ends with its body (the numbered object of its number), blown
@@ -1279,6 +1805,332 @@ pub fn spreader_exec(cpu: &mut Cpu, o: u32) {
     }
 }
 
+/// A carrier's side laser (frame 6 on its right, 8 on its left): kept on the carrier, hittable as
+/// it is. While the carrier fires, every 180 frames it fires a laser out to its side, the carrier
+/// turning more slowly while it lasts. Out of life, or the carrier destroyed, it blows up (sound
+/// 57, a burst and a glow 50 pixels out to its side); the carrier gone otherwise, it just ends.
+const SL_CARRIER: u32 = 0x6c;
+const SL_WAIT: u32 = 0x8c;
+const SL_EVERY: u16 = 180;
+const SL_RIGHT: u8 = 6;
+const SE_SIDE_BLOWN: u32 = 57;
+const SL_BURST_OUT: i32 = 50;
+const SL_BURST_SCALES: [u32; 2] = [0xa000, 0x1_4000];
+/// The description's word where the SH-2 code keeps the burst's direction.
+const F_SIDE: u32 = 0x1a;
+/// The glow (explosions.rs's glow_set: its size at +0x2c).
+const SL_GLOW_SIZE: u32 = 0x1_1000;
+const GLOW_SIZE: u32 = 0x2c;
+/// The laser (bullets.rs's, not rewritten yet): its description's direction and swing (left,
+/// right), flags, frames, and the object it comes from.
+const SL_LASER_TURNS: [(u16, u16); 2] = [(0xa000, 0xe000), (0x6000, 0x2000)];
+const SL_LASER_FLAGS: u16 = 73;
+const SL_LASER_FRAMES: u16 = 90;
+const LS_FRAMES: u32 = 0x30;
+const LS_SWING: u32 = 0x32;
+const LS_FROM: u32 = 0x3c;
+/// While the laser fires (its wait from 2 to 149), the carrier's turning share (CARRIER_TURN)
+/// eases out to 1/144.
+const SL_SLOWED: [u16; 2] = [2, 0x93];
+const SL_SLOWEST: u32 = 0x90;
+
+pub fn side_laser_exec(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let c = cpu.read32(o + SL_CARRIER);
+    let alive = cpu.read32(o + LIFE) as i32 > 0;
+    if !alive || cpu.read8(c + OBJ_MODE) as i8 >= ENDING as i8 {
+        if !alive || cpu.read32(c + LIFE) as i32 <= 0 {
+            nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_SIDE_BLOWN));
+            use super::actors::{E_ANGLE, E_COLOUR, E_POSITION, E_SCALES, E_SCRIPT, E_SPEED};
+            cpu.write32(f + E_SCRIPT, L_BURST);
+            cpu.write16(f + E_COLOUR, L_BURST_COLOUR);
+            let turn = if cpu.read8(o + FRAME) == SL_RIGHT { 0x4000 } else { 0xc000 };
+            let side = cpu.read16(o + ANGLE).wrapping_add(turn);
+            cpu.write16(f + F_SIDE, side);
+            let side = side as i16 as i32 as u32;
+            let s = cpu.call(SL_SIN, &[side]) as i32;
+            let x = cpu.read32(o + POSITION).wrapping_add(s.wrapping_mul(SL_BURST_OUT) as u32);
+            cpu.write32(f + E_POSITION, x);
+            let c = cpu.call(SL_COS, &[side]) as i32;
+            let y = cpu.read32(o + POSITION + 4).wrapping_sub(c.wrapping_mul(SL_BURST_OUT) as u32);
+            cpu.write32(f + E_POSITION + 4, y);
+            let z = cpu.read32(o + POSITION + 8);
+            cpu.write32(f + E_POSITION + 8, z);
+            let a = cpu.read16(o + ANGLE);
+            cpu.write16(f + E_ANGLE, a);
+            cpu.write32(f + E_SPEED, 0x1_0000);
+            cpu.write32(f + E_SCALES, SL_BURST_SCALES[0]);
+            cpu.write32(f + E_SCALES + 4, SL_BURST_SCALES[1]);
+            nested!(cpu, 0x0605_7454, actors::drift_effect(cpu, f));
+            cpu.write32(f + GLOW_SIZE, SL_GLOW_SIZE);
+            nested!(cpu, 0x0605_8f34, super::explosions::glow_set(cpu, f));
+        }
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    let flags = cpu.read32(o + FLAGS) & !NO_HITS;
+    cpu.write32(o + FLAGS, flags);
+    let theirs = cpu.read32(c + FLAGS) & NO_HITS;
+    cpu.write32(o + FLAGS, flags | theirs);
+    for k in 0..3 {
+        let v = cpu.read32(c + POSITION + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    let a = cpu.read16(c + ANGLE);
+    cpu.write16(o + ANGLE, a);
+    let fires = cpu.read16(c + ROUTE_FLAGS) & FIRING != 0;
+    let wait = cpu.read16(o + SL_WAIT) as i16 as i32 as u32;
+    let wait = nested!(cpu, 0x0604_6168, actors::approach(cpu, wait, 0, 1));
+    cpu.write16(o + SL_WAIT, wait as u16);
+    if fires && wait as i16 == 0 {
+        cpu.write16(o + SL_WAIT, SL_EVERY);
+        let n = cpu.read8(o + NUMBER);
+        cpu.write8(f + S_NUMBER, n);
+        cpu.write32(f + LS_FROM, o);
+        cpu.write16(f + S_FLAGS, SL_LASER_FLAGS);
+        cpu.write16(f + LS_FRAMES, SL_LASER_FRAMES);
+        let (turn, swing) = SL_LASER_TURNS[(cpu.read8(o + FRAME) == SL_RIGHT) as usize];
+        cpu.write16(f + S_ANGLE, turn);
+        cpu.write16(f + LS_SWING, swing);
+        cpu.call(LASER, &[f, o + ANGLE]);
+    }
+    let w = cpu.read16(o + SL_WAIT).wrapping_sub(SL_SLOWED[0]);
+    if w <= SL_SLOWED[1] {
+        let share = cpu.read32(c + CARRIER_TURN);
+        let share = nested!(cpu, 0x0604_6168, actors::approach(cpu, share, SL_SLOWEST, 2));
+        cpu.write32(c + CARRIER_TURN, share);
+    }
+}
+
+/// Makes a side laser on `carrier` from the description at `d`: on its right if d's x is above 0
+/// (else its left), coloured by the word at +0x34 (16 colours a step), its type the byte at
+/// +0x35; d's x and y words kept at +0x8a and +0x8c (the latter its first wait). 1, or 0 when
+/// there is no number or room.
+const SIDE_LASER_EXEC: u32 = 0x0605_d028;
+const SL_KIND: u8 = 9;
+const SL_FRAMES: [u8; 2] = [8, SL_RIGHT];
+const SL_BOXES: [u32; 2] = [0x0607_33c0, 0x0607_3400];
+const SL_LIFE: u32 = 3000;
+const SL_LIFT: u8 = 0xf9;
+const D_SL_COLOUR: u32 = 0x34;
+const D_SL_TYPE: u32 = 0x35;
+
+pub fn side_laser_set(cpu: &mut Cpu, d: u32, carrier: u32) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, ENEMY_NUMBERS)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, BARREL_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, GUN_LIST, blocks, NUMBERED_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, o + SPRITE));
+    nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, o + BOXES));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + BEHAVIOUR, SIDE_LASER_EXEC);
+    cpu.write8(o + NUMBER, n as u8);
+    let n = cpu.read8(o + NUMBER) as i8 as i32;
+    cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), o);
+    cpu.write32(o + SL_CARRIER, carrier);
+    cpu.write8(o + KIND, SL_KIND);
+    let right = (cpu.read32(d) as i32 > 0) as usize;
+    cpu.write8(o + FRAME, SL_FRAMES[right]);
+    cpu.write32(o + BOXES, SL_BOXES[right]);
+    let colour = cpu.read16(KIND_COLOURS[0]).wrapping_add(cpu.read16(d + D_SL_COLOUR).wrapping_mul(16));
+    cpu.write16(o + OWN_COLOUR, colour);
+    cpu.write16(o + COLOUR, colour);
+    cpu.write32(o + LIFE, SL_LIFE);
+    cpu.write8(o + SIDE, ENEMIES);
+    let t = cpu.read8(d + D_SL_TYPE);
+    cpu.write8(o + TYPE, t);
+    cpu.write8(o + LIFT, SL_LIFT);
+    let x = cpu.read16(d + 2);
+    cpu.write16(o + RIDE_OFFSET, x);
+    let y = cpu.read16(d + 6);
+    cpu.write16(o + SL_WAIT, y);
+    1
+}
+
+/// A carrier (a big ship with turrets, perhaps side lasers): along its route, told by it when to
+/// fire; its angle by its kind (+0xa6: 1-3 held right, left or down; 4 turning toward the nearer
+/// player by a share of the way, 1/40 at first easing to 1/64; 5 spinning). Out of life it blows
+/// up; off its area (if its route says so) it ends. Its boxes change with the frame count.
+const CARRIER_TURN: u32 = 0xb4;
+const C_ANGLES: [u16; 3] = [0x4000, 0xc000, 0x8000];
+const C_TURNING: u16 = 4;
+const C_SPINNING: u16 = 5;
+const C_SHARE_LEAST: u32 = 0x40;
+const C_SPIN: u16 = 0x80;
+/// By the frame count's low 2 bits: the box lists.
+const C_BOXES: [u32; 4] = [0x0607_3450, 0x0607_3460, 0x0607_3450, 0x0607_3470];
+
+pub fn carrier_exec(cpu: &mut Cpu, o: u32) {
+    let alive = |cpu: &mut Cpu| cpu.read32(o + LIFE) as i32 > 0;
+    let leaves = alive(cpu)
+        && cpu.read16(o + ROUTE_FLAGS) & ROUTE_1000 != 0
+        && {
+            let [top, bottom, left, right] = ROUTE_AREA;
+            cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + SPRITE, top, bottom, left, right)) as u8 != 0
+        };
+    if !alive(cpu) || leaves {
+        if !alive(cpu) {
+            cpu.call(BLOWN_UP_WOUNDED, &[o]);
+        }
+        cpu.write8(o + OBJ_MODE, ENDING);
+    } else {
+        let script = cpu.read32(o + SCRIPT);
+        match nested!(cpu, 0x0605_a000, route_step(cpu, o, script)) & 0xff {
+            START_FIRING => {
+                let fl = cpu.read16(o + ROUTE_FLAGS) | FIRING;
+                cpu.write16(o + ROUTE_FLAGS, fl);
+            }
+            STOP_FIRING => {
+                let fl = cpu.read16(o + ROUTE_FLAGS) & !FIRING;
+                cpu.write16(o + ROUTE_FLAGS, fl);
+            }
+            _ => {}
+        }
+        nested!(cpu, 0x0605_a460, route_move(cpu, o));
+        match cpu.read16(o + KIND_OF) {
+            k @ 1..=3 => cpu.write16(o + ANGLE, C_ANGLES[k as usize - 1]),
+            C_TURNING => {
+                let share = cpu.read32(o + CARRIER_TURN);
+                let p = nested!(cpu, 0x0605_6a58, aim::nearer_player(cpu, o + SPRITE));
+                let to = nested!(cpu, 0x0604_5e30, aim::angle_to(cpu, o, p)) as i16 as i32 as u32;
+                let from = (cpu.read16(o + ANGLE) as i16 as i32).wrapping_add(0x8000) as u32;
+                let d = nested!(cpu, 0x0604_6194, super::camera::angle_diff(cpu, from, to));
+                let by = nested!(cpu, 0x0600_6a78, math::quotient(cpu, d, share));
+                let a = cpu.read16(o + ANGLE).wrapping_add(by as u16);
+                cpu.write16(o + ANGLE, a);
+                let share = cpu.read32(o + CARRIER_TURN);
+                let share = nested!(cpu, 0x0604_6168, actors::approach(cpu, share, C_SHARE_LEAST, 1));
+                cpu.write32(o + CARRIER_TURN, share);
+            }
+            C_SPINNING => {
+                let a = cpu.read16(o + ANGLE).wrapping_add(C_SPIN);
+                cpu.write16(o + ANGLE, a);
+            }
+            _ => {}
+        }
+    }
+    let boxes = C_BOXES[(cpu.read32(GAME_FRAMES) & 3) as usize];
+    cpu.write32(o + BOXES, boxes);
+}
+
+/// Makes a carrier from its description at `d` (as gun_set's; the word at +0x2c: its turrets'
+/// layout (the low 6 bits) and side lasers (0x80); its type at +0x35: 0 and 2 its two colours),
+/// moving by route `script`, its angle by `kind` (carrier_exec's): 15000 life (5000 in the
+/// stage at GAME_MODE 7). Its turrets (launchers, not rewritten yet) stand 48 pixels out at the
+/// layout's angles (a byte each: the angle's top 6 bits, the colour in the low 2; 0xff ends it).
+/// The carrier, or 0 when there is no number or room.
+const CARRIER_EXEC: u32 = 0x0605_d35c;
+const CARRIER_FLAGS: u32 = 0x3008_0000;
+const CARRIER_KIND: u8 = 10;
+const CARRIER_LIVES: [u32; 2] = [15000, 5000];
+const CARRIER_SHORT_STAGE: u8 = 7;
+const CARRIER_COLOUR: u32 = 0x0607_429c;
+const CARRIER_BOXES: u32 = 0x0607_3450;
+const CARRIER_SHARE: u32 = 40;
+const CARRIER_LIFT: u8 = 0xfc;
+const LAYOUTS: u32 = 0x0607_355c;
+const LAYOUT_END: u8 = 0xff;
+const LAUNCHER_SET: u32 = 0x0605_c464;
+const TURRET_OUT: i32 = 48;
+const SIDE_LASERS: u16 = 0x80;
+/// The turret's description (launcher_set's): its offset (x, y: pixels, longs), a word 1, its
+/// angle, its rate (the carrier's settings' low 4 bits), its colour, and a word 0 (the side
+/// lasers' the carrier's type).
+const TD_ONE: u32 = 0x1a;
+const TD_ANGLE: u32 = 0x2e;
+const TD_RATE: u32 = 0x30;
+const TD_COLOUR: u32 = 0x32;
+
+pub fn carrier_set(cpu: &mut Cpu, d: u32, script: u32, kind: u32) -> u32 {
+    let f = cpu.stack();
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, ENEMY_NUMBERS)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, BARREL_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, GUN_LIST, blocks, NUMBERED_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, o + SPRITE));
+    nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, o + BOXES));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + BEHAVIOUR, CARRIER_EXEC);
+    cpu.write32(o + FLAGS, CARRIER_FLAGS);
+    cpu.write8(o + NUMBER, n as u8);
+    let n = cpu.read8(o + NUMBER) as i8 as i32;
+    cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), o);
+    cpu.write8(o + KIND, CARRIER_KIND);
+    cpu.write8(o + FRAME, 0);
+    let short = cpu.read8(super::globals::GAME_MODE) == CARRIER_SHORT_STAGE;
+    cpu.write32(o + LIFE, CARRIER_LIVES[short as usize]);
+    let t = cpu.read8(d + D_SL_TYPE);
+    cpu.write8(o + TYPE, t);
+    match cpu.read8(o + TYPE) {
+        0 => {
+            let c = cpu.read16(CARRIER_COLOUR);
+            cpu.write16(o + OWN_COLOUR, c);
+        }
+        2 => {
+            let c = cpu.read16(CARRIER_COLOUR).wrapping_add(16);
+            cpu.write16(o + OWN_COLOUR, c);
+        }
+        _ => {}
+    }
+    let c = cpu.read16(o + OWN_COLOUR);
+    cpu.write16(o + COLOUR, c);
+    cpu.write8(o + SIDE, ENEMIES);
+    cpu.write32(o + BOXES, CARRIER_BOXES);
+    cpu.write32(o + SCRIPT, script);
+    cpu.write16(o + KIND_OF, kind as u16);
+    let direction = cpu.read16(d + D_DIRECTION);
+    cpu.write16(o + BASE_DIRECTION, direction);
+    let mirror = cpu.read8(d + D_MIRROR);
+    cpu.write8(o + MIRROR, mirror);
+    let settings = cpu.read8(d + D_SETTINGS);
+    cpu.write8(o + SETTINGS, settings);
+    cpu.write32(o + CARRIER_TURN, CARRIER_SHARE);
+    for k in 0..3 {
+        let v = cpu.read32(d + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    cpu.write8(o + LIFT, CARRIER_LIFT);
+    let layout = (cpu.read16(d + D_COLOUR) & 0x3f) as u32;
+    let mut at = cpu.read32(LAYOUTS + 4 * layout);
+    let rate = cpu.read8(o + SETTINGS) & FIRE_EVERY;
+    cpu.write16(f + TD_RATE, rate as u16);
+    cpu.write16(f + D_SL_COLOUR, 0);
+    while cpu.read8(at) != LAYOUT_END {
+        cpu.write16(f + TD_ONE, 1);
+        let b = cpu.read8(at);
+        let angle = ((b & 0xfc) as u16) << 8;
+        cpu.write16(f + TD_ANGLE, angle);
+        let a = angle as i16 as i32 as u32;
+        let s = cpu.call(SL_SIN, &[a]) as i32;
+        cpu.write32(f, (s.wrapping_mul(TURRET_OUT) / 0x1_0000) as i16 as i32 as u32);
+        let c = cpu.call(SL_COS, &[a]) as i32;
+        cpu.write32(f + 4, (c.wrapping_neg().wrapping_mul(TURRET_OUT) / 0x1_0000) as i16 as i32 as u32);
+        cpu.write16(f + TD_COLOUR, (b & 3) as u16);
+        at += 1;
+        nested!(cpu, LAUNCHER_SET, launcher_set(cpu, f, o));
+    }
+    if cpu.read16(d + D_COLOUR) & SIDE_LASERS != 0 {
+        let t = cpu.read8(o + TYPE) as i8 as u16;
+        cpu.write16(f + D_SL_COLOUR, t);
+        for x in [-1i32, 1] {
+            cpu.write32(f, x as u32);
+            cpu.write32(f + 4, 1);
+            nested!(cpu, 0x0605_d228, side_laser_set(cpu, f, o));
+        }
+    }
+    o
+}
+
 /// A ground enemy that fires bursts: off its area (if its route says so) it ends; out of life it
 /// blows up (its pieces, its explosion; above difficulty 2 three parting shots); else along its
 /// route, while firing a burst of 5 bullets every 60 frames (from up to 20 pixels off, at speeds
@@ -1367,4 +2219,55 @@ pub fn burster_exec(cpu: &mut Cpu, o: u32) {
         let fl = cpu.read16(o + ROUTE_FLAGS) | ROUTE_HIT;
         cpu.write16(o + ROUTE_FLAGS, fl);
     }
+}
+
+/// The burster drawn (its sprite's draw; `s` its sprite): a copy of the sprite on the stack, below
+/// the ships, white for the two frames after a hit (ROUTE_HIT, then ROUTE_HIT_SHOWN), then its
+/// thrust flame (not rewritten yet: by its pace, 14 pixels behind).
+const ROUTE_HIT_SHOWN: u16 = 2;
+const HIT_WHITE: u16 = 0xe0;
+const DRAWN_LIFT: u8 = 0xf8;
+const CHAR_BASE: u32 = 0x0607_41fc;
+const THRUST: u32 = 0x0605_9d24;
+const THRUST_BEHIND: u32 = 14;
+const THRUST_SCALE: u32 = 0xe000;
+/// The sprite's fields (sprite_init's struct): position, colour, kind, frame, angle, lift.
+const SP_POSITION: u32 = 4;
+const SP_COLOUR: u32 = 0x18;
+const SP_KIND: u32 = 0x1e;
+const SP_FRAME: u32 = 0x1f;
+const SP_ANGLE: u32 = 0x20;
+const SP_LIFT: u32 = 0x23;
+
+pub fn burster_draw(cpu: &mut Cpu, s: u32) {
+    let f = cpu.stack();
+    let o = s.wrapping_sub(SPRITE);
+    let flags = cpu.read16(o + ROUTE_FLAGS);
+    if flags & ROUTE_HIT_SHOWN != 0 {
+        cpu.write16(o + ROUTE_FLAGS, flags & !(ROUTE_HIT | ROUTE_HIT_SHOWN));
+    }
+    let flags = cpu.read16(o + ROUTE_FLAGS);
+    if flags & ROUTE_HIT != 0 {
+        cpu.write16(o + ROUTE_FLAGS, flags | ROUTE_HIT_SHOWN);
+    }
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, f));
+    for field in [SP_KIND, SP_FRAME] {
+        let v = cpu.read8(s + field);
+        cpu.write8(f + field, v);
+    }
+    cpu.write8(f + SP_LIFT, DRAWN_LIFT);
+    for k in 0..3 {
+        let v = cpu.read32(o + POSITION + 4 * k);
+        cpu.write32(f + SP_POSITION + 4 * k, v);
+    }
+    let a = cpu.read16(s + SP_ANGLE);
+    cpu.write16(f + SP_ANGLE, a);
+    let colour = if cpu.read16(o + ROUTE_FLAGS) & ROUTE_HIT != 0 {
+        cpu.read16(CHAR_BASE).wrapping_add(HIT_WHITE)
+    } else {
+        cpu.read16(s + SP_COLOUR)
+    };
+    cpu.write16(f + SP_COLOUR, colour);
+    nested!(cpu, 0x0604_0960, super::sprites::draw(cpu, f));
+    cpu.call(THRUST, &[o, f, THRUST_BEHIND, THRUST_SCALE]);
 }
