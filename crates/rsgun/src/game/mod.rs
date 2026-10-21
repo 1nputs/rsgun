@@ -42,6 +42,7 @@ mod results;
 mod rings;
 mod screen;
 mod shots;
+mod sgl;
 mod sound;
 mod sprites;
 mod states;
@@ -161,6 +162,11 @@ impl Cpu<'_> {
 
     pub fn pr(&self) -> u32 {
         self.sh2.pr
+    }
+
+    /// GBR: SGL's work area, which its library code addresses from it.
+    pub fn gbr(&self) -> u32 {
+        self.sh2.gbr
     }
 
     /// Takes `bytes` of pushed arguments off the stack.
@@ -832,6 +838,17 @@ pub fn register(n: &mut Natives) {
         0x0605_9bd8 => actors::bonus_set[d] -> u32,
         0x0605_6ff4 => actors::depth_box_set[kind] -> u32,
         0x0606_2e40 => math::unwrap_angles[a, b] -> (),
+        0x0606_71cc => sgl::sl_push_matrix[] -> u32,
+        0x0606_7200 => sgl::sl_pop_matrix[] -> u32,
+        0x0606_721c => sgl::sl_translate[x, y, z] -> (),
+        0x0606_73ec => sgl::sl_scale[x, y, z] -> (),
+        0x0606_745c => sgl::sl_put_polygon[pd] -> u32,
+        0x0606_780c => sgl::sl_atan[x, y] -> u32,
+        0x0606_713c => sgl::sl_cur_window[win] -> u32,
+        0x0606_db5c => sgl::sl_push_no_copy[] -> u32,
+        0x0606_db7c => sgl::sl_load_matrix[src] -> (),
+        0x0606_db9c => sgl::sl_get_matrix[dst] -> (),
+        0x0603_511a => sgl::sl_push_unit_matrix[] -> u32,
         0x0606_9a0c => math::sl_sin[a] -> u32,
         0x0606_9a30 => math::sl_cos[a] -> u32,
         0x0606_e26c => math::sl_mul_fx[a, b] -> u32,
