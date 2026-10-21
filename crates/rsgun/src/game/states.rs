@@ -35,6 +35,24 @@ const MUSIC: u32 = 0xa4;
 /// rankings', the opening's, each stage's).
 const MODE_FILES: u32 = 0x0607_2310;
 const OVERLAY: u32 = 0x0608_0000;
+
+/// The mode files whose code the overlay rewrites are registered for: each file's name less
+/// ".BIN".
+pub const OVERLAYS: [&str; 9] = ["TITLE", "RANK", "OPENING", "STG00", "STG01", "STG02", "STG03", "STG04", "STG05"];
+
+/// Which mode file's code the overlay window holds (`wram_h`: work RAM-H): the game mode's file,
+/// by its name in the game's table (none for a mode without one).
+pub fn overlay_name(wram_h: &[u8]) -> Option<&'static str> {
+    let off = |a: u32| (a & 0xF_FFFF) as usize;
+    let mode = wram_h[off(GAME_MODE)] as u32;
+    let name = stv::mem::rd32(wram_h, off(MODE_FILES + 4 * mode));
+    if name & 0xFFF0_0000 != 0x0600_0000 {
+        return None;
+    }
+    let text = &wram_h[off(name)..];
+    OVERLAYS.into_iter().find(|o| text.strip_prefix(o.as_bytes()).is_some_and(|rest| rest.starts_with(b".BIN\0")))
+}
+
 /// A mode's file loads at 256 KB a frame.
 const MODE_RATE: u32 = 0x4_0000;
 /// The rate the next load takes (files.rs).

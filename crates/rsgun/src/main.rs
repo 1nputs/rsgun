@@ -284,6 +284,9 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
         }
         let [a, b] = m.sys.interpreted;
         println!("SH-2 instructions still interpreted: master {a}, slave {b}");
+        let mut named: Vec<_> = n.named().map(|(fp, name)| format!("{fp:016x} {}", name.unwrap_or("(no name)"))).collect();
+        named.sort();
+        println!("overlay code seen: {}", named.join(", "));
     }
     if let (Some(p), Some(c)) = (&o.compare, &m.compare) {
         let report = c.report(&|e| m.sys.natives.name(e));

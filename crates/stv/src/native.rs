@@ -10,8 +10,10 @@
 //! blocks.
 //!
 //! A game's overlay window (stv::evidence::Overlay, as the client gives it) holds different code
-//! from mode to mode: a function there is registered with the window's fingerprint as its code was
-//! loaded, and runs only while that is what the window holds.
+//! from mode to mode: a function there is registered for the code it belongs to, by the window's
+//! fingerprint as that code was loaded, or by the name the client gives that code (`Natives::namer`,
+//! asked once for each fingerprint the window shows), and runs only while that is what the window
+//! holds. A named function goes before one registered by fingerprint at the same place.
 
 use crate::evidence::Overlay;
 use crate::sh2::{Bus, Sh2};
@@ -23,9 +25,21 @@ pub type NativeFn = fn(&mut Sh2, &mut dyn Bus);
 pub struct Native {
     pub f: NativeFn,
     pub name: &'static str,
-    /// For code in the overlay window: the window's fingerprint the function belongs to.
-    pub overlay: Option<u64>,
+    /// For code in the overlay window: the window's code the function belongs to.
+    pub overlay: Option<OverlayCode>,
     pub contract: Contract,
+}
+
+/// The client's namer for the overlay window's code: given work RAM-H, the name of what the game
+/// loaded there.
+pub type OverlayNamer = fn(wram_h: &[u8]) -> Option<&'static str>;
+
+/// Which of the overlay window's codes a function belongs to: the window's fingerprint, or the
+/// name the client gives that code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayCode {
+    Print(u64),
+    Named(&'static str),
 }
 
 /// What a native function keeps of the SH-2 code it replaces (what compare mode checks).
@@ -68,6 +82,10 @@ pub struct Natives {
     /// code since.
     pub overlay: Option<Overlay>,
     pub overlay_now: Option<u64>,
+    /// The client's name for the code the overlay window holds (`wram_h`: work RAM-H), from what
+    /// the game says it loaded there; asked once for each fingerprint, the answer kept in `names`.
+    pub namer: Option<OverlayNamer>,
+    names: HashMap<u64, Option<&'static str>>,
     /// Calls made natively, and calls native code passed to the interpreter.
     pub native_calls: u64,
     pub interpreted_calls: u64,
@@ -93,15 +111,30 @@ impl Natives {
     /// Registers a native function with its contract, in place of what was registered at `addr` for
     /// the same overlay.
     pub fn register_as(&mut self, addr: u32, f: NativeFn, name: &'static str, overlay: Option<u64>, contract: Contract) {
-        let Some(off) = wram_h_offset(addr) else { panic!("{name}: native code must be in work RAM-H") };
+        self.add(addr, Native { f, name, overlay: overlay.map(OverlayCode::Print), contract });
+    }
+
+    /// Registers a native function for the overlay window's code the client names `overlay`, in
+    /// place of what was registered at `addr` for that name.
+    pub fn register_in(&mut self, overlay: &'static str, addr: u32, f: NativeFn, name: &'static str, contract: Contract) {
+        self.add(addr, Native { f, name, overlay: Some(OverlayCode::Named(overlay)), contract });
+    }
+
+    fn add(&mut self, addr: u32, native: Native) {
+        let Some(off) = wram_h_offset(addr) else { panic!("{}: native code must be in work RAM-H", native.name) };
         if self.entries.is_empty() {
             self.entries = vec![0; 0x10_0000 / 2 / 64];
         }
         let i = (off >> 1) as usize;
         self.entries[i / 64] |= 1 << (i % 64);
         let list = self.map.entry(off).or_default();
-        list.retain(|n| n.overlay != overlay);
-        list.push(Native { f, name, overlay, contract });
+        list.retain(|n| n.overlay != native.overlay);
+        list.push(native);
+    }
+
+    /// The overlay window's codes seen so far: each fingerprint and the client's name for it.
+    pub fn named(&self) -> impl Iterator<Item = (u64, Option<&'static str>)> + '_ {
+        self.names.iter().map(|(&fp, &name)| (fp, name))
     }
 
     /// The name of a function registered at `addr` (any of them, for overlay code).
@@ -141,7 +174,12 @@ impl Natives {
             return list.first().copied();
         };
         let fp = *self.overlay_now.get_or_insert_with(|| o.fingerprint(wram_h));
-        list.iter().find(|n| n.overlay == Some(fp)).copied()
+        let name = match self.namer {
+            Some(namer) => *self.names.entry(fp).or_insert_with(|| namer(wram_h)),
+            None => None,
+        };
+        let named = name.and_then(|name| list.iter().find(|n| n.overlay == Some(OverlayCode::Named(name))));
+        named.or_else(|| list.iter().find(|n| n.overlay == Some(OverlayCode::Print(fp)))).copied()
     }
 
     /// A write to work RAM-H (offset `off`): the overlay's fingerprint is taken again if it may

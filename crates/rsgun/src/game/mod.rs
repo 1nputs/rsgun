@@ -379,43 +379,50 @@ pub(crate) use nested;
 /// SH-2 code had it; some hand the video chips' DMA a buffer of theirs on it), moves the
 /// arguments from r4-r7 and the result to r0, and returns to PR.
 macro_rules! rewrites {
+    // the overlay window's code the client names $o (states::overlay_name)
+    ($n:ident; overlay $o:literal; $($entry:literal => $f:path [$($arg:ident),* $(; $($sarg:ident),+)?] -> $ret:tt),* $(,)?) => {
+        rewrites!(@once $($entry),*);
+        $(
+            $n.register_in($o, $entry, rewrites!(@native $entry, $f, [$($arg),* $(; $($sarg),+)?], $ret), stringify!($f), rewrites!(@contract $ret));
+        )*
+    };
     ($n:ident; $($entry:literal => $f:path [$($arg:ident),* $(; $($sarg:ident),+)?] -> $ret:tt),* $(,)?) => {
-        // a second entry at an address would silently replace the first
+        rewrites!(@once $($entry),*);
+        $(
+            $n.register_as($entry, rewrites!(@native $entry, $f, [$($arg),* $(; $($sarg),+)?], $ret), stringify!($f), None, rewrites!(@contract $ret));
+        )*
+    };
+    // a second entry at an address would silently replace the first
+    (@once $($entry:literal),*) => {
         let mut entries = [$($entry),*];
         entries.sort_unstable();
         if let Some(w) = entries.windows(2).find(|w| w[0] == w[1]) {
             panic!("{:#010x} is rewritten twice", w[0]);
         }
-        $(
-            $n.register_as(
-                $entry,
-                |sh2: &mut Sh2, bus: &mut dyn Bus| {
-                    static PROLOGUE: std::sync::OnceLock<Prologue> = std::sync::OnceLock::new();
-                    let (ret, sp) = (sh2.pr, sh2.r[15]);
-                    #[allow(unused_mut, unused_variables)]
-                    let mut args = sh2.r[4..8].iter().copied();
-                    $( let $arg = args.next().unwrap_or(0); )*
-                    // arguments past the fourth: on the stack, the fifth at the stack pointer
-                    #[allow(unused_mut, unused_variables)]
-                    let mut at = sp;
-                    $($( #[allow(unused_assignments)] let $sarg = { let v = bus.read32(at); at = at.wrapping_add(4); v }; )+)?
-                    let prologue = PROLOGUE.get_or_init(|| Prologue::read(&mut *bus, $entry));
-                    sh2.r[15] = prologue.enter(sh2, &mut *bus);
-                    let fp = sh2.r[14];
-                    sh2.r[14] = sh2.r[15];
-                    let mut cpu = Cpu { sh2: &mut *sh2, bus, caller_r14: fp, r14_out: None };
-                    let result = $f(&mut cpu, $($arg),* $(, $($sarg),+)?);
-                    let r14 = cpu.r14_out.unwrap_or(fp);
-                    rewrites!(@result sh2, result, $ret);
-                    sh2.r[15] = sp;
-                    sh2.r[14] = r14;
-                    sh2.pc = ret;
-                },
-                stringify!($f),
-                None,
-                rewrites!(@contract $ret),
-            );
-        )*
+    };
+    (@native $entry:literal, $f:path, [$($arg:ident),* $(; $($sarg:ident),+)?], $ret:tt) => {
+        |sh2: &mut Sh2, bus: &mut dyn Bus| {
+            static PROLOGUE: std::sync::OnceLock<Prologue> = std::sync::OnceLock::new();
+            let (ret, sp) = (sh2.pr, sh2.r[15]);
+            #[allow(unused_mut, unused_variables)]
+            let mut args = sh2.r[4..8].iter().copied();
+            $( let $arg = args.next().unwrap_or(0); )*
+            // arguments past the fourth: on the stack, the fifth at the stack pointer
+            #[allow(unused_mut, unused_variables)]
+            let mut at = sp;
+            $($( #[allow(unused_assignments)] let $sarg = { let v = bus.read32(at); at = at.wrapping_add(4); v }; )+)?
+            let prologue = PROLOGUE.get_or_init(|| Prologue::read(&mut *bus, $entry));
+            sh2.r[15] = prologue.enter(sh2, &mut *bus);
+            let fp = sh2.r[14];
+            sh2.r[14] = sh2.r[15];
+            let mut cpu = Cpu { sh2: &mut *sh2, bus, caller_r14: fp, r14_out: None };
+            let result = $f(&mut cpu, $($arg),* $(, $($sarg),+)?);
+            let r14 = cpu.r14_out.unwrap_or(fp);
+            rewrites!(@result sh2, result, $ret);
+            sh2.r[15] = sp;
+            sh2.r[14] = r14;
+            sh2.pc = ret;
+        }
     };
     (@result $sh2:ident, $v:ident, ()) => { let () = $v; };
     (@result $sh2:ident, $v:ident, slave) => { let () = $v; };
@@ -434,6 +441,7 @@ const SLAVE_KEEPS: u16 = 1 << 4 | 1 << 15;
 
 /// Registers the rewritten functions (over the translations registered before).
 pub fn register(n: &mut Natives) {
+    n.namer = Some(states::overlay_name);
     rewrites! { n;
         0x0604_0000 => main_loop::main_loop[] -> u32,
         0x0600_44a0 => dma::dma_set[src, dst, size] -> u32,
