@@ -1278,3 +1278,93 @@ pub fn spreader_exec(cpu: &mut Cpu, o: u32) {
         nested!(cpu, PULSE_SET, super::bullets::pulse_set(cpu, f));
     }
 }
+
+/// A ground enemy that fires bursts: off its area (if its route says so) it ends; out of life it
+/// blows up (its pieces, its explosion; above difficulty 2 three parting shots); else along its
+/// route, while firing a burst of 5 bullets every 60 frames (from up to 20 pixels off, at speeds
+/// 1.25 to 1.75 along its angle), turning toward its route's direction (mirrored by its side; at
+/// most 0x1800 a frame, easing over 16 by 0x30), and noting in its route flags when it is hit.
+const BURST_AREA: [u32; 4] = [0xff60_0000, 0x00a0_0000, 0xff30_0000, 0x00d0_0000];
+const BURST_EVERY: u16 = 60;
+const BURST_SPREAD: u32 = 0x14_0000;
+const BURST_SPEED: u32 = 0x1_4000;
+const BURST_TURN_MOST: u32 = 0x1800;
+const BURST_EASE: u32 = 16;
+const BURST_ACCEL: u32 = 0x30;
+const ROUTE_HIT: u16 = 1;
+const S_SPEED: u32 = 0x30;
+/// Not rewritten yet: the bursting enemy's pieces (with 0x50) and explosion.
+const PIECES: u32 = 0x0605_61ac;
+const BLOWN_UP_BURSTER: u32 = 0x0605_9fc4;
+const BULLET_SET: u32 = 0x0605_3db0;
+static BURSTER_TURN_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
+
+pub fn burster_exec(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    if cpu.read16(o + ROUTE_FLAGS) & ROUTE_1000 != 0 {
+        let [top, bottom, left, right] = BURST_AREA;
+        if cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + SPRITE, top, bottom, left, right)) as u8 != 0 {
+            cpu.write8(o + OBJ_MODE, ENDING);
+            return;
+        }
+    }
+    if cpu.read32(o + LIFE) as i32 <= 0 {
+        cpu.call(PIECES, &[o, 0x50]);
+        cpu.call(BLOWN_UP_BURSTER, &[o]);
+        cpu.write8(o + OBJ_MODE, ENDING);
+        if cpu.read8(DIFFICULTY) as i8 > 2 {
+            for x in [0x1_8000, 0xc000, 0] {
+                cpu.call(PARTING_SHOT, &[o, x]);
+            }
+        }
+        return;
+    }
+    let script = cpu.read32(o + SCRIPT);
+    match nested!(cpu, 0x0605_a000, route_step(cpu, o, script)) & 0xff {
+        START_FIRING => {
+            let fl = cpu.read16(o + ROUTE_FLAGS) | FIRING;
+            cpu.write16(o + ROUTE_FLAGS, fl);
+        }
+        STOP_FIRING => {
+            let fl = cpu.read16(o + ROUTE_FLAGS) & !FIRING;
+            cpu.write16(o + ROUTE_FLAGS, fl);
+            cpu.write16(o + FIRE_WAIT, 0);
+        }
+        _ => {}
+    }
+    nested!(cpu, 0x0605_a460, route_move(cpu, o));
+    if cpu.read16(o + ROUTE_FLAGS) & FIRING != 0 {
+        let wait = cpu.read16(o + FIRE_WAIT).wrapping_sub(1);
+        cpu.write16(o + FIRE_WAIT, wait);
+        if (wait as i16) < 0 {
+            cpu.write16(o + FIRE_WAIT, BURST_EVERY);
+            let n = cpu.read8(o + NUMBER);
+            cpu.write8(f + S_NUMBER, n);
+            cpu.write32(f + 8, 0);
+            let a = cpu.read16(o + ANGLE);
+            cpu.write16(f + S_ANGLE, a);
+            cpu.write16(f + S_FLAGS, 0);
+            for _ in 0..5 {
+                for k in 0..2 {
+                    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, BURST_SPREAD));
+                    let p = cpu.read32(o + POSITION + 4 * k).wrapping_add(r);
+                    cpu.write32(f + 4 * k, p);
+                }
+                let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+                cpu.write32(f + S_SPEED, (r & 0x7fff).wrapping_add(BURST_SPEED));
+                nested!(cpu, BULLET_SET, super::bullets::bullet_set(cpu, f));
+            }
+        }
+    }
+    let mirror = cpu.read8(o + MIRROR) as i8 as i32;
+    let to = (mirror.wrapping_mul(cpu.read16(o + DIRECTION) as i16 as i32) as u32) & 0xffff;
+    let from = cpu.read16(o + ANGLE) as u32;
+    let (turn, speed) = (o + G_TURN, o + G_TURN_SPEED);
+    cpu.nested_with_stack(&BURSTER_TURN_PROLOGUE, TURN_TOWARD, &[BURST_TURN_MOST, BURST_EASE, BURST_ACCEL], |cpu| aim::turn_toward(cpu, turn, speed, from, to, BURST_TURN_MOST, BURST_EASE, BURST_ACCEL));
+    let a = cpu.read16(o + ANGLE).wrapping_add(cpu.read16(o + G_TURN));
+    cpu.write16(o + ANGLE, a);
+    if cpu.read16(o + HIT_FLAGS) & WAS_HIT != 0 {
+        let fl = cpu.read16(o + ROUTE_FLAGS) | ROUTE_HIT;
+        cpu.write16(o + ROUTE_FLAGS, fl);
+    }
+}
