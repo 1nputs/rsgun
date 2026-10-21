@@ -281,7 +281,7 @@ const SR_PUSH: u8 = 20;
 /// the others, and takes its frame by a subtraction; SGL's interrupt handlers save what they use,
 /// GBR, MACH, MACL and SR among it; SGL's routines run block by block (asm2sm.py) make their own
 /// pushes.
-const PROLOGUES: [(u32, &[u8], u32); 15] = [
+const PROLOGUES: [(u32, &[u8], u32); 14] = [
     (0x0606_e9fc, &[6, 7], 0),
     (0x0607_10b0, &[PR_PUSH, 9, 8], 0),
     (0x0606_e50c, &[8, PR_PUSH, 14, 13, 12, 11, 10, 9], 0),
@@ -295,7 +295,6 @@ const PROLOGUES: [(u32, &[u8], u32); 15] = [
     (0x0603_6dd8, &[], 0),
     (0x0603_3658, &[], 0),
     (0x0603_3884, &[], 0),
-    (0x0603_5540, &[], 0),
     (0x0603_4cb0, &[PR_PUSH], 0),
 ];
 
