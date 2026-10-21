@@ -6,13 +6,17 @@ takes (its delay slot first); calls (bsr, jsr) go through `cpu.call` with the re
 over and taken back; rts returns with the registers as the code leaves them. The routine's
 own pushes are made by the blocks, so its entry must be in PROLOGUES with no pushes.
 
-    python3 tools/port/asm2sm.py LISTING NAME ENTRY [TARGET...] > out.rs
+    python3 tools/port/asm2sm.py [--timed] LISTING NAME ENTRY [TARGET...] > out.rs
 
 LISTING: dis.py's listing of a region holding the routine (every halfword, data too). The blocks
 are found from ENTRY by following the code: branches, delay slots, and the jump tables a
 `jmp @rN` reads (a `mova` base and a `mov.l @(r0,rK),rN` before it: the table's longs, while they
 are addresses in the listing). TARGET: more block starts. Instructions asm2rs.py cannot convert
 stop the script (it names them).
+
+--timed: each block charges the SH-2 code's time (`Cpu::spend`: an instruction a cycle, as the
+translations count it), for a routine whose duration other hardware relies on (slInitSystem's
+VDP set-up: the slave's start needs it). Untimed, a routine takes no time but its waits.
 """
 import importlib.util
 import pathlib
@@ -29,8 +33,11 @@ BRANCHES = DELAYED | {"bt", "bf"}
 
 
 def main():
-    listing, name, entry = sys.argv[1], sys.argv[2], int(sys.argv[3], 16)
-    extra = [int(x, 16) for x in sys.argv[4:]]
+    args = sys.argv[1:]
+    timed = "--timed" in args
+    args = [a for a in args if a != "--timed"]
+    listing, name, entry = args[0], args[1], int(args[2], 16)
+    extra = [int(x, 16) for x in args[3:]]
     listed, words = {}, {}
     for line in open(listing):
         p = asm2rs.parse(line)
@@ -118,6 +125,10 @@ def main():
     def wait_line(at, target):
         return f"cpu.wait(0x{target:08x}, {(at - target) // 2 + 2});"
 
+    def spend_line(start, last):
+        """The block from `start` to `last` (its branch's delay slot, if any): its time."""
+        return f"cpu.spend(0x{start:08x}, {(last - start) // 2 + 1});"
+
     def stmt(a):
         addr, _, mn, args, lit = code[a]
         s = asm2rs.convert(addr, mn, args, lit) or extra_convert(mn, args)
@@ -154,17 +165,21 @@ def main():
                 out.append("                " + stmt(a))
                 a += 2
                 if a in leaders:
+                    if timed:
+                        out.append("                " + spend_line(start, a - 2))
                     out.append(f"                pc = 0x{a:08x};")
                     break
                 continue
             slot = a + 2
             after = a + 4
             ind = "                "
+            if timed:
+                out.append(ind + spend_line(start, a if mn in ("bt", "bf") else slot))
             if mn in ("bt", "bf"):
                 cond = "t" if mn == "bt" else "!t"
                 x = int(args, 16)
                 out.append(f"{ind}pc = if {cond} {{ 0x{x:08x} }} else {{ 0x{a + 2:08x} }}; // {addr} {mn} {args}")
-                if spin(a, x):
+                if not timed and spin(a, x):
                     out.append(f"{ind}if pc == 0x{x:08x} {{ {wait_line(a, x)} }}")
             elif mn in ("bt/s", "bf/s"):
                 cond = "t" if mn == "bt/s" else "!t"
@@ -172,14 +187,14 @@ def main():
                 out.append(f"{ind}let take = {cond}; // {addr} {mn} {args}")
                 out.append(ind + stmt(slot))
                 out.append(f"{ind}pc = if take {{ 0x{x:08x} }} else {{ 0x{after:08x} }};")
-                if spin(a, x):
+                if not timed and spin(a, x):
                     out.append(f"{ind}if take {{ {wait_line(a, x)} }}")
             elif mn == "bra":
                 x = int(args, 16)
                 out.append(f"{ind}// {addr} bra {args}")
                 out.append(ind + stmt(slot))
                 out.append(f"{ind}pc = 0x{x:08x};")
-                if spin(a, x):
+                if not timed and spin(a, x):
                     out.append(f"{ind}{wait_line(a, x)}")
             elif mn == "jmp":
                 rn = args[1:]

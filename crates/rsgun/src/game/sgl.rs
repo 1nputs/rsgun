@@ -3257,11 +3257,11 @@ pub fn rotation_parameters(cpu: &mut Cpu) -> u32 {
     1
 }
 
-/// The TV mode (`mode`, 0-31; SGL's table of TVMD's low byte by it, and of the rotation tables'
-/// Pz and Cz), unless its hi-res bit (bit 2) differs from the screen mode's: whether it was set.
-/// Mode bit 4 clears the screen mode's bit 7.
+/// The TV mode (`mode`, 0-31; SGL's table of TVMD's low byte by it, and of half the screen's width
+/// and height, the width the rotation tables' Pz and Cz), unless its hi-res bit (bit 2) differs
+/// from the screen mode's: whether it was set. Mode bit 4 clears the screen mode's bit 7.
 const TV_MODES: u32 = 0x0603_5820;
-const TV_DEPTHS: u32 = 0x0603_57a0;
+const SCREEN_HALVES: u32 = 0x0603_57a0;
 const TVMD_LOW: u32 = 0xc1;
 
 pub fn tv_mode(cpu: &mut Cpu, mode: u32) -> u32 {
@@ -3280,11 +3280,11 @@ pub fn tv_mode(cpu: &mut Cpu, mode: u32) -> u32 {
     }
     let tvmd = cpu.read8(TV_MODES + mode);
     cpu.write8(w + TVMD_LOW, tvmd);
-    let depth = cpu.read32(TV_DEPTHS + 4 * mode).rotate_left(16);
+    let halves = cpu.read32(SCREEN_HALVES + 4 * mode);
     for at in [0, PZ_TO_CZ, ROTATION_TABLE, ROTATION_TABLE + PZ_TO_CZ] {
-        cpu.write16(ROTATION_PZ + at, depth as u16);
+        cpu.write16(ROTATION_PZ + at, (halves >> 16) as u16);
     }
-    cpu.leave(&[(1, depth.rotate_left(16)), (2, ROTATION_PZ + ROTATION_TABLE)]);
+    cpu.leave(&[(1, halves), (2, ROTATION_PZ + ROTATION_TABLE)]);
     cpu.leave_t(mode & 16 == 0);
     1
 }
@@ -8980,4 +8980,1598 @@ fn draw_init_blocks(cpu: &mut Cpu) {
     }
     hand_over!();
     cpu.leave_r14(r14);
+}
+
+/// SGL's PCM streams, each VBlank (8 slots of 20 bytes, by each one's state: its high bits pick
+/// SGL's step for it from a table): a playing stream's next stretch copied into sound RAM (by
+/// the SCU's level-2 DMA or the CPU's channel 1, 0x06033884 and 0x060338da), its play and stop
+/// sent; an idle slot passed by. Not seen run past the idle step: the game has no PCM streams.
+/// SGL's code block by block (asm2sm.py).
+pub fn pcm_streams(cpu: &mut Cpu) {
+    pcm_streams_blocks(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn pcm_streams_blocks(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x06033658;
+    loop {
+        match pc {
+            0x06033658 => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r8); // 06033658 mov.l r8,@-r15
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, pr); // 0603365a sts.l pr,@-r15
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r9); // 0603365c mov.l r9,@-r15
+                r8 = 0x06034f48; // 0603365e mov.l 0x6033938,r8
+                r9 = 8i32 as u32; // 06033660 mov #8,r9
+                pc = 0x06033662;
+            }
+            0x06033662 => {
+                r0 = cpu.read8(r8.wrapping_add(0)) as i8 as i32 as u32; // 06033662 mov.b @(0,r8),r0
+                r1 = 124i32 as u32; // 06033664 mov #124,r1
+                r1 &= r0; // 06033666 and r0,r1
+                r0 = 0x0603393c; // 06033668 mova 0x603393c,r0
+                r2 = cpu.read32(r0.wrapping_add(r1)); // 0603366a mov.l @(r0,r1),r2
+                r0 = 60i32 as u32; // 0603366c mov #60,r0
+                let to = r2; // 0603366e jmp @r2
+                r1 &= r0; // 06033670 and r0,r1
+                pc = to;
+            }
+            0x06033672 => {
+                r0 = cpu.read8(r8.wrapping_add(1)) as i8 as i32 as u32; // 06033672 mov.b @(1,r8),r0
+                r2 = 0x25a007a0; // 06033674 mov.l 0x60339ec,r2
+                r3 = r0; // 06033676 mov r0,r3
+                r0 >>= 2; // 06033678 shlr2 r0
+                t = r0 & 1 != 0; r0 >>= 1; // 0603367a shlr r0
+                r0 &= 14; // 0603367c and #14,r0
+                r2 = cpu.read8(r0.wrapping_add(r2)) as i8 as i32 as u32; // 0603367e mov.b @(r0,r2),r2
+                r0 = 0x060339bc; // 06033680 mova 0x60339bc,r0
+                t = r2 & r2 == 0; // 06033682 tst r2,r2
+                let take = !t; // 06033684 bf/s 0x6033732
+                r7 = 1i32 as u32; // 06033686 mov #1,r7
+                pc = if take { 0x06033732 } else { 0x06033688 };
+            }
+            0x06033688 => {
+                r1 = cpu.read16(r0.wrapping_add(r1)) as i16 as i32 as u32; // 06033688 mov.w @(r0,r1),r1
+                r5 = cpu.read32(r8.wrapping_add(8)); // 0603368a mov.l @(8,r8),r5
+                r4 = cpu.read32(r8.wrapping_add(16)); // 0603368c mov.l @(16,r8),r4
+                r6 = cpu.read32(r8.wrapping_add(12)); // 0603368e mov.l @(12,r8),r6
+                r0 = r3; // 06033690 mov r3,r0
+                r3 = r6; // 06033692 mov r6,r3
+                t = r0 & 128 == 0; // 06033694 tst #128,r0
+                let take = t; // 06033696 bt/s 0x60336a0
+                r2 = 32i32 as u32; // 06033698 mov #32,r2
+                pc = if take { 0x060336a0 } else { 0x0603369a };
+            }
+            0x0603369a => {
+                t = r7 >> 31 != 0; r7 <<= 1; // 0603369a shll r7
+                t = r2 >> 31 != 0; r2 <<= 1; // 0603369c shll r2
+                t = r1 >> 31 != 0; r1 <<= 1; // 0603369e shll r1
+                pc = 0x060336a0;
+            }
+            0x060336a0 => {
+                r7 <<= 8; // 060336a0 shll8 r7
+                r6 = r6.wrapping_sub(r4); // 060336a2 sub r4,r6
+                t = r6 >= r7; // 060336a4 cmp/hs r7,r6
+                let take = t; // 060336a6 bt/s 0x60336d0
+                r4 = cpu.read32(r8.wrapping_add(4)); // 060336a8 mov.l @(4,r8),r4
+                pc = if take { 0x060336d0 } else { 0x060336aa };
+            }
+            0x060336aa => {
+                t = r0 & 2 == 0; // 060336aa tst #2,r0
+                let take = t; // 060336ac bt/s 0x60336c4
+                r5 = r5.wrapping_add(r1); // 060336ae add r1,r5
+                pc = if take { 0x060336c4 } else { 0x060336b0 };
+            }
+            0x060336b0 => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r7); // 060336b0 mov.l r7,@-r15
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r5); // 060336b2 mov.l r5,@-r15
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r4); // 060336b4 mov.l r4,@-r15
+                r2 <<= 8; // 060336b6 shll8 r2
+                r4 = r4.wrapping_add(r3); // 060336b8 add r3,r4
+                let to = 0x06033884; // 060336ba bsr 0x6033884
+                r5 = r5.wrapping_add(r2); // 060336bc add r2,r5
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x060336be;
+                pc = 0x060336be;
+            }
+            0x060336be => {
+                r4 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 060336be mov.l @r15+,r4
+                r5 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 060336c0 mov.l @r15+,r5
+                r7 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 060336c2 mov.l @r15+,r7
+                pc = 0x060336c4;
+            }
+            0x060336c4 => {
+                let to = 0x06033884; // 060336c4 bsr 0x6033884
+                // nop // 060336c6 nop 
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x060336c8;
+                pc = 0x060336c8;
+            }
+            0x060336c8 => {
+                r2 = cpu.read32(r8.wrapping_add(16)); // 060336c8 mov.l @(16,r8),r2
+                r0 = 92i32 as u32; // 060336ca mov #92,r0
+                // 060336cc bra 0x603372e
+                r2 = r2.wrapping_add(r7); // 060336ce add r7,r2
+                pc = 0x0603372e;
+            }
+            0x060336d0 => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r1); // 060336d0 mov.l r1,@-r15
+                r1 = r7; // 060336d2 mov r7,r1
+                r7 = r7.wrapping_add(r1); // 060336d4 add r1,r7
+                r7 = r7.wrapping_add(r1); // 060336d6 add r1,r7
+                // 060336d8 bra 0x60336fe
+                r1 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 060336da mov.l @r15+,r1
+                pc = 0x060336fe;
+            }
+            0x060336dc => {
+                r0 = 0x060339bc; // 060336dc mova 0x60339bc,r0
+                r1 = cpu.read16(r0.wrapping_add(r1)) as i16 as i32 as u32; // 060336de mov.w @(r0,r1),r1
+                r0 = cpu.read8(r8.wrapping_add(1)) as i8 as i32 as u32; // 060336e0 mov.b @(1,r8),r0
+                r5 = cpu.read32(r8.wrapping_add(8)); // 060336e2 mov.l @(8,r8),r5
+                r4 = cpu.read32(r8.wrapping_add(16)); // 060336e4 mov.l @(16,r8),r4
+                r6 = cpu.read32(r8.wrapping_add(12)); // 060336e6 mov.l @(12,r8),r6
+                r7 = 3i32 as u32; // 060336e8 mov #3,r7
+                r3 = r6; // 060336ea mov r6,r3
+                r6 = r6.wrapping_sub(r4); // 060336ec sub r4,r6
+                r4 = cpu.read32(r8.wrapping_add(4)); // 060336ee mov.l @(4,r8),r4
+                r7 <<= 8; // 060336f0 shll8 r7
+                t = r0 & 128 == 0; // 060336f2 tst #128,r0
+                let take = t; // 060336f4 bt/s 0x60336fe
+                r2 = 32i32 as u32; // 060336f6 mov #32,r2
+                pc = if take { 0x060336fe } else { 0x060336f8 };
+            }
+            0x060336f8 => {
+                t = r7 >> 31 != 0; r7 <<= 1; // 060336f8 shll r7
+                t = r2 >> 31 != 0; r2 <<= 1; // 060336fa shll r2
+                t = r1 >> 31 != 0; r1 <<= 1; // 060336fc shll r1
+                pc = 0x060336fe;
+            }
+            0x060336fe => {
+                t = r0 & 2 == 0; // 060336fe tst #2,r0
+                let take = t; // 06033700 bt/s 0x6033718
+                r5 = r5.wrapping_add(r1); // 06033702 add r1,r5
+                pc = if take { 0x06033718 } else { 0x06033704 };
+            }
+            0x06033704 => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r7); // 06033704 mov.l r7,@-r15
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r5); // 06033706 mov.l r5,@-r15
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r4); // 06033708 mov.l r4,@-r15
+                r2 <<= 8; // 0603370a shll8 r2
+                r4 = r4.wrapping_add(r3); // 0603370c add r3,r4
+                let to = 0x06033884; // 0603370e bsr 0x6033884
+                r5 = r5.wrapping_add(r2); // 06033710 add r2,r5
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x06033712;
+                pc = 0x06033712;
+            }
+            0x06033712 => {
+                r4 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06033712 mov.l @r15+,r4
+                r5 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06033714 mov.l @r15+,r5
+                r7 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06033716 mov.l @r15+,r7
+                pc = 0x06033718;
+            }
+            0x06033718 => {
+                let to = 0x06033884; // 06033718 bsr 0x6033884
+                // nop // 0603371a nop 
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x0603371c;
+                pc = 0x0603371c;
+            }
+            0x0603371c => {
+                cpu.write32(r8.wrapping_add(4), r4); // 0603371c mov.l r4,@(4,r8)
+                r2 = cpu.read32(r8.wrapping_add(16)); // 0603371e mov.l @(16,r8),r2
+                r3 = cpu.read32(r8.wrapping_add(12)); // 06033720 mov.l @(12,r8),r3
+                r0 = cpu.read8(r8.wrapping_add(0)) as i8 as i32 as u32; // 06033722 mov.b @(0,r8),r0
+                r2 = r2.wrapping_add(r7); // 06033724 add r7,r2
+                t = r3 == r2; // 06033726 cmp/eq r2,r3
+                let take = !t; // 06033728 bf/s 0x603372e
+                r0 = r0.wrapping_add(4i32 as u32); // 0603372a add #4,r0
+                pc = if take { 0x0603372e } else { 0x0603372c };
+            }
+            0x0603372c => {
+                r0 = r0.wrapping_add(64i32 as u32); // 0603372c add #64,r0
+                pc = 0x0603372e;
+            }
+            0x0603372e => {
+                cpu.write32(r8.wrapping_add(16), r2); // 0603372e mov.l r2,@(16,r8)
+                cpu.write8(r8.wrapping_add(0), r0 as u8); // 06033730 mov.b r0,@(0,r8)
+                pc = 0x06033732;
+            }
+            0x06033732 => {
+                r9 = r9.wrapping_sub(1); t = r9 == 0; // 06033732 dt r9
+                let take = !t; // 06033734 bf/s 0x6033662
+                r8 = r8.wrapping_add(20i32 as u32); // 06033736 add #20,r8
+                pc = if take { 0x06033662 } else { 0x06033738 };
+            }
+            0x06033738 => {
+                r9 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06033738 mov.l @r15+,r9
+                pr = cpu.read32(r15); r15 = r15.wrapping_add(4); // 0603373a lds.l @r15+,pr
+                // 0603373c rts
+                r8 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 0603373e mov.l @r15+,r8
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            0x06033740 => {
+                r0 = cpu.read8(r8.wrapping_add(1)) as i8 as i32 as u32; // 06033740 mov.b @(1,r8),r0
+                r2 = 0x25a007a0; // 06033742 mov.l 0x60339ec,r2
+                r3 = r0; // 06033744 mov r0,r3
+                r0 >>= 2; // 06033746 shlr2 r0
+                t = r0 & 1 != 0; r0 >>= 1; // 06033748 shlr r0
+                r0 &= 14; // 0603374a and #14,r0
+                r2 = cpu.read8(r0.wrapping_add(r2)) as i8 as i32 as u32; // 0603374c mov.b @(r0,r2),r2
+                r0 = 0x060339bc; // 0603374e mova 0x60339bc,r0
+                t = r2 & r2 == 0; // 06033750 tst r2,r2
+                let take = t; // 06033752 bt/s 0x6033732
+                r7 = 2i32 as u32; // 06033754 mov #2,r7
+                pc = if take { 0x06033732 } else { 0x06033756 };
+            }
+            0x06033756 => {
+                r1 = cpu.read16(r0.wrapping_add(r1)) as i16 as i32 as u32; // 06033756 mov.w @(r0,r1),r1
+                r5 = cpu.read32(r8.wrapping_add(8)); // 06033758 mov.l @(8,r8),r5
+                r4 = cpu.read32(r8.wrapping_add(16)); // 0603375a mov.l @(16,r8),r4
+                r6 = cpu.read32(r8.wrapping_add(12)); // 0603375c mov.l @(12,r8),r6
+                r0 = r3; // 0603375e mov r3,r0
+                r3 = r6; // 06033760 mov r6,r3
+                t = r0 & 128 == 0; // 06033762 tst #128,r0
+                let take = t; // 06033764 bt/s 0x603376e
+                r2 = 32i32 as u32; // 06033766 mov #32,r2
+                pc = if take { 0x0603376e } else { 0x06033768 };
+            }
+            0x06033768 => {
+                t = r7 >> 31 != 0; r7 <<= 1; // 06033768 shll r7
+                t = r2 >> 31 != 0; r2 <<= 1; // 0603376a shll r2
+                t = r1 >> 31 != 0; r1 <<= 1; // 0603376c shll r1
+                pc = 0x0603376e;
+            }
+            0x0603376e => {
+                r7 <<= 8; // 0603376e shll8 r7
+                r6 = r6.wrapping_sub(r4); // 06033770 sub r4,r6
+                t = r6 >= r7; // 06033772 cmp/hs r7,r6
+                let take = t; // 06033774 bt/s 0x603379e
+                r4 = cpu.read32(r8.wrapping_add(4)); // 06033776 mov.l @(4,r8),r4
+                pc = if take { 0x0603379e } else { 0x06033778 };
+            }
+            0x06033778 => {
+                t = r0 & 2 == 0; // 06033778 tst #2,r0
+                let take = t; // 0603377a bt/s 0x6033792
+                r5 = r5.wrapping_add(r1); // 0603377c add r1,r5
+                pc = if take { 0x06033792 } else { 0x0603377e };
+            }
+            0x0603377e => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r7); // 0603377e mov.l r7,@-r15
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r5); // 06033780 mov.l r5,@-r15
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r4); // 06033782 mov.l r4,@-r15
+                r2 <<= 8; // 06033784 shll8 r2
+                r4 = r4.wrapping_add(r3); // 06033786 add r3,r4
+                let to = 0x06033884; // 06033788 bsr 0x6033884
+                r5 = r5.wrapping_add(r2); // 0603378a add r2,r5
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x0603378c;
+                pc = 0x0603378c;
+            }
+            0x0603378c => {
+                r4 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 0603378c mov.l @r15+,r4
+                r5 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 0603378e mov.l @r15+,r5
+                r7 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06033790 mov.l @r15+,r7
+                pc = 0x06033792;
+            }
+            0x06033792 => {
+                let to = 0x06033884; // 06033792 bsr 0x6033884
+                // nop // 06033794 nop 
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x06033796;
+                pc = 0x06033796;
+            }
+            0x06033796 => {
+                r2 = cpu.read32(r8.wrapping_add(16)); // 06033796 mov.l @(16,r8),r2
+                r0 = 68i32 as u32; // 06033798 mov #68,r0
+                // 0603379a bra 0x603372e
+                r2 = r2.wrapping_add(r7); // 0603379c add r7,r2
+                pc = 0x0603372e;
+            }
+            0x0603379e => {
+                t = r0 & 2 == 0; // 0603379e tst #2,r0
+                let take = t; // 060337a0 bt/s 0x60337b8
+                r5 = r5.wrapping_add(r1); // 060337a2 add r1,r5
+                pc = if take { 0x060337b8 } else { 0x060337a4 };
+            }
+            0x060337a4 => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r7); // 060337a4 mov.l r7,@-r15
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r5); // 060337a6 mov.l r5,@-r15
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r4); // 060337a8 mov.l r4,@-r15
+                r2 <<= 8; // 060337aa shll8 r2
+                r4 = r4.wrapping_add(r3); // 060337ac add r3,r4
+                let to = 0x06033884; // 060337ae bsr 0x6033884
+                r5 = r5.wrapping_add(r2); // 060337b0 add r2,r5
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x060337b2;
+                pc = 0x060337b2;
+            }
+            0x060337b2 => {
+                r4 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 060337b2 mov.l @r15+,r4
+                r5 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 060337b4 mov.l @r15+,r5
+                r7 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 060337b6 mov.l @r15+,r7
+                pc = 0x060337b8;
+            }
+            0x060337b8 => {
+                let to = 0x06033884; // 060337b8 bsr 0x6033884
+                // nop // 060337ba nop 
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x060337bc;
+                pc = 0x060337bc;
+            }
+            0x060337bc => {
+                r2 = cpu.read32(r8.wrapping_add(16)); // 060337bc mov.l @(16,r8),r2
+                r3 = cpu.read32(r8.wrapping_add(12)); // 060337be mov.l @(12,r8),r3
+                r2 = r2.wrapping_add(r7); // 060337c0 add r7,r2
+                t = r3 == r2; // 060337c2 cmp/eq r2,r3
+                let take = t; // 060337c4 bt/s 0x603372e
+                r0 = 68i32 as u32; // 060337c6 mov #68,r0
+                pc = if take { 0x0603372e } else { 0x060337c8 };
+            }
+            0x060337c8 => {
+                r0 = cpu.read16(r8.wrapping_add(0)) as i16 as i32 as u32; // 060337c8 mov.w @(0,r8),r0
+                r7 = 1i32 as u32; // 060337ca mov #1,r7
+                r1 = (r0 & 0xffff_0000) | ((r0 & 0xff) << 8) | ((r0 >> 8) & 0xff); // 060337cc swap.b r0,r1
+                r7 &= r1; // 060337ce and r1,r7
+                t = r0 & 128 == 0; // 060337d0 tst #128,r0
+                let take = !t; // 060337d2 bf/s 0x60337da
+                r1 = 2i32 as u32; // 060337d4 mov #2,r1
+                pc = if take { 0x060337da } else { 0x060337d6 };
+            }
+            0x060337d6 => {
+                r1 = 1i32 as u32; // 060337d6 mov #1,r1
+                r1 = r1.wrapping_sub(r7); // 060337d8 sub r7,r1
+                pc = 0x060337da;
+            }
+            0x060337da => {
+                r4 = r4.wrapping_sub(r1); // 060337da sub r1,r4
+                r2 = r2.wrapping_sub(r1); // 060337dc sub r1,r2
+                cpu.write32(r8.wrapping_add(4), r4); // 060337de mov.l r4,@(4,r8)
+                r7 = r7.wrapping_add(4i32 as u32); // 060337e0 add #4,r7
+                // 060337e2 bra 0x603372e
+                r0 = r7; // 060337e4 mov r7,r0
+                pc = 0x0603372e;
+            }
+            0x060337e6 => {
+                r0 = cpu.read8(r8.wrapping_add(1)) as i8 as i32 as u32; // 060337e6 mov.b @(1,r8),r0
+                r2 = 0x25a007a0; // 060337e8 mov.l 0x60339ec,r2
+                r3 = r0; // 060337ea mov r0,r3
+                r0 >>= 2; // 060337ec shlr2 r0
+                t = r0 & 1 != 0; r0 >>= 1; // 060337ee shlr r0
+                r0 &= 14; // 060337f0 and #14,r0
+                r2 = cpu.read8(r0.wrapping_add(r2)) as i8 as i32 as u32; // 060337f2 mov.b @(r0,r2),r2
+                r0 = 0x060339bc; // 060337f4 mova 0x60339bc,r0
+                t = r2 & r2 == 0; // 060337f6 tst r2,r2
+                let take = t; // 060337f8 bt/s 0x6033732
+                r0 = r0.wrapping_add(2i32 as u32); // 060337fa add #2,r0
+                pc = if take { 0x06033732 } else { 0x060337fc };
+            }
+            0x060337fc => {
+                r2 = cpu.read16(r0.wrapping_add(r1)) as i16 as i32 as u32; // 060337fc mov.w @(r0,r1),r2
+                r0 = cpu.read16(r8.wrapping_add(2)) as i16 as i32 as u32; // 060337fe mov.w @(2,r8),r0
+                r6 = 2i32 as u32; // 06033800 mov #2,r6
+                r0 &= r2; // 06033802 and r2,r0
+                t = r0 & r0 == 0; // 06033804 tst r0,r0
+                let take = !t; // 06033806 bf/s 0x6033836
+                r2 = 68i32 as u32; // 06033808 mov #68,r2
+                pc = if take { 0x06033836 } else { 0x0603380a };
+            }
+            0x0603380a => {
+                // 0603380a bra 0x6033836
+                r2 = 112i32 as u32; // 0603380c mov #112,r2
+                pc = 0x06033836;
+            }
+            0x0603380e => {
+                r0 = cpu.read8(r8.wrapping_add(1)) as i8 as i32 as u32; // 0603380e mov.b @(1,r8),r0
+                r2 = 0x25a007a0; // 06033810 mov.l 0x60339ec,r2
+                r3 = r0; // 06033812 mov r0,r3
+                r0 >>= 2; // 06033814 shlr2 r0
+                t = r0 & 1 != 0; r0 >>= 1; // 06033816 shlr r0
+                r0 &= 14; // 06033818 and #14,r0
+                r2 = cpu.read8(r0.wrapping_add(r2)) as i8 as i32 as u32; // 0603381a mov.b @(r0,r2),r2
+                t = r2 & r2 == 0; // 0603381c tst r2,r2
+                pc = if !t { 0x06033732 } else { 0x06033820 }; // 0603381e bf 0x6033732
+            }
+            0x06033820 => {
+                r0 = 0x060339bc; // 06033820 mova 0x60339bc,r0
+                r0 = r0.wrapping_add(2i32 as u32); // 06033822 add #2,r0
+                r2 = cpu.read16(r0.wrapping_add(r1)) as i16 as i32 as u32; // 06033824 mov.w @(r0,r1),r2
+                r0 = cpu.read16(r8.wrapping_add(2)) as i16 as i32 as u32; // 06033826 mov.w @(2,r8),r0
+                r6 = 3i32 as u32; // 06033828 mov #3,r6
+                r0 &= r2; // 0603382a and r2,r0
+                r2 = r1; // 0603382c mov r1,r2
+                t = r0 & r0 == 0; // 0603382e tst r0,r0
+                let take = !t; // 06033830 bf/s 0x6033836
+                r2 = r2.wrapping_add(68i32 as u32); // 06033832 add #68,r2
+                pc = if take { 0x06033836 } else { 0x06033834 };
+            }
+            0x06033834 => {
+                r2 = 112i32 as u32; // 06033834 mov #112,r2
+                pc = 0x06033836;
+            }
+            0x06033836 => {
+                cpu.write8(r8, r2 as u8); // 06033836 mov.b r2,@r8
+                cpu.write16(r8.wrapping_add(2), r0 as u16); // 06033838 mov.w r0,@(2,r8)
+                r0 = 0x060339bc; // 0603383a mova 0x60339bc,r0
+                r7 = cpu.read16(r0.wrapping_add(r1)) as i16 as i32 as u32; // 0603383c mov.w @(r0,r1),r7
+                r5 = cpu.read32(r8.wrapping_add(8)); // 0603383e mov.l @(8,r8),r5
+                r0 = 0x060339f0; // 06033840 mova 0x60339f0,r0
+                let to = 0x060338da; // 06033842 bsr 0x60338da
+                r4 = r0; // 06033844 mov r0,r4
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x06033846;
+                pc = 0x06033846;
+            }
+            0x06033846 => {
+                r0 = cpu.read8(r8.wrapping_add(1)) as i8 as i32 as u32; // 06033846 mov.b @(1,r8),r0
+                cpu.write32(r3.wrapping_add(0), r4); // 06033848 mov.l r4,@(0,r3)
+                t = r0 & 128 == 0; // 0603384a tst #128,r0
+                let take = t; // 0603384c bt/s 0x6033856
+                r1 = 32i32 as u32; // 0603384e mov #32,r1
+                pc = if take { 0x06033856 } else { 0x06033850 };
+            }
+            0x06033850 => {
+                t = r6 >> 31 != 0; r6 <<= 1; // 06033850 shll r6
+                t = r7 >> 31 != 0; r7 <<= 1; // 06033852 shll r7
+                t = r1 >> 31 != 0; r1 <<= 1; // 06033854 shll r1
+                pc = 0x06033856;
+            }
+            0x06033856 => {
+                r6 <<= 8; // 06033856 shll8 r6
+                cpu.write32(r3.wrapping_add(8), r6); // 06033858 mov.l r6,@(8,r3)
+                r4 = 1i32 as u32; // 0603385a mov #1,r4
+                cpu.write32(r3.wrapping_add(12), r4); // 0603385c mov.l r4,@(12,r3)
+                r4 = 7i32 as u32; // 0603385e mov #7,r4
+                cpu.write32(r3.wrapping_add(20), r4); // 06033860 mov.l r4,@(20,r3)
+                t = r0 & 2 == 0; // 06033862 tst #2,r0
+                let take = t; // 06033864 bt/s 0x6033878
+                r5 = r5.wrapping_add(r7); // 06033866 add r7,r5
+                pc = if take { 0x06033878 } else { 0x06033868 };
+            }
+            0x06033868 => {
+                r1 <<= 8; // 06033868 shll8 r1
+                r1 = r1.wrapping_add(r5); // 0603386a add r5,r1
+                r0 = 8i32 as u32; // 0603386c mov #8,r0
+                cpu.write8(w.wrapping_add(189), r0 as u8); // 0603386e mov.b r0,@(189,gbr)
+                r0 = 0x00000101; // 06033870 mov.w 0x6033934,r0
+                cpu.write32(r3.wrapping_add(4), r1); // 06033872 mov.l r1,@(4,r3)
+                let to = 0x060338da; // 06033874 bsr 0x60338da
+                cpu.write32(r3.wrapping_add(16), r0); // 06033876 mov.l r0,@(16,r3)
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x06033878;
+                pc = 0x06033878;
+            }
+            0x06033878 => {
+                r0 = 8i32 as u32; // 06033878 mov #8,r0
+                cpu.write8(w.wrapping_add(189), r0 as u8); // 0603387a mov.b r0,@(189,gbr)
+                r0 = 0x00000101; // 0603387c mov.w 0x6033934,r0
+                cpu.write32(r3.wrapping_add(4), r5); // 0603387e mov.l r5,@(4,r3)
+                // 06033880 bra 0x6033732
+                cpu.write32(r3.wrapping_add(16), r0); // 06033882 mov.l r0,@(16,r3)
+                pc = 0x06033732;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+
+/// A stream's stretch copied (pcm_streams's: by the SCU's level-2 DMA, its wrap at the buffer's
+/// end done as a second copy, or by the CPU's channel 1). Not seen run.
+pub fn pcm_copy(cpu: &mut Cpu) {
+    pcm_copy_blocks(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn pcm_copy_blocks(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x06033884;
+    loop {
+        match pc {
+            0x06033884 => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, pr); // 06033884 sts.l pr,@-r15
+                let to = 0x060338da; // 06033886 bsr 0x60338da
+                // nop // 06033888 nop 
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x0603388a;
+                pc = 0x0603388a;
+            }
+            0x0603388a => {
+                r0 = 0i32 as u32; // 0603388a mov #0,r0
+                cpu.write32(r3.wrapping_add(16), r0); // 0603388c mov.l r0,@(16,r3)
+                t = r6 >= r7; // 0603388e cmp/hs r7,r6
+                let take = t; // 06033890 bt/s 0x60338b8
+                r1 = 7i32 as u32; // 06033892 mov #7,r1
+                pc = if take { 0x060338b8 } else { 0x06033894 };
+            }
+            0x06033894 => {
+                r2 = r5; // 06033894 mov r5,r2
+                r0 = 0x060339f0; // 06033896 mova 0x60339f0,r0
+                r2 = r2.wrapping_add(r6); // 06033898 add r6,r2
+                r7 = r7.wrapping_sub(r6); // 0603389a sub r6,r7
+                cpu.write32(r3.wrapping_add(0), r0); // 0603389c mov.l r0,@(0,r3)
+                cpu.write32(r3.wrapping_add(4), r2); // 0603389e mov.l r2,@(4,r3)
+                cpu.write32(r3.wrapping_add(8), r7); // 060338a0 mov.l r7,@(8,r3)
+                r0 = 1i32 as u32; // 060338a2 mov #1,r0
+                cpu.write32(r3.wrapping_add(12), r0); // 060338a4 mov.l r0,@(12,r3)
+                r0 = 8i32 as u32; // 060338a6 mov #8,r0
+                cpu.write8(w.wrapping_add(189), r0 as u8); // 060338a8 mov.b r0,@(189,gbr)
+                r0 = 0x00000101; // 060338aa mov.w 0x6033934,r0
+                cpu.write32(r3.wrapping_add(20), r1); // 060338ac mov.l r1,@(20,r3)
+                let to = 0x060338da; // 060338ae bsr 0x60338da
+                cpu.write32(r3.wrapping_add(16), r0); // 060338b0 mov.l r0,@(16,r3)
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x060338b2;
+                pc = 0x060338b2;
+            }
+            0x060338b2 => {
+                r7 = r6; // 060338b2 mov r6,r7
+                r0 = 0i32 as u32; // 060338b4 mov #0,r0
+                cpu.write32(r3.wrapping_add(16), r0); // 060338b6 mov.l r0,@(16,r3)
+                pc = 0x060338b8;
+            }
+            0x060338b8 => {
+                r0 = cpu.read8(r8.wrapping_add(0)) as i8 as i32 as u32; // 060338b8 mov.b @(0,r8),r0
+                t = r7 & r7 == 0; // 060338ba tst r7,r7
+                let take = t; // 060338bc bt/s 0x60338d6
+                pr = cpu.read32(r15); r15 = r15.wrapping_add(4); // 060338be lds.l @r15+,pr
+                pc = if take { 0x060338d6 } else { 0x060338c0 };
+            }
+            0x060338c0 => {
+                t = r0 & 1 == 0; // 060338c0 tst #1,r0
+                pc = if !t { 0x060338f0 } else { 0x060338c4 }; // 060338c2 bf 0x60338f0
+            }
+            0x060338c4 => {
+                r2 = 0x00000101; // 060338c4 mov.w 0x6033934,r2
+                cpu.write32(r3.wrapping_add(0), r4); // 060338c6 mov.l r4,@(0,r3)
+                cpu.write32(r3.wrapping_add(4), r5); // 060338c8 mov.l r5,@(4,r3)
+                cpu.write32(r3.wrapping_add(8), r7); // 060338ca mov.l r7,@(8,r3)
+                cpu.write32(r3.wrapping_add(12), r2); // 060338cc mov.l r2,@(12,r3)
+                cpu.write32(r3.wrapping_add(20), r1); // 060338ce mov.l r1,@(20,r3)
+                cpu.write32(r3.wrapping_add(16), r2); // 060338d0 mov.l r2,@(16,r3)
+                r0 = 8i32 as u32; // 060338d2 mov #8,r0
+                cpu.write8(w.wrapping_add(189), r0 as u8); // 060338d4 mov.b r0,@(189,gbr)
+                pc = 0x060338d6;
+            }
+            0x060338d6 => {
+                // 060338d6 rts
+                r4 = r4.wrapping_add(r7); // 060338d8 add r7,r4
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            0x060338f0 => {
+                r3 = -112i32 as u32; // 060338f0 mov #-112,r3
+                pc = 0x060338f2;
+            }
+            0x060338f2 => {
+                r0 = cpu.read32(r3.wrapping_add(12)); // 060338f2 mov.l @(12,r3),r0
+                r0 &= 3; // 060338f4 and #3,r0
+                t = r0 == 1i32 as u32; // 060338f6 cmp/eq #1,r0
+                let take = t; // 060338f8 bt/s 0x60338f2
+                r0 = r7; // 060338fa mov r7,r0
+                pc = if take { 0x060338f2 } else { 0x060338fc };
+                if take { cpu.wait(0x060338f2, 5); }
+            }
+            0x060338fc => {
+                r0 |= r4; // 060338fc or r4,r0
+                r2 = r7; // 060338fe mov r7,r2
+                t = r2 & 1 != 0; r2 >>= 1; // 06033900 shlr r2
+                t = r0 & 2 == 0; // 06033902 tst #2,r0
+                let take = !t; // 06033904 bf/s 0x603390c
+                r1 = 4i32 as u32; // 06033906 mov #4,r1
+                pc = if take { 0x0603390c } else { 0x06033908 };
+            }
+            0x06033908 => {
+                t = r2 & 1 != 0; r2 >>= 1; // 06033908 shlr r2
+                r1 = 8i32 as u32; // 0603390a mov #8,r1
+                pc = 0x0603390c;
+            }
+            0x0603390c => {
+                r0 = cpu.read32(r3.wrapping_add(32)); // 0603390c mov.l @(32,r3),r0
+                r0 = 0i32 as u32; // 0603390e mov #0,r0
+                cpu.write32(r3.wrapping_add(12), r0); // 06033910 mov.l r0,@(12,r3)
+                r3 = -100i32 as u32; // 06033912 mov #-100,r3
+                r3 <<= 2; // 06033914 shll2 r3
+                cpu.write8(r3.wrapping_add(2), r0 as u8); // 06033916 mov.b r0,@(2,r3)
+                r3 = -112i32 as u32; // 06033918 mov #-112,r3
+                cpu.write32(r3.wrapping_add(0), r4); // 0603391a mov.l r4,@(0,r3)
+                cpu.write32(r3.wrapping_add(4), r5); // 0603391c mov.l r5,@(4,r3)
+                cpu.write32(r3.wrapping_add(8), r2); // 0603391e mov.l r2,@(8,r3)
+                r0 = 0x00005201; // 06033920 mov.w 0x6033936,r0
+                r1 <<= 8; // 06033922 shll8 r1
+                r0 |= r1; // 06033924 or r1,r0
+                cpu.write32(r3.wrapping_add(12), r0); // 06033926 mov.l r0,@(12,r3)
+                r0 = 8i32 as u32; // 06033928 mov #8,r0
+                cpu.write8(w.wrapping_add(186), r0 as u8); // 0603392a mov.b r0,@(186,gbr)
+                r0 = 9i32 as u32; // 0603392c mov #9,r0
+                cpu.write32(r3.wrapping_add(32), r0); // 0603392e mov.l r0,@(32,r3)
+                // 06033930 rts
+                r4 = r4.wrapping_add(r7); // 06033932 add r7,r4
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+
+/// The SCU's level-2 DMA waited for (its done flag; looked at every 48 counts). Not seen run.
+pub fn pcm_wait(cpu: &mut Cpu) {
+    pcm_command_blocks(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn pcm_command_blocks(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x060338da;
+    loop {
+        match pc {
+            0x060338da => {
+                r3 = 0x25fe0040; // 060338da mov.l 0x60339f4,r3
+                r0 = cpu.read8(w.wrapping_add(189)) as i8 as i32 as u32; // 060338dc mov.b @(189,gbr),r0
+                pc = 0x060338de;
+            }
+            0x060338de => {
+                t = r0 & 4 == 0; // 060338de tst #4,r0
+                let take = !t; // 060338e0 bf/s 0x60338ec
+                r0 = 48i32 as u32; // 060338e2 mov #48,r0
+                pc = if take { 0x060338ec } else { 0x060338e4 };
+            }
+            0x060338e4 => {
+                r0 = r0.wrapping_sub(1); t = r0 == 0; // 060338e4 dt r0
+                pc = if !t { 0x060338e4 } else { 0x060338e8 }; // 060338e6 bf 0x60338e4
+                if pc == 0x060338e4 { cpu.wait(0x060338e4, 3); }
+            }
+            0x060338e8 => {
+                // 060338e8 bra 0x60338de
+                r0 = cpu.read8(w.wrapping_add(189)) as i8 as i32 as u32; // 060338ea mov.b @(189,gbr),r0
+                pc = 0x060338de;
+                cpu.wait(0x060338de, 7);
+            }
+            0x060338ec => {
+                // 060338ec rts
+                // nop // 060338ee nop 
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+/// SGL's VDP2 and VRAM set-up (slInitSystem's, with the TV mode): the screen mode's low bits and
+/// the screen's size from SGL's table of modes; its default VDP2 register image, the two rotation
+/// parameter tables (centred on the screen) and its default colours copied in (DMA channel 0);
+/// the TV mode's low byte; the sprite control for hi-res; the image sent to VDP2; VRAM cleared;
+/// SGL's font made into the text planes' cells (16 colours for NBG0 and NBG1's, 8-bit for the
+/// others) and their maps' first places, the scroll screens' cells and maps placed; the display
+/// on at the next VBlank. SGL's code block by block (asm2sm.py), timed: the slave's start
+/// (slInitSystem's SSHON just before, not waited for) relies on how long it takes, about 37 lines
+/// at the normal clock; the signal after it must find the slave reset and polling.
+pub fn vdp_init(cpu: &mut Cpu) {
+    vdp_init_blocks(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn vdp_init_blocks(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x06035540;
+    loop {
+        match pc {
+            0x06035540 => {
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, pr); // 06035540 sts.l pr,@-r15
+                r0 = cpu.read8(w.wrapping_add(176)) as i8 as i32 as u32; // 06035542 mov.b @(176,gbr),r0
+                r1 = 31i32 as u32; // 06035544 mov #31,r1
+                r1 &= r4; // 06035546 and r4,r1
+                r0 &= 128; // 06035548 and #128,r0
+                r0 |= r1; // 0603554a or r1,r0
+                cpu.write8(w.wrapping_add(176), r0 as u8); // 0603554c mov.b r0,@(176,gbr)
+                r15 = r15.wrapping_sub(4); cpu.write32(r15, r1); // 0603554e mov.l r1,@-r15
+                r0 = 0x060357a0; // 06035550 mova 0x60357a0,r0
+                r1 <<= 2; // 06035552 shll2 r1
+                r0 = cpu.read32(r0.wrapping_add(r1)); // 06035554 mov.l @(r0,r1),r0
+                cpu.write32(w.wrapping_add(128), r0); // 06035556 mov.l r0,@(128,gbr)
+                r5 = 0x060ffcc0; // 06035558 mov.l 0x6035750,r5
+                r0 = 0x060358a0; // 0603555a mova 0x60358a0,r0
+                r6 = 0x00000090; // 0603555c mov.w 0x603565e,r6
+                cpu.spend(0x06035540, 17);
+                let to = 0x06035724; // 0603555e bsr 0x6035724
+                r4 = r0; // 06035560 mov r0,r4
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x06035562;
+                pc = 0x06035562;
+            }
+            0x06035562 => {
+                r0 = 0x06035840; // 06035562 mova 0x6035840,r0
+                r5 = 0x060ffe1c; // 06035564 mov.l 0x603575c,r5
+                r6 = 48i32 as u32; // 06035566 mov #48,r6
+                cpu.spend(0x06035562, 5);
+                let to = 0x060356c0; // 06035568 bsr 0x60356c0
+                r4 = r0; // 0603556a mov r0,r4
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x0603556c;
+                pc = 0x0603556c;
+            }
+            0x0603556c => {
+                cpu.spend(0x0603556c, 2);
+                let to = 0x060356c0; // 0603556c bsr 0x60356c0
+                r5 = r5.wrapping_add(104i32 as u32); // 0603556e add #104,r5
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x06035570;
+                pc = 0x06035570;
+            }
+            0x06035570 => {
+                r0 = 0x25e3ff00; // 06035570 mov.l 0x6035754,r0
+                cpu.write32(w.wrapping_add(532), r0); // 06035572 mov.l r0,@(532,gbr)
+                r0 = 0x060ffe1c; // 06035574 mov.l 0x603575c,r0
+                cpu.write32(w.wrapping_add(480), r0); // 06035576 mov.l r0,@(480,gbr)
+                r1 = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06035578 mov.l @r15+,r1
+                r0 = 0x06035820; // 0603557a mova 0x6035820,r0
+                r0 = cpu.read8(r0.wrapping_add(r1)) as i8 as i32 as u32; // 0603557c mov.b @(r0,r1),r0
+                cpu.write8(w.wrapping_add(193), r0 as u8); // 0603557e mov.b r0,@(193,gbr)
+                r0 = 8i32 as u32; // 06035580 mov #8,r0
+                t = r0 & r1 == 0; // 06035582 tst r0,r1
+                cpu.spend(0x06035570, 12);
+                let take = t; // 06035584 bt/s 0x603558a
+                r0 = 12i32 as u32; // 06035586 mov #12,r0
+                pc = if take { 0x0603558a } else { 0x06035588 };
+            }
+            0x06035588 => {
+                cpu.write16(w.wrapping_add(416), r0 as u16); // 06035588 mov.w r0,@(416,gbr)
+                cpu.spend(0x06035588, 1);
+                pc = 0x0603558a;
+            }
+            0x0603558a => {
+                r4 = 0x060ffcc0; // 0603558a mov.l 0x6035750,r4
+                r5 = 0x25f80000; // 0603558c mov.l 0x6035758,r5
+                r6 = 0x00000090; // 0603558e mov.w 0x603565e,r6
+                cpu.spend(0x0603558a, 5);
+                let to = 0x06035724; // 06035590 bsr 0x6035724
+                // nop // 06035592 nop 
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x06035594;
+                pc = 0x06035594;
+            }
+            0x06035594 => {
+                r1 = -128i32 as u32; // 06035594 mov #-128,r1
+                cpu.spend(0x06035594, 1);
+                pc = 0x06035596;
+            }
+            0x06035596 => {
+                r0 = cpu.read32(r1.wrapping_add(12)); // 06035596 mov.l @(12,r1),r0
+                r0 &= 3; // 06035598 and #3,r0
+                t = r0 == 1i32 as u32; // 0603559a cmp/eq #1,r0
+                cpu.spend(0x06035596, 4);
+                pc = if t { 0x06035596 } else { 0x0603559e }; // 0603559c bt 0x6035596
+            }
+            0x0603559e => {
+                r0 = 0x06035794; // 0603559e mova 0x6035794,r0
+                r4 = r0; // 060355a0 mov r0,r4
+                r5 = 0x25e00000; // 060355a2 mov.l 0x6035760,r5
+                r6 = 0x00040000; // 060355a4 mov.l 0x6035764,r6
+                r3 = -128i32 as u32; // 060355a6 mov #-128,r3
+                cpu.spend(0x0603559e, 5);
+                pc = 0x060355a8;
+            }
+            0x060355a8 => {
+                r0 = cpu.read32(r3.wrapping_add(12)); // 060355a8 mov.l @(12,r3),r0
+                r0 &= 3; // 060355aa and #3,r0
+                t = r0 == 1i32 as u32; // 060355ac cmp/eq #1,r0
+                cpu.spend(0x060355a8, 4);
+                pc = if t { 0x060355a8 } else { 0x060355b0 }; // 060355ae bt 0x60355a8
+            }
+            0x060355b0 => {
+                r0 = cpu.read32(r3.wrapping_add(48)); // 060355b0 mov.l @(48,r3),r0
+                r0 = 0i32 as u32; // 060355b2 mov #0,r0
+                cpu.write32(r3.wrapping_add(12), r0); // 060355b4 mov.l r0,@(12,r3)
+                r3 = -100i32 as u32; // 060355b6 mov #-100,r3
+                r3 <<= 2; // 060355b8 shll2 r3
+                cpu.write8(r3.wrapping_add(1), r0 as u8); // 060355ba mov.b r0,@(1,r3)
+                r3 = -128i32 as u32; // 060355bc mov #-128,r3
+                cpu.write32(r3.wrapping_add(0), r4); // 060355be mov.l r4,@(0,r3)
+                cpu.write32(r3.wrapping_add(4), r5); // 060355c0 mov.l r5,@(4,r3)
+                cpu.write32(r3.wrapping_add(8), r6); // 060355c2 mov.l r6,@(8,r3)
+                r0 = 0x00004601; // 060355c4 mov.w 0x603579a,r0
+                cpu.write32(r3.wrapping_add(12), r0); // 060355c6 mov.l r0,@(12,r3)
+                r0 = 9i32 as u32; // 060355c8 mov #9,r0
+                cpu.write32(r3.wrapping_add(48), r0); // 060355ca mov.l r0,@(48,r3)
+                r1 = -128i32 as u32; // 060355cc mov #-128,r1
+                cpu.spend(0x060355b0, 15);
+                pc = 0x060355ce;
+            }
+            0x060355ce => {
+                r0 = cpu.read32(r1.wrapping_add(12)); // 060355ce mov.l @(12,r1),r0
+                r0 &= 3; // 060355d0 and #3,r0
+                t = r0 == 1i32 as u32; // 060355d2 cmp/eq #1,r0
+                cpu.spend(0x060355ce, 4);
+                pc = if t { 0x060355ce } else { 0x060355d6 }; // 060355d4 bt 0x60355ce
+            }
+            0x060355d6 => {
+                r4 = 0x060359f8; // 060355d6 mov.l 0x6035768,r4
+                r5 = -128i32 as u32; // 060355d8 mov #-128,r5
+                r5 = r5 & 0xff; // 060355da extu.b r5,r5
+                r0 = 0x25e60000; // 060355dc mov.l 0x603576c,r0
+                cpu.write32(w.wrapping_add(484), r0); // 060355de mov.l r0,@(484,gbr)
+                cpu.write32(w.wrapping_add(488), r0); // 060355e0 mov.l r0,@(488,gbr)
+                r6 = r0; // 060355e2 mov r0,r6
+                cpu.spend(0x060355d6, 9);
+                let to = 0x06035660; // 060355e4 bsr 0x6035660
+                r7 = 0i32 as u32; // 060355e6 mov #0,r7
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x060355e8;
+                pc = 0x060355e8;
+            }
+            0x060355e8 => {
+                r4 = 0x06035e10; // 060355e8 mov.l 0x6035770,r4
+                r5 = 24i32 as u32; // 060355ea mov #24,r5
+                cpu.spend(0x060355e8, 4);
+                let to = 0x06035690; // 060355ec bsr 0x6035690
+                r7 = 0i32 as u32; // 060355ee mov #0,r7
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x060355f0;
+                pc = 0x060355f0;
+            }
+            0x060355f0 => {
+                r4 = 0x06035df8; // 060355f0 mov.l 0x6035774,r4
+                r5 = 3i32 as u32; // 060355f2 mov #3,r5
+                r6 = 0x25e63f40; // 060355f4 mov.l 0x6035778,r6
+                cpu.spend(0x060355f0, 5);
+                let to = 0x06035660; // 060355f6 bsr 0x6035660
+                r7 = 0i32 as u32; // 060355f8 mov #0,r7
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x060355fa;
+                pc = 0x060355fa;
+            }
+            0x060355fa => {
+                r4 = 0x25e60000; // 060355fa mov.l 0x603576c,r4
+                r5 = 0x25e00000; // 060355fc mov.l 0x603577c,r5
+                r6 = 0x00000980; // 060355fe mov.w 0x6035796,r6
+                r0 = r5; // 06035600 mov r5,r0
+                cpu.write32(w.wrapping_add(500), r0); // 06035602 mov.l r0,@(500,gbr)
+                cpu.write32(w.wrapping_add(504), r0); // 06035604 mov.l r0,@(504,gbr)
+                r3 = -128i32 as u32; // 06035606 mov #-128,r3
+                cpu.spend(0x060355fa, 7);
+                pc = 0x06035608;
+            }
+            0x06035608 => {
+                r0 = cpu.read32(r3.wrapping_add(12)); // 06035608 mov.l @(12,r3),r0
+                r0 &= 3; // 0603560a and #3,r0
+                t = r0 == 1i32 as u32; // 0603560c cmp/eq #1,r0
+                cpu.spend(0x06035608, 4);
+                pc = if t { 0x06035608 } else { 0x06035610 }; // 0603560e bt 0x6035608
+            }
+            0x06035610 => {
+                r0 = cpu.read32(r3.wrapping_add(48)); // 06035610 mov.l @(48,r3),r0
+                r0 = 0i32 as u32; // 06035612 mov #0,r0
+                cpu.write32(r3.wrapping_add(12), r0); // 06035614 mov.l r0,@(12,r3)
+                r3 = -100i32 as u32; // 06035616 mov #-100,r3
+                r3 <<= 2; // 06035618 shll2 r3
+                cpu.write8(r3.wrapping_add(1), r0 as u8); // 0603561a mov.b r0,@(1,r3)
+                r3 = -128i32 as u32; // 0603561c mov #-128,r3
+                cpu.write32(r3.wrapping_add(0), r4); // 0603561e mov.l r4,@(0,r3)
+                cpu.write32(r3.wrapping_add(4), r5); // 06035620 mov.l r5,@(4,r3)
+                cpu.write32(r3.wrapping_add(8), r6); // 06035622 mov.l r6,@(8,r3)
+                r0 = 0x00005a01; // 06035624 mov.w 0x603579c,r0
+                cpu.write32(r3.wrapping_add(12), r0); // 06035626 mov.l r0,@(12,r3)
+                r0 = 9i32 as u32; // 06035628 mov #9,r0
+                cpu.write32(r3.wrapping_add(48), r0); // 0603562a mov.l r0,@(48,r3)
+                r0 = 0x25e76000; // 0603562c mov.l 0x6035780,r0
+                cpu.write32(w.wrapping_add(508), r0); // 0603562e mov.l r0,@(508,gbr)
+                r0 = 0x25e78000; // 06035630 mov.l 0x6035784,r0
+                cpu.write32(w.wrapping_add(512), r0); // 06035632 mov.l r0,@(512,gbr)
+                r0 = 0x25e40000; // 06035634 mov.l 0x6035788,r0
+                cpu.write32(w.wrapping_add(524), r0); // 06035636 mov.l r0,@(524,gbr)
+                r0 = 0x25e60000; // 06035638 mov.l 0x603578c,r0
+                cpu.write32(w.wrapping_add(528), r0); // 0603563a mov.l r0,@(528,gbr)
+                r0 = 0i32 as u32; // 0603563c mov #0,r0
+                cpu.write32(w.wrapping_add(748), r0); // 0603563e mov.l r0,@(748,gbr)
+                cpu.write32(w.wrapping_add(752), r0); // 06035640 mov.l r0,@(752,gbr)
+                cpu.write32(w.wrapping_add(756), r0); // 06035642 mov.l r0,@(756,gbr)
+                cpu.write32(w.wrapping_add(760), r0); // 06035644 mov.l r0,@(760,gbr)
+                r1 = 0x25e3fffe; // 06035646 mov.l 0x6035790,r1
+                r0 = 0i32 as u32; // 06035648 mov #0,r0
+                cpu.write8(w.wrapping_add(33), r0 as u8); // 0603564a mov.b r0,@(33,gbr)
+                cpu.spend(0x06035610, 32);
+                let to = 0x060359c0; // 0603564c bsr 0x60359c0
+                cpu.write16(r1, r0 as u16); // 0603564e mov.w r0,@r1
+                hand_over!(); cpu.call(to, &[]); take_back!();
+                pr = 0x06035650;
+                pc = 0x06035650;
+            }
+            0x06035650 => {
+                r0 = cpu.read16(w.wrapping_add(192)) as i16 as i32 as u32; // 06035650 mov.w @(192,gbr),r0
+                r1 = 0xffff8000; // 06035652 mov.w 0x603565c,r1
+                pr = cpu.read32(r15); r15 = r15.wrapping_add(4); // 06035654 lds.l @r15+,pr
+                r0 |= r1; // 06035656 or r1,r0
+                cpu.spend(0x06035650, 6);
+                // 06035658 rts
+                cpu.write16(w.wrapping_add(192), r0 as u16); // 0603565a mov.w r0,@(192,gbr)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+
+/// SGL's font (a bit a dot, from r4: r5 characters) as 16-colour cells at r6, a dot's nibble the
+/// colour r7 (and 0 for none). SGL's code block by block (asm2sm.py).
+pub fn font_cells(cpu: &mut Cpu) {
+    font_cells_blocks(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn font_cells_blocks(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x06035660;
+    loop {
+        match pc {
+            0x06035660 => {
+                r7 = r7 & 0xff; // 06035660 extu.b r7,r7
+                cpu.spend(0x06035660, 1);
+                pc = 0x06035662;
+            }
+            0x06035662 => {
+                r3 = 8i32 as u32; // 06035662 mov #8,r3
+                cpu.spend(0x06035662, 1);
+                pc = 0x06035664;
+            }
+            0x06035664 => {
+                r0 = cpu.read8(r4) as i8 as i32 as u32; r4 = r4.wrapping_add(1); // 06035664 mov.b @r4+,r0
+                r1 = 4i32 as u32; // 06035666 mov #4,r1
+                r0 <<= 8; // 06035668 shll8 r0
+                r0 <<= 16; // 0603566a shll16 r0
+                cpu.spend(0x06035664, 4);
+                pc = 0x0603566c;
+            }
+            0x0603566c => {
+                t = r0 >> 31 != 0; r0 <<= 1; // 0603566c shll r0
+                r2 = t as u32; // 0603566e movt r2
+                r2 = r2.wrapping_add(r7); // 06035670 add r7,r2
+                r2 <<= 8; // 06035672 shll8 r2
+                t = r2 & 1 != 0; r2 >>= 1; // 06035674 shlr r2
+                t = r0 >> 31 != 0; r0 <<= 1; // 06035676 shll r0
+                { let (x, c1) = r2.overflowing_add(r2); let (y, c2) = x.overflowing_add(t as u32); r2 = y; t = c1 || c2; } // 06035678 addc r2,r2
+                r2 = r2.wrapping_add(r7); // 0603567a add r7,r2
+                cpu.write16(r6, r2 as u16); // 0603567c mov.w r2,@r6
+                r1 = r1.wrapping_sub(1); t = r1 == 0; // 0603567e dt r1
+                cpu.spend(0x0603566c, 12);
+                let take = !t; // 06035680 bf/s 0x603566c
+                r6 = r6.wrapping_add(2i32 as u32); // 06035682 add #2,r6
+                pc = if take { 0x0603566c } else { 0x06035684 };
+            }
+            0x06035684 => {
+                r3 = r3.wrapping_sub(1); t = r3 == 0; // 06035684 dt r3
+                cpu.spend(0x06035684, 2);
+                pc = if !t { 0x06035664 } else { 0x06035688 }; // 06035686 bf 0x6035664
+            }
+            0x06035688 => {
+                r5 = r5.wrapping_sub(1); t = r5 == 0; // 06035688 dt r5
+                cpu.spend(0x06035688, 2);
+                pc = if !t { 0x06035662 } else { 0x0603568c }; // 0603568a bf 0x6035662
+            }
+            0x0603568c => {
+                cpu.spend(0x0603568c, 2);
+                // 0603568c rts
+                // nop // 0603568e nop 
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+
+/// The same font as 256-colour cells (a dot's byte its nibble plus the colour r7). SGL's code
+/// block by block (asm2sm.py).
+pub fn font_cells_wide(cpu: &mut Cpu) {
+    font_cells_b_blocks(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn font_cells_b_blocks(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x06035690;
+    loop {
+        match pc {
+            0x06035690 => {
+                r7 = r7 & 0xff; // 06035690 extu.b r7,r7
+                r0 = r7; // 06035692 mov r7,r0
+                r7 <<= 8; // 06035694 shll8 r7
+                r7 |= r0; // 06035696 or r0,r7
+                cpu.spend(0x06035690, 4);
+                pc = 0x06035698;
+            }
+            0x06035698 => {
+                r3 = 8i32 as u32; // 06035698 mov #8,r3
+                cpu.spend(0x06035698, 1);
+                pc = 0x0603569a;
+            }
+            0x0603569a => {
+                r1 = 4i32 as u32; // 0603569a mov #4,r1
+                cpu.spend(0x0603569a, 1);
+                pc = 0x0603569c;
+            }
+            0x0603569c => {
+                r0 = cpu.read8(r4) as i8 as i32 as u32; r4 = r4.wrapping_add(1); // 0603569c mov.b @r4+,r0
+                r2 = r0 & 0xff; // 0603569e extu.b r0,r2
+                r2 >>= 2; // 060356a0 shlr2 r2
+                r2 >>= 2; // 060356a2 shlr2 r2
+                r2 <<= 8; // 060356a4 shll8 r2
+                r0 &= 15; // 060356a6 and #15,r0
+                r0 |= r2; // 060356a8 or r2,r0
+                r0 = r0.wrapping_add(r7); // 060356aa add r7,r0
+                cpu.write16(r6, r0 as u16); // 060356ac mov.w r0,@r6
+                r1 = r1.wrapping_sub(1); t = r1 == 0; // 060356ae dt r1
+                cpu.spend(0x0603569c, 12);
+                let take = !t; // 060356b0 bf/s 0x603569c
+                r6 = r6.wrapping_add(2i32 as u32); // 060356b2 add #2,r6
+                pc = if take { 0x0603569c } else { 0x060356b4 };
+            }
+            0x060356b4 => {
+                r3 = r3.wrapping_sub(1); t = r3 == 0; // 060356b4 dt r3
+                cpu.spend(0x060356b4, 2);
+                pc = if !t { 0x0603569a } else { 0x060356b8 }; // 060356b6 bf 0x603569a
+            }
+            0x060356b8 => {
+                r5 = r5.wrapping_sub(1); t = r5 == 0; // 060356b8 dt r5
+                cpu.spend(0x060356b8, 2);
+                pc = if !t { 0x06035698 } else { 0x060356bc }; // 060356ba bf 0x6035698
+            }
+            0x060356bc => {
+                cpu.spend(0x060356bc, 2);
+                // 060356bc rts
+                // nop // 060356be nop 
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+
+/// A rotation parameter table copied in (DMA channel 0, waited for), then centred on the screen
+/// (its screen centre and view point from half the screen's width, its scales 1). SGL's code block
+/// by block (asm2sm.py).
+pub fn rotation_table_init(cpu: &mut Cpu) {
+    copy_longs_blocks(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn copy_longs_blocks(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x060356c0;
+    loop {
+        match pc {
+            0x060356c0 => {
+                r3 = -128i32 as u32; // 060356c0 mov #-128,r3
+                cpu.spend(0x060356c0, 1);
+                pc = 0x060356c2;
+            }
+            0x060356c2 => {
+                r0 = cpu.read32(r3.wrapping_add(12)); // 060356c2 mov.l @(12,r3),r0
+                r0 &= 3; // 060356c4 and #3,r0
+                t = r0 == 1i32 as u32; // 060356c6 cmp/eq #1,r0
+                cpu.spend(0x060356c2, 4);
+                pc = if t { 0x060356c2 } else { 0x060356ca }; // 060356c8 bt 0x60356c2
+            }
+            0x060356ca => {
+                r0 = cpu.read32(r3.wrapping_add(48)); // 060356ca mov.l @(48,r3),r0
+                r0 = 0i32 as u32; // 060356cc mov #0,r0
+                cpu.write32(r3.wrapping_add(12), r0); // 060356ce mov.l r0,@(12,r3)
+                r3 = -100i32 as u32; // 060356d0 mov #-100,r3
+                r3 <<= 2; // 060356d2 shll2 r3
+                cpu.write8(r3.wrapping_add(1), r0 as u8); // 060356d4 mov.b r0,@(1,r3)
+                r3 = -128i32 as u32; // 060356d6 mov #-128,r3
+                cpu.write32(r3.wrapping_add(0), r4); // 060356d8 mov.l r4,@(0,r3)
+                cpu.write32(r3.wrapping_add(4), r5); // 060356da mov.l r5,@(4,r3)
+                cpu.write32(r3.wrapping_add(8), r6); // 060356dc mov.l r6,@(8,r3)
+                r0 = 0x00005601; // 060356de mov.w 0x6035798,r0
+                cpu.write32(r3.wrapping_add(12), r0); // 060356e0 mov.l r0,@(12,r3)
+                r0 = 9i32 as u32; // 060356e2 mov #9,r0
+                cpu.write32(r3.wrapping_add(48), r0); // 060356e4 mov.l r0,@(48,r3)
+                r1 = -128i32 as u32; // 060356e6 mov #-128,r1
+                cpu.spend(0x060356ca, 15);
+                pc = 0x060356e8;
+            }
+            0x060356e8 => {
+                r0 = cpu.read32(r1.wrapping_add(12)); // 060356e8 mov.l @(12,r1),r0
+                r0 &= 3; // 060356ea and #3,r0
+                t = r0 == 1i32 as u32; // 060356ec cmp/eq #1,r0
+                cpu.spend(0x060356e8, 4);
+                pc = if t { 0x060356e8 } else { 0x060356f0 }; // 060356ee bt 0x60356e8
+            }
+            0x060356f0 => {
+                r0 = cpu.read32(w.wrapping_add(128)); // 060356f0 mov.l @(128,gbr),r0
+                r2 = 1i32 as u32; // 060356f2 mov #1,r2
+                t = r0 & 1 != 0; r0 >>= 1; // 060356f4 shlr r0
+                r1 = r0; // 060356f6 mov r0,r1
+                r2 <<= 8; // 060356f8 shll8 r2
+                r3 = r2.rotate_left(16); // 060356fa swap.w r2,r3
+                r3 |= r2; // 060356fc or r2,r3
+                cpu.write32(r5.wrapping_add(52), r3); // 060356fe mov.l r3,@(52,r5)
+                cpu.write32(r5.wrapping_add(60), r3); // 06035700 mov.l r3,@(60,r5)
+                r0 = 56i32 as u32; // 06035702 mov #56,r0
+                cpu.write16(r0.wrapping_add(r5), r2 as u16); // 06035704 mov.w r2,@(r0,r5)
+                r0 = 64i32 as u32; // 06035706 mov #64,r0
+                cpu.write16(r0.wrapping_add(r5), r2 as u16); // 06035708 mov.w r2,@(r0,r5)
+                r0 = r1.rotate_left(16); // 0603570a swap.w r1,r0
+                r3 = r2; // 0603570c mov r2,r3
+                r3 = r3.wrapping_sub(r0); // 0603570e sub r0,r3
+                r2 = r2.wrapping_sub(r1); // 06035710 sub r1,r2
+                r2 <<= 16; // 06035712 shll16 r2
+                r2 = (r3 << 16) | (r2 >> 16); // 06035714 xtrct r3,r2
+                r0 = r2; // 06035716 mov r2,r0
+                r0 <<= 16; // 06035718 shll16 r0
+                cpu.write32(r5.wrapping_add(4), r0); // 0603571a mov.l r0,@(4,r5)
+                r2 >>= 16; // 0603571c shlr16 r2
+                r2 <<= 16; // 0603571e shll16 r2
+                cpu.spend(0x060356f0, 26);
+                // 06035720 rts
+                cpu.write32(r5.wrapping_add(0), r2); // 06035722 mov.l r2,@(0,r5)
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+
+/// r6 words from r4 to r5 on DMA channel 0, once it is free (not waited for). SGL's code block by
+/// block (asm2sm.py).
+pub fn dma0_copy_words(cpu: &mut Cpu) {
+    dma0_copy_blocks(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn dma0_copy_blocks(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x06035724;
+    loop {
+        match pc {
+            0x06035724 => {
+                r3 = -128i32 as u32; // 06035724 mov #-128,r3
+                cpu.spend(0x06035724, 1);
+                pc = 0x06035726;
+            }
+            0x06035726 => {
+                r0 = cpu.read32(r3.wrapping_add(12)); // 06035726 mov.l @(12,r3),r0
+                r0 &= 3; // 06035728 and #3,r0
+                t = r0 == 1i32 as u32; // 0603572a cmp/eq #1,r0
+                cpu.spend(0x06035726, 4);
+                pc = if t { 0x06035726 } else { 0x0603572e }; // 0603572c bt 0x6035726
+            }
+            0x0603572e => {
+                r0 = cpu.read32(r3.wrapping_add(48)); // 0603572e mov.l @(48,r3),r0
+                r0 = 0i32 as u32; // 06035730 mov #0,r0
+                cpu.write32(r3.wrapping_add(12), r0); // 06035732 mov.l r0,@(12,r3)
+                r3 = -100i32 as u32; // 06035734 mov #-100,r3
+                r3 <<= 2; // 06035736 shll2 r3
+                cpu.write8(r3.wrapping_add(1), r0 as u8); // 06035738 mov.b r0,@(1,r3)
+                r3 = -128i32 as u32; // 0603573a mov #-128,r3
+                cpu.write32(r3.wrapping_add(0), r4); // 0603573c mov.l r4,@(0,r3)
+                cpu.write32(r3.wrapping_add(4), r5); // 0603573e mov.l r5,@(4,r3)
+                cpu.write32(r3.wrapping_add(8), r6); // 06035740 mov.l r6,@(8,r3)
+                r0 = 0x00005601; // 06035742 mov.w 0x6035798,r0
+                cpu.write32(r3.wrapping_add(12), r0); // 06035744 mov.l r0,@(12,r3)
+                r0 = 9i32 as u32; // 06035746 mov #9,r0
+                cpu.write32(r3.wrapping_add(48), r0); // 06035748 mov.l r0,@(48,r3)
+                cpu.spend(0x0603572e, 16);
+                // 0603574a rts
+                // nop // 0603574c nop 
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+
+/// SGL's default colours (8 longs: 16 colours) into colour RAM's start. SGL's code block by block
+/// (asm2sm.py).
+pub fn default_colours(cpu: &mut Cpu) {
+    vdp_init_tail_blocks(cpu);
+}
+
+#[allow(unused_assignments, unused_mut, unused_variables, unused_macros, clippy::all)]
+fn vdp_init_tail_blocks(cpu: &mut Cpu) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, mut r11, mut r12, mut r13, _, mut r15] = cpu.sh2.r;
+    let mut r14 = cpu.caller_r14;
+    let mut mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64;
+    let mut t = cpu.sh2.sr & 1 != 0;
+    let entry_pr = cpu.sh2.pr;
+    let mut pr = entry_pr;
+    macro_rules! hand_over { () => { cpu.sh2.r = [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15]; cpu.leave_mac(mac); cpu.leave_t(t); } }
+    macro_rules! take_back { () => { [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15] = cpu.sh2.r; mac = ((cpu.sh2.mach as u64) << 32 | cpu.sh2.macl as u64) as i64; t = cpu.sh2.sr & 1 != 0; } }
+    let mut pc: u32 = 0x060359c0;
+    loop {
+        match pc {
+            0x060359c0 => {
+                r0 = 0x060359d8; // 060359c0 mova 0x60359d8,r0
+                r3 = 0x25effffc; // 060359c2 mov.l 0x60359d4,r3
+                r1 = 8i32 as u32; // 060359c4 mov #8,r1
+                cpu.spend(0x060359c0, 3);
+                pc = 0x060359c6;
+            }
+            0x060359c6 => {
+                r2 = cpu.read32(r0); r0 = r0.wrapping_add(4); // 060359c6 mov.l @r0+,r2
+                r3 = r3.wrapping_add(4i32 as u32); // 060359c8 add #4,r3
+                r1 = r1.wrapping_sub(1); t = r1 == 0; // 060359ca dt r1
+                cpu.spend(0x060359c6, 5);
+                let take = !t; // 060359cc bf/s 0x60359c6
+                cpu.write32(r3, r2); // 060359ce mov.l r2,@r3
+                pc = if take { 0x060359c6 } else { 0x060359d0 };
+            }
+            0x060359d0 => {
+                cpu.spend(0x060359d0, 2);
+                // 060359d0 rts
+                // nop // 060359d2 nop 
+                if pr == entry_pr { break; }
+                pc = pr;
+            }
+            _ => unreachable!("{pc:#010x}"),
+        }
+    }
+    hand_over!();
+    cpu.leave_r14(r14);
+}
+
+/// slInitSystem (`mode` the TV mode, `textures` SGL's texture table, `frames` the frames a sync
+/// takes): interrupts masked, the screen mode cleared; the CPUs' clock changed by the BIOS when
+/// the mode's hi-res bit is not the clock's (the sound CPU restarted after); SGL's SMPC set up and
+/// the reset button let through (RESENAB); the slave started; the matrices, VDP2 and VRAM set up;
+/// the slave's function its command loop; the sync and the drawing set up; the slave signalled;
+/// SGL's interrupt priorities to the BIOS, and the SCU's interrupts SGL takes (the VBlanks, the
+/// SMPC's, the three DMA ends) unmasked; the sync count 5; the screen mode's bit 7 cleared and
+/// interrupts on; the first frame, the SMPC's status asked for (INTBACK) and a frame, the pads and
+/// two frames; the screen mode's bit 7 back. The SH-2 code's r8-r13 held across its calls, as the
+/// callees' pushes leave them. Its code takes the SH-2 code's time block by block (`Cpu::spend`,
+/// as the translations count it): the SMPC's requests and the first frames come when the SH-2
+/// code's do (with no time here, a native attract mode drifts from the interpreter's by frame
+/// 7200: a boss's flash and an explosion a frame apart).
+const SET_INTERRUPT_MASK: u32 = 0x0603_5070;
+const SCREEN_MODE_BYTE: u32 = SGL_WORK + SCREEN_MODE;
+const BIOS_CLOCK: u32 = 0x0600_0324;
+const BIOS_CHANGE_CLOCK: u32 = 0x0600_0320;
+const SMPC_INIT: u32 = 0x0603_3dd4;
+const SL_REQUEST_COMMAND: u32 = 0x0603_44c4;
+const SLAVE_START: u32 = 0x0603_5090;
+const INIT_MATRIX: u32 = 0x0603_5110;
+const VDP_INIT: u32 = 0x0603_5540;
+const SLAVE_FUNCTION_CACHED: u32 = 0x0603_5100;
+const SLAVE_COMMANDS: u32 = 0x0603_6110;
+const SYNCH_INIT: u32 = 0x0603_3590;
+const DRAW_INIT: u32 = 0x0603_64e0;
+const BIOS_CHANGE_PRIORITIES: u32 = 0x0600_0280;
+const SGL_PRIORITIES: u32 = 0x0600_a444;
+const BIOS_CHANGE_SCU_MASK: u32 = 0x0600_0344;
+const SGL_INTERRUPTS: u32 = 0xffff_f17c;
+const FIRST_SYNCH: u32 = 5;
+const SYNCH_FIRST: u32 = 0x0603_4cb0;
+const SL_SYNCH: u32 = 0x0603_4cca;
+/// slRequestCommand's commands (SGL's numbers).
+const SSHON: u32 = 1;
+const SSHOFF: u32 = 2;
+const SNDON: u32 = 3;
+const SNDOFF: u32 = 4;
+const RESENAB: u32 = 11;
+const GETSTS: u32 = 13;
+const GETPER: u32 = 14;
+
+pub fn sl_init_system(cpu: &mut Cpu, mode: u32, textures: u32, frames: u32) {
+    let frames = frames as i8 as i32 as u32;
+    let held = [(8, mode & 0xffff), (9, frames), (12, 0), (13, textures)];
+    cpu.spend(0x0600_7ef0, 16);
+    cpu.holding(&held, |cpu| cpu.call(SET_INTERRUPT_MASK, &[15]));
+    cpu.write8(SCREEN_MODE_BYTE, 0);
+    let mode = mode & 31;
+    let hires = mode >> 2 & 1;
+    let mut held = [(8, mode), (9, frames), (10, SCREEN_MODE_BYTE), (12, 0), (13, textures), (11, cpu.reg(11))];
+    let clock = cpu.read32(BIOS_CLOCK);
+    cpu.spend(0x0600_7f10, 14);
+    if clock != hires {
+        let change = cpu.read32(BIOS_CHANGE_CLOCK);
+        cpu.spend(0x0600_7f2c, 4);
+        cpu.holding(&held, |cpu| cpu.call(change, &[hires]));
+        held[3].1 = 1;
+        cpu.spend(0x0600_7f34, 1);
+    }
+    cpu.holding(&held, |cpu| {
+        cpu.spend(0x0600_7f36, 3);
+        cpu.call(SMPC_INIT, &[]);
+        cpu.spend(0x0600_7f3c, 4);
+        cpu.call(SL_REQUEST_COMMAND, &[RESENAB, 0]);
+    });
+    held[5].1 = SL_REQUEST_COMMAND;
+    cpu.holding(&held, |cpu| {
+        cpu.spend(0x0600_7f44, 3);
+        cpu.call(SLAVE_START, &[]);
+        cpu.spend(0x0600_7f4a, 3);
+        cpu.call(INIT_MATRIX, &[]);
+        cpu.spend(0x0600_7f50, 3);
+        cpu.call(VDP_INIT, &[mode]);
+        cpu.write32(SLAVE_FUNCTION_CACHED, SLAVE_COMMANDS);
+        cpu.spend(0x0600_7f56, 7);
+        cpu.call(SYNCH_INIT, &[mode, frames]);
+        cpu.spend(0x0600_7f64, 4);
+        cpu.call(DRAW_INIT, &[mode, textures]);
+        cpu.write16(SLAVE_SIGNAL, 0xffff);
+        let priorities = cpu.read32(BIOS_CHANGE_PRIORITIES);
+        cpu.spend(0x0600_7f6c, 8);
+        cpu.call(priorities, &[SGL_PRIORITIES]);
+        let change_mask = cpu.read32(BIOS_CHANGE_SCU_MASK);
+        cpu.spend(0x0600_7f7c, 5);
+        cpu.call(change_mask, &[SGL_INTERRUPTS, 0]);
+    });
+    cpu.write8(SGL_WORK + SYNCH_COUNT, FIRST_SYNCH as u8);
+    let screen = cpu.read8(SCREEN_MODE_BYTE);
+    cpu.write8(SCREEN_MODE_BYTE, screen & 0x7f);
+    held[1].1 = screen as i8 as i32 as u32;
+    let changed = held[3].1 == 1;
+    cpu.holding(&held, |cpu| {
+        cpu.spend(0x0600_7f86, 11);
+        cpu.call(SET_INTERRUPT_MASK, &[0]);
+        cpu.spend(0x0600_7f9c, 3);
+        if changed {
+            cpu.spend(0x0600_7fa2, 3);
+            nested!(cpu, 0x0600_7e8c, sound_restart(cpu));
+        }
+        cpu.spend(0x0600_7fa8, 3);
+        cpu.call(SYNCH_FIRST, &[]);
+        cpu.spend(0x0600_7fae, 3);
+        cpu.call(SL_REQUEST_COMMAND, &[GETSTS, 0]);
+    });
+    held[0].1 = SL_SYNCH;
+    cpu.holding(&held, |cpu| {
+        cpu.spend(0x0600_7fb4, 3);
+        cpu.call(SL_SYNCH, &[]);
+        cpu.spend(0x0600_7fba, 3);
+        cpu.call(SL_REQUEST_COMMAND, &[GETPER, 0]);
+        cpu.spend(0x0600_7fc0, 2);
+        cpu.call(SL_SYNCH, &[]);
+        cpu.spend(0x0600_7fc4, 2);
+        cpu.call(SL_SYNCH, &[]);
+    });
+    let now = cpu.read8(SCREEN_MODE_BYTE);
+    cpu.write8(SCREEN_MODE_BYTE, now | screen & 0x80);
+    cpu.spend(0x0600_7fc8, 16);
+}
+
+/// The sound CPU restarted after a change of clock (slInitSystem's; not seen run): off (SNDOFF,
+/// waited for), sound RAM 4 Mbit (SCSP's MEM4MB), the 68000's vectors all 0x400, its stack at the
+/// top, and a loop at 0x400 (nop; bra back) for it to run; on again (SNDON, waited for).
+const SCSP_MEMORY_MODE: u32 = 0x25b0_0400;
+const SOUND_RAM: u32 = 0x25a0_0000;
+const SOUND_IDLE: u32 = 0x400;
+const SOUND_VECTORS_END: u32 = 0x3fc;
+const SOUND_STACK: u32 = 0x0007_fffc;
+const SOUND_IDLE_LOOP: u32 = 0x4e71_60fc;
+
+pub fn sound_restart(cpu: &mut Cpu) {
+    cpu.call(SL_REQUEST_COMMAND, &[SNDOFF, 1]);
+    cpu.write8(SCSP_MEMORY_MODE, 2);
+    nested!(cpu, 0x0600_7e70, fill_vectors(cpu, SOUND_RAM, SOUND_IDLE, SOUND_VECTORS_END));
+    cpu.write32(SOUND_RAM, SOUND_STACK);
+    cpu.write32(SOUND_RAM + SOUND_IDLE, SOUND_IDLE_LOOP);
+    cpu.call(SL_REQUEST_COMMAND, &[SNDON, 1]);
+}
+
+/// `v` in each long from `at` while its offset under `mask` is no more than `mask` (the sound
+/// CPU's vectors; not seen run).
+pub fn fill_vectors(cpu: &mut Cpu, at: u32, v: u32, mask: u32) {
+    let (mut at, mut off) = (at, at & mask);
+    while off as i32 <= mask as i32 {
+        cpu.write32(at, v);
+        off = off.wrapping_add(4);
+        at = at.wrapping_add(4);
+    }
+    cpu.leave(&[(1, off), (4, at)]);
+}
+
+/// The slave CPU started (slInitSystem's): SGL's word beside its code (0x06035104, read nowhere)
+/// cleared, the slave off (SSHOFF, waited for), the BIOS's start address for it SGL's slave main,
+/// and on again (SSHON, not waited for; the code jumps to the request with its own return): what
+/// that request said.
+const SLAVE_START_WORD: u32 = 0x0603_5104;
+const BIOS_SLAVE_START: u32 = 0x0600_0250;
+const SLAVE_MAIN: u32 = 0x0603_50b0;
+
+pub fn slave_start(cpu: &mut Cpu) -> u32 {
+    cpu.write32(SLAVE_START_WORD, 0);
+    cpu.call(SL_REQUEST_COMMAND, &[SSHOFF, 1]);
+    cpu.write32(BIOS_SLAVE_START, SLAVE_MAIN);
+    let ret = cpu.pr();
+    cpu.pop(4);
+    cpu.call_returning(ret, SL_REQUEST_COMMAND, &[SSHON, 0])
+}
+
+/// The first frame (slInitSystem's): VBlank waited for (VDP2's TVSTAT), the sync count one below
+/// the frames a sync takes, VDP1's frame buffer change (FBCR) cleared unless the screen mode's bit
+/// 4 says otherwise; then slSynch, which the code runs on into (its push made first): its count.
+/// Its own code takes the SH-2 code's time, as slInitSystem's does.
+pub fn synch_first(cpu: &mut Cpu) -> u32 {
+    cpu.spend(0x0603_4cb0, 1);
+    loop {
+        let status = cpu.read16(VDP2_TVSTAT);
+        cpu.spend(0x0603_4cb2, 3);
+        if status & 2 != 0 {
+            break;
+        }
+    }
+    let w = cpu.gbr();
+    let frames = cpu.read8(w + SYNCH_FRAMES);
+    cpu.write8(w + SYNCH_COUNT, frames.wrapping_sub(1));
+    let mode = cpu.read8(w + SCREEN_MODE);
+    cpu.spend(0x0603_4cb8, 6);
+    if mode & 16 == 0 {
+        cpu.write16(VDP1_FBCR, 0);
+        cpu.spend(0x0603_4cc4, 3);
+    }
+    // inline: the code runs on into slSynch, its push made at the entry
+    sl_synch(cpu)
+}
+
+/// The slave CPU's main (its start address from the BIOS on; never returns): every interrupt
+/// masked (SR from -16: M, Q and the mask set), INTC's IPRA and IPRB cleared, FRT's interrupts off
+/// (TIER), its cache purged on the stack SGL keeps for it; then at each signal from the master
+/// (FRT's input capture, FTCSR's bit 7, cleared), the function SGL leaves it (its command loop)
+/// taken and called.
+const IPRA: u32 = 0xffff_fee2;
+const IPRB: u32 = 0xffff_fe60;
+const TIER: u32 = 0xffff_fe10;
+const INPUT_CAPTURE: u8 = 0x80;
+const SLAVE_SR: u32 = 0x3f0;
+const SLAVE_STACK: u32 = 0x0600_89b8;
+const PURGE_CACHE: u32 = 0x0603_3a6a;
+const SLAVE_FUNCTION: u32 = 0x2603_5100;
+
+pub fn slave_main(cpu: &mut Cpu) {
+    cpu.sh2.sr = SLAVE_SR;
+    cpu.write16(IPRA, 0);
+    cpu.write16(IPRB, 0);
+    cpu.write8(TIER, 1);
+    cpu.sh2.r[15] = cpu.read32(SLAVE_STACK);
+    cpu.call_returning(0x0603_50cc, PURGE_CACHE, &[]);
+    loop {
+        while cpu.read8(FTCSR) & INPUT_CAPTURE == 0 {
+            cpu.wait(0x0603_50cc, 6);
+        }
+        let f = cpu.read32(SLAVE_FUNCTION);
+        cpu.write8(FTCSR, 0);
+        if f != 0 {
+            cpu.write32(SLAVE_FUNCTION, 0);
+            cpu.leave(&[(0, 0), (1, f), (2, SLAVE_FUNCTION), (8, TIER)]);
+            cpu.call_returning(0x0603_50e2, f, &[]);
+        }
+    }
+}
+
+/// The slave's command loop (SGL's slave function: from the first signal on, it never returns):
+/// GBR SGL's work area, the slave's place in the master's commands (+68) the command area's start
+/// (cache-through); each command up to the master's end mark run, by its first word's bits 2-6 in
+/// SGL's table of handlers, with r0 the second word and r4 past it (the handler moves r4 past the
+/// words it takes), the place kept as it goes. An end mark behind the place (the master began the
+/// area again) takes the place back to the start; when they meet, the slave waits for the master's
+/// signal (FRT's input capture) and clears it.
+const SLAVE_PLACE: u32 = 68;
+const SLAVE_END: u32 = 0x260f_fc48;
+const SLAVE_HANDLERS: u32 = 0x0603_6174;
+const SLAVE_HANDLER_MASK: u32 = 124;
+
+pub fn slave_commands(cpu: &mut Cpu) {
+    cpu.sh2.gbr = SGL_WORK;
+    let w = SGL_WORK;
+    let mut at = cpu.read32(COMMAND_AREA) | CACHE_THROUGH;
+    cpu.write32(w + SLAVE_PLACE, at);
+    loop {
+        let mut end = cpu.read32(SLAVE_END);
+        while end != at {
+            let word = cpu.read32(at);
+            let handler = cpu.read32(SLAVE_HANDLERS + (word & SLAVE_HANDLER_MASK));
+            let arg = cpu.read32(at + 4);
+            cpu.leave(&[(0, arg), (1, handler), (2, SLAVE_END)]);
+            cpu.call_returning(0x0603_6138, handler, &[at + 8]);
+            at = cpu.reg(4);
+            end = cpu.read32(SLAVE_END);
+            cpu.write32(w + SLAVE_PLACE, at);
+            if (end as i32) < at as i32 {
+                at = cpu.read32(COMMAND_AREA) | CACHE_THROUGH;
+                cpu.write32(w + SLAVE_PLACE, at);
+                end = cpu.read32(SLAVE_END);
+            }
+        }
+        while cpu.read8(FTCSR) & INPUT_CAPTURE == 0 {
+            cpu.wait(0x0603_6152, 4);
+        }
+        cpu.write8(FTCSR, 0);
+        at = cpu.read32(w + SLAVE_PLACE);
+    }
 }

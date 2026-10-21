@@ -241,6 +241,13 @@ impl Cpu<'_> {
     pub fn wait(&mut self, at: u32, cycles: u32) {
         stv::native::tick(self.sh2, self.bus, at, cycles);
     }
+
+    /// The SH-2 code's time for its block at `at` (`cycles`: an instruction a cycle, as the
+    /// translations count it), where other hardware relies on how long the code takes: the
+    /// machine runs on as the SH-2 code would let it.
+    pub fn spend(&mut self, at: u32, cycles: u32) {
+        stv::native::tick(self.sh2, self.bus, at, cycles);
+    }
 }
 
 /// The return address a call from rewritten code gives (no code is there: odd).
@@ -273,7 +280,7 @@ const SR_PUSH: u8 = 20;
 /// the others, and takes its frame by a subtraction; SGL's interrupt handlers save what they use,
 /// GBR, MACH, MACL and SR among it; SGL's routines run block by block (asm2sm.py) make their own
 /// pushes.
-const PROLOGUES: [(u32, &[u8], u32); 11] = [
+const PROLOGUES: [(u32, &[u8], u32); 15] = [
     (0x0606_e9fc, &[6, 7], 0),
     (0x0607_10b0, &[PR_PUSH, 9, 8], 0),
     (0x0606_e50c, &[8, PR_PUSH, 14, 13, 12, 11, 10, 9], 0),
@@ -285,6 +292,10 @@ const PROLOGUES: [(u32, &[u8], u32); 11] = [
     (0x0603_32d6, &[0, 7, 6, 5, 4, 3, 2, PR_PUSH, 1, GBR_PUSH, MACH_PUSH, MACL_PUSH, SR_PUSH], 0),
     (0x0603_3430, &[0, 1, GBR_PUSH, PR_PUSH, 7, 6, 5, 4, 3, 2, MACH_PUSH, MACL_PUSH, SR_PUSH], 0),
     (0x0603_6dd8, &[], 0),
+    (0x0603_3658, &[], 0),
+    (0x0603_3884, &[], 0),
+    (0x0603_5540, &[], 0),
+    (0x0603_4cb0, &[PR_PUSH], 0),
 ];
 
 impl Prologue {
@@ -1126,6 +1137,22 @@ pub fn register(n: &mut Natives) {
         0x0603_61ec => sgl::slave_clear_pairs[] -> (),
         0x0603_61fe => sgl::slave_shade_tables[] -> (),
         0x0603_64e0 => sgl::draw_init[] -> (),
+        0x0603_3658 => sgl::pcm_streams[] -> (),
+        0x0603_3884 => sgl::pcm_copy[] -> (),
+        0x0603_38da => sgl::pcm_wait[] -> (),
+        0x0603_5540 => sgl::vdp_init[] -> (),
+        0x0603_5660 => sgl::font_cells[] -> (),
+        0x0603_5690 => sgl::font_cells_wide[] -> (),
+        0x0603_56c0 => sgl::rotation_table_init[] -> (),
+        0x0603_5724 => sgl::dma0_copy_words[] -> (),
+        0x0603_59c0 => sgl::default_colours[] -> (),
+        0x0600_7ef0 => sgl::sl_init_system[mode, textures, frames] -> (),
+        0x0600_7e8c => sgl::sound_restart[] -> (),
+        0x0600_7e70 => sgl::fill_vectors[at, v, mask] -> (),
+        0x0603_5090 => sgl::slave_start[] -> u32,
+        0x0603_4cb0 => sgl::synch_first[] -> u32,
+        0x0603_50b0 => sgl::slave_main[] -> (),
+        0x0603_6110 => sgl::slave_commands[] -> (),
         0x0606_9a0c => math::sl_sin[a] -> u32,
         0x0606_9a30 => math::sl_cos[a] -> u32,
         0x0606_e26c => math::sl_mul_fx[a, b] -> u32,

@@ -389,16 +389,8 @@ pub fn extend_check(cpu: &mut Cpu, p: u32) {
         now > before
     };
     match cpu.read8(EXTEND_SETTING) {
-        0 => {
-            if every(cpu, 1_000_000) {
-                extend(cpu, p);
-            }
-        }
-        1 => {
-            if every(cpu, 3_000_000) {
-                extend(cpu, p);
-            }
-        }
+        0 if every(cpu, 1_000_000) => extend(cpu, p),
+        1 if every(cpu, 3_000_000) => extend(cpu, p),
         setting @ 2..=5 => {
             if setting <= 3 && passes(cpu, 999_999) {
                 extend(cpu, p);

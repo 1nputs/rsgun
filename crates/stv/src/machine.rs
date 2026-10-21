@@ -80,6 +80,9 @@ pub struct Sys {
     access_log: [Vec<crate::compare::Access>; 2],
     /// Each CPU's native call gave the rest of its last turn back: it waits (FiberBus).
     idle: [bool; 2],
+    /// A native call signalled the other CPU (MINIT/SINIT): its turn ends there, for the other to
+    /// catch up (FiberBus::after_write).
+    signalled: bool,
     /// The instructions each CPU's interpreter has fetched (the SH-2 code still run as such).
     pub interpreted: [u64; 2],
 }
@@ -88,7 +91,7 @@ saved!(Sys {
     wram_l, wram_h, backup, prot, prot_on, prot_counter, io, inputs, onchip, cache_data, scu, smpc,
     vdp1, vdp2, scsp, m68k, sound_on, sound_reset_pending, sound_owed, sound_in_sample, sound_steps,
     slave_on, clock352, line, frame, reset_pending, nmi_pending, slave_reset_pending, wait,
-} skip { bios, cart, trace, spin, natives, logging, log_depth, access_log, idle, interpreted });
+} skip { bios, cart, trace, spin, natives, logging, log_depth, access_log, idle, signalled, interpreted });
 
 impl Sys {
     #[inline]
@@ -165,6 +168,7 @@ impl Sys {
             log_depth: [0; 2],
             access_log: Default::default(),
             idle: [false; 2],
+            signalled: false,
             interpreted: [0; 2],
         }
     }
@@ -709,8 +713,15 @@ impl Bus for CpuBus<'_> {
     fn take_interrupt(&mut self, cpu: &mut Sh2) -> bool {
         take_interrupt(self.sys, cpu, self.cpu).is_some()
     }
-    fn note_interpreted(&mut self) {
-        self.sys.natives.interpreted_calls += 1;
+    fn note_interpreted(&mut self, target: u32, steps: u64) {
+        let n = &mut self.sys.natives;
+        n.interpreted_calls += 1;
+        let by = n.interpreted_by.entry(target).or_default();
+        by.0 += 1;
+        by.1 += steps;
+    }
+    fn interpreted(&mut self) -> u64 {
+        self.sys.interpreted[self.cpu]
     }
     fn fetch16(&mut self, a: u32) -> u16 {
         self.sys.interpreted[self.cpu] += 1;
@@ -847,6 +858,18 @@ impl FiberBus<'_> {
         self.sys = Some(sys);
         self.turn = turn;
     }
+
+    /// After a write: one to MINIT/SINIT signals the other CPU, and the CPU's turn ends there (no
+    /// time charged) for the other to catch up and see it. Native code takes no time between its
+    /// waits, so without this it could signal again (and change what the first signal was about)
+    /// before the other CPU had a turn: SGL's slave, woken after the master has reset its command
+    /// area and queued as many words as before, finds its place at the end and sleeps on.
+    fn after_write(&mut self, a: u32) {
+        if a >> 29 <= 1 && (0x0100_0000..0x0200_0000).contains(&(a & 0x07FF_FFFF)) {
+            self.sys.as_mut().expect("a native call runs with the system").signalled = true;
+            self.suspend();
+        }
+    }
 }
 
 impl Bus for FiberBus<'_> {
@@ -867,15 +890,18 @@ impl Bus for FiberBus<'_> {
     }
     fn write8(&mut self, a: u32, v: u8) {
         self.probe.wrote = true;
-        self.bus().write8(a, v)
+        self.bus().write8(a, v);
+        self.after_write(a);
     }
     fn write16(&mut self, a: u32, v: u16) {
         self.probe.wrote = true;
-        self.bus().write16(a, v)
+        self.bus().write16(a, v);
+        self.after_write(a);
     }
     fn write32(&mut self, a: u32, v: u32) {
         self.probe.wrote = true;
-        self.bus().write32(a, v)
+        self.bus().write32(a, v);
+        self.after_write(a);
     }
     fn fetch16(&mut self, a: u32) -> u16 {
         self.bus().fetch16(a)
@@ -915,8 +941,11 @@ impl Bus for FiberBus<'_> {
         let c = self.cpu;
         take_interrupt(self.sys.as_mut().expect("the system"), cpu, c).is_some()
     }
-    fn note_interpreted(&mut self) {
-        self.bus().note_interpreted()
+    fn note_interpreted(&mut self, target: u32, steps: u64) {
+        self.bus().note_interpreted(target, steps)
+    }
+    fn interpreted(&mut self) -> u64 {
+        self.bus().interpreted()
     }
 }
 
@@ -1169,6 +1198,10 @@ impl Machine {
             let left = target - self.time[c];
             let cycles = self.step(c, Turn { budget: left.min(SLICE), idle: left });
             self.time[c] += cycles;
+            // a native call signalled the other CPU: it goes on from here first
+            if std::mem::take(&mut self.sys.signalled) {
+                return;
+            }
             if self.fibers[c].is_some() {
                 if c == 0 && left > SLICE && !self.sys.idle[0] {
                     return;

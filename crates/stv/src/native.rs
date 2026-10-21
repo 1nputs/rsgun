@@ -55,6 +55,9 @@ pub struct Natives {
     /// Calls made natively, and calls native code passed to the interpreter.
     pub native_calls: u64,
     pub interpreted_calls: u64,
+    /// The calls passed to the interpreter by their target: how many, and the instructions the
+    /// interpreter ran for them (with what they called).
+    pub interpreted_by: HashMap<u32, (u64, u64)>,
 }
 
 /// Folds the cache mirrors: the address as work RAM-H's offset, if it is in work RAM-H.
@@ -165,18 +168,22 @@ pub fn tick(cpu: &mut Sh2, bus: &mut dyn Bus, at: u32, cycles: u32) {
 /// A computed jump native code has no block for: the SH-2 code from `target` until the function
 /// returns to its caller (`ret`, with the stack at `sp`, as they were on entry).
 pub fn goto(cpu: &mut Sh2, bus: &mut dyn Bus, target: u32, ret: u32, sp: u32) {
-    bus.note_interpreted();
+    let start = bus.interpreted();
     cpu.pc = target;
     run_until(cpu, bus, ret, sp);
+    let steps = bus.interpreted() - start;
+    bus.note_interpreted(target, steps);
 }
 
 /// Runs SH-2 code from `target` until it returns to PR with the stack where it was (natives it
 /// reaches run natively).
 pub fn interpret_call(cpu: &mut Sh2, bus: &mut dyn Bus, target: u32) {
-    bus.note_interpreted();
+    let start = bus.interpreted();
     let (ret, sp) = (cpu.pr, cpu.r[15]);
     cpu.pc = target;
     run_until(cpu, bus, ret, sp);
+    let steps = bus.interpreted() - start;
+    bus.note_interpreted(target, steps);
 }
 
 /// Runs the CPU as the machine would, taking interrupts, until it reaches `ret` with the stack at

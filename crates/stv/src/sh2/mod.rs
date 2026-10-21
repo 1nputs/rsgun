@@ -34,8 +34,13 @@ pub trait Bus {
     fn take_interrupt(&mut self, _cpu: &mut Sh2) -> bool {
         false
     }
-    /// Native code passed a call to the interpreter (counted).
-    fn note_interpreted(&mut self) {}
+    /// Native code passed a call at `target` to the interpreter, which ran `steps` instructions
+    /// for it (counted).
+    fn note_interpreted(&mut self, _target: u32, _steps: u64) {}
+    /// The instructions this CPU has interpreted (for `note_interpreted`).
+    fn interpreted(&mut self) -> u64 {
+        0
+    }
 }
 
 pub const SR_T: u32 = 0x001;

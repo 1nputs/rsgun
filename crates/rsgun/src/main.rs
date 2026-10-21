@@ -268,6 +268,11 @@ fn headless(o: &Options, script: Option<&Script>) -> Result<(), String> {
     if o.native {
         let n = &m.sys.natives;
         println!("native: {} functions, {} calls run natively, {} passed to the interpreter", n.len(), n.native_calls, n.interpreted_calls);
+        let mut by: Vec<_> = n.interpreted_by.iter().collect();
+        by.sort_by_key(|&(_, &(_, steps))| std::cmp::Reverse(steps));
+        for (target, (calls, steps)) in by.into_iter().take(12) {
+            println!("  passed to the interpreter: {target:08x}, {calls} calls, {steps} instructions");
+        }
         let [a, b] = m.sys.interpreted;
         println!("SH-2 instructions still interpreted: master {a}, slave {b}");
     }

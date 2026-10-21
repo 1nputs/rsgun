@@ -849,11 +849,7 @@ pub fn trail_exec(cpu: &mut Cpu, o: u32) {
             let a = cpu.read16(bolt + ANGLE);
             cpu.write16(o + ANGLE, a);
         }
-        2 => {
-            if shorten(cpu, o) <= TRAIL_GONE {
-                end(cpu, o);
-            }
-        }
+        2 if shorten(cpu, o) <= TRAIL_GONE => end(cpu, o),
         _ => {}
     }
     nested!(cpu, 0x0604_6558, effects::link_step(cpu, o + SPRITE, o + TRAIL_LINK));
@@ -1184,7 +1180,7 @@ pub fn lock_exec(cpu: &mut Cpu, r: u32) {
     let phase = cpu.read8(r + LOCK_PHASE) as i8;
     let seeker = cpu.read32(r + LOCK_OF);
     match phase {
-        0 | 1 | 2 => {
+        0..=2 => {
             if phase == 0 {
                 cpu.write32(r + SCALES, 0);
                 let flags = cpu.read32(r + FLAGS) | UNTURNED;
