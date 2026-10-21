@@ -597,3 +597,142 @@ pub fn wounded_exec(cpu: &mut Cpu, o: u32) {
         i = (i + 1) & 0xff;
     }
 }
+
+/// A rocket launcher: mounted on a carrier (at its offset, or 48 pixels out along the carrier's
+/// angle plus its own turn if the carrier turns its parts; hittable as the carrier is, firing when
+/// it fires) or standing on the ground (moving with it, firing while within 104 pixels of the
+/// middle up and down). It flashes with what it is told to (if anything) instead of firing; else
+/// it fires a rocket (from 6 pixels out along its angle) each so many frames (by its rate, less
+/// for each step of difficulty). Off screen it ends (mounted: if its carrier's route says so;
+/// standing: once it has been on screen); with its carrier gone it ends; out of life it blows up
+/// (sound 12, a burst; above difficulty 3 a parting shot).
+const L_CARRIER: u32 = 0x6c;
+const L_FLASH_WITH: u32 = 0x74;
+const L_SEEN: u32 = 0x88;
+const L_OFFSET: u32 = 0x8a;
+const L_RATE: u32 = 0x8e;
+const L_WAIT: u32 = 0xa6;
+const L_TURN: u32 = 0xa8;
+/// The carrier's flags: it turns its parts.
+const TURNS_PARTS: u32 = 0x1000_0000;
+const L_OUT: i32 = 0x30;
+const L_MUZZLE: i32 = 6;
+const L_FIRING_BAND: u32 = 0x67_ffff;
+const L_FIRING_SPAN: u32 = 0xcf_fffe;
+/// The rocket the launcher fires (bullets.rs's shot description: its frames speeding up, its
+/// flags: the second colour pair, from the ground).
+const S_FLAGS: u32 = 0x2e;
+const S_ROCKET_FLAGS: u32 = 0x30;
+const L_ROCKET_FRAMES: u16 = 8;
+const L_ROCKET_FLAGS: u16 = 9;
+const SE_BLOWN: u32 = 12;
+const L_BURST: u32 = 0x0607_3044;
+const L_BURST_COLOUR: u16 = 0x90;
+
+pub fn launcher_exec(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let c = cpu.read32(o + L_CARRIER);
+    let off = |cpu: &mut Cpu| nested!(cpu, 0x0605_6a24, aim::off_screen(cpu, o + SPRITE)) as u8 != 0;
+    if c == 0 && !off(cpu) {
+        cpu.write8(o + L_SEEN, 1);
+    }
+    let gone = if c != 0 {
+        off(cpu) && cpu.read16(c + ROUTE_FLAGS) & ROUTE_1000 != 0
+    } else {
+        off(cpu) && cpu.read8(o + L_SEEN) == 1
+    };
+    if gone {
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    if cpu.read32(o + LIFE) as i32 > 0 {
+        if cpu.read8(c + OBJ_MODE) as i8 >= ENDING as i8 {
+            cpu.write8(o + OBJ_MODE, ENDING);
+            return;
+        }
+    } else {
+        if cpu.read8(DIFFICULTY) as i8 > 3 {
+            cpu.call(PARTING_SHOT, &[o, 0]);
+        }
+        nested!(cpu, 0x0600_50d4, super::sound::se_set(cpu, SE_BLOWN));
+        use super::actors::{E_ANGLE, E_COLOUR, E_POSITION, E_SCALES, E_SCRIPT, E_SPEED};
+        cpu.write32(f + E_SCRIPT, L_BURST);
+        cpu.write16(f + E_COLOUR, L_BURST_COLOUR);
+        for k in 0..3 {
+            let v = cpu.read32(o + POSITION + 4 * k);
+            cpu.write32(f + E_POSITION + 4 * k, v);
+        }
+        let a = cpu.read16(o + ANGLE);
+        cpu.write16(f + E_ANGLE, a);
+        cpu.write32(f + E_SPEED, 0x1_0000);
+        cpu.write32(f + E_SCALES, 0x1_0000);
+        cpu.write32(f + E_SCALES + 4, 0x1_0000);
+        nested!(cpu, 0x0605_7454, actors::drift_effect(cpu, f));
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    if c != 0 {
+        let flags = cpu.read32(o + FLAGS) & !NO_HITS;
+        cpu.write32(o + FLAGS, flags);
+        let hits = cpu.read32(c + FLAGS) & NO_HITS;
+        cpu.write32(o + FLAGS, flags | hits);
+        if cpu.read32(c + FLAGS) & TURNS_PARTS != 0 {
+            let a = cpu.read16(o + L_TURN).wrapping_add(cpu.read16(c + ANGLE));
+            cpu.write16(o + ANGLE, a);
+            let s = cpu.call(SL_SIN, &[a as i16 as i32 as u32]) as i32;
+            let x = (s.wrapping_mul(L_OUT) as u32).wrapping_add(cpu.read32(c + POSITION));
+            cpu.write32(o + POSITION, x);
+            let a = cpu.read16(o + ANGLE) as i16 as i32 as u32;
+            let co = cpu.call(SL_COS, &[a]) as i32;
+            let y = (co.wrapping_mul(-L_OUT) as u32).wrapping_add(cpu.read32(c + POSITION + 4));
+            cpu.write32(o + POSITION + 4, y);
+        } else {
+            for k in 0..2 {
+                let p = cpu.read32(c + POSITION + 4 * k).wrapping_add((cpu.read16(o + L_OFFSET + 2 * k) as i16 as i32 as u32) << 16);
+                cpu.write32(o + POSITION + 4 * k, p);
+            }
+        }
+        let z = cpu.read32(c + POSITION + 8);
+        cpu.write32(o + POSITION + 8, z);
+        let fl = cpu.read16(c + ROUTE_FLAGS);
+        cpu.write16(o + ROUTE_FLAGS, fl);
+    } else {
+        let y = cpu.read32(o + POSITION + 4);
+        let firing = if y.wrapping_add(L_FIRING_BAND) > L_FIRING_SPAN { 0 } else { FIRING };
+        cpu.write16(o + ROUTE_FLAGS, firing);
+        for (k, at) in [(0, super::globals::GROUND_DX_AT), (4, super::globals::GROUND_DY_AT)] {
+            let g = cpu.read32(at);
+            let p = cpu.read32(o + POSITION + k).wrapping_sub(cpu.read32(g));
+            cpu.write32(o + POSITION + k, p);
+        }
+    }
+    let with = cpu.read32(o + L_FLASH_WITH);
+    if with != 0 {
+        nested!(cpu, 0x0604_668c, super::parts::flash_against(cpu, o, with));
+        return;
+    }
+    let wait = cpu.read16(o + L_WAIT) as i16 as i32 as u32;
+    let wait = nested!(cpu, 0x0604_6168, actors::approach(cpu, wait, 0, 1)) as i16;
+    cpu.write16(o + L_WAIT, wait as u16);
+    if cpu.read16(o + ROUTE_FLAGS) & FIRING == 0 || wait != 0 {
+        return;
+    }
+    let d = cpu.read8(DIFFICULTY) as i8 as i16;
+    let rate = (cpu.read16(o + L_RATE) as i16).wrapping_sub(d);
+    cpu.write16(o + L_WAIT, rate.wrapping_mul(8).wrapping_add(8) as u16);
+    let n = cpu.read8(o + NUMBER);
+    cpu.write8(f + S_NUMBER, n);
+    let a = cpu.read16(o + ANGLE);
+    cpu.write16(f + S_ANGLE, a);
+    cpu.write16(f + S_FLAGS, L_ROCKET_FRAMES);
+    cpu.write16(f + S_ROCKET_FLAGS, L_ROCKET_FLAGS);
+    let s = cpu.call(SL_SIN, &[a as i16 as i32 as u32]) as i32;
+    let x = cpu.read32(o + POSITION).wrapping_add(s.wrapping_mul(L_MUZZLE) as u32);
+    cpu.write32(f, x);
+    let a = cpu.read16(o + ANGLE) as i16 as i32 as u32;
+    let co = cpu.call(SL_COS, &[a]) as i32;
+    let y = cpu.read32(o + POSITION + 4).wrapping_add(co.wrapping_mul(-L_MUZZLE) as u32);
+    cpu.write32(f + 4, y);
+    cpu.write32(f + 8, 0);
+    nested!(cpu, 0x0605_5b5c, super::bullets::rocket_set(cpu, f));
+}
