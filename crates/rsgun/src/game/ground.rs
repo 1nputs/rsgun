@@ -506,3 +506,94 @@ pub fn gun_exec(cpu: &mut Cpu, o: u32) {
     let a = mirror(cpu).wrapping_mul(cpu.read16(o + AIM) as i16) as u16;
     cpu.write16(o + ANGLE, a);
 }
+
+/// A ground enemy that shows its wounds: along its route script as route_exec does; once below
+/// 2500 life it smokes (a puff each 8 frames, near it, flipped at random) and, while firing,
+/// unless it is the plain kind (its boxes), it fires pairs of shots 24 pixels either side, twice
+/// the difficulty's number of pairs, every 120 frames less 12 for each step of difficulty. Out of
+/// life it blows up (by its kind).
+const BOXES: u32 = 0x3c;
+const PLAIN_BOXES: u32 = 0x0607_3338;
+const WOUNDED: i32 = 0x9c3;
+const WOUND_WAIT: u32 = 0xa2;
+const SIDE_SHOT: u32 = 0x0605_b4c0;
+const SIDE_SHOT_X: [u32; 2] = [0xffe8_0000, 0x18_0000];
+/// Not rewritten yet: the wounded kind's explosion.
+const BLOWN_UP_WOUNDED: u32 = 0x0605_9ee4;
+/// The smoke (actors.rs's drifting effect): its animation, colour (attribute bits at random), how
+/// far out it starts (up to 4 pixels each way, 4 units nearer), its scales and speed.
+const SMOKE_SCRIPT: u32 = 0x0607_310c;
+const SMOKE_COLOUR: u16 = 0xd0;
+const SMOKE_FLIPS: u32 = 0xa000;
+const SMOKE_SPREAD: u32 = 0x4_0000;
+const SMOKE_SCALE: u32 = 0x8000;
+const SMOKE_SPEED: u32 = 0xc000;
+const GAME_FRAMES: u32 = super::globals::GAME_FRAMES;
+
+pub fn wounded_exec(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let alive = |cpu: &mut Cpu| cpu.read32(o + LIFE) as i32 > 0;
+    let leaves = alive(cpu)
+        && cpu.read16(o + ROUTE_FLAGS) & ROUTE_1000 != 0
+        && {
+            let [top, bottom, left, right] = ROUTE_AREA;
+            cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + SPRITE, top, bottom, left, right)) as u8 != 0
+        };
+    if !alive(cpu) || leaves {
+        if !alive(cpu) {
+            let blown = if cpu.read32(o + BOXES) == PLAIN_BOXES { BLOWN_UP_1 } else { BLOWN_UP_WOUNDED };
+            cpu.call(blown, &[o]);
+        }
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    let script = cpu.read32(o + SCRIPT);
+    match nested!(cpu, 0x0605_a000, route_step(cpu, o, script)) & 0xff {
+        START_FIRING => {
+            let fl = cpu.read16(o + ROUTE_FLAGS) | FIRING;
+            cpu.write16(o + ROUTE_FLAGS, fl);
+        }
+        STOP_FIRING => {
+            let fl = cpu.read16(o + ROUTE_FLAGS) & !FIRING;
+            cpu.write16(o + ROUTE_FLAGS, fl);
+        }
+        _ => {}
+    }
+    nested!(cpu, 0x0605_a460, route_move(cpu, o));
+    let wounded = |cpu: &mut Cpu| cpu.read32(o + LIFE) as i32 <= WOUNDED;
+    if wounded(cpu) && cpu.read32(GAME_FRAMES) & 7 == 0 {
+        use super::actors::{E_ANGLE, E_COLOUR, E_POSITION, E_SCALES, E_SCRIPT, E_SPEED};
+        cpu.write32(f + E_SCRIPT, SMOKE_SCRIPT);
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+        cpu.write16(f + E_COLOUR, (r & SMOKE_FLIPS) as u16 | SMOKE_COLOUR);
+        for k in 0..2 {
+            let r = nested!(cpu, 0x0604_5d90, math::random(cpu, SMOKE_SPREAD));
+            let p = cpu.read32(o + POSITION + 4 * k).wrapping_add(r);
+            cpu.write32(f + E_POSITION + 4 * k, p);
+        }
+        let z = cpu.read32(o + POSITION + 8).wrapping_sub(SMOKE_SPREAD);
+        cpu.write32(f + E_POSITION + 8, z);
+        cpu.write16(f + E_ANGLE, 0);
+        cpu.write32(f + E_SPEED, SMOKE_SPEED);
+        cpu.write32(f + E_SCALES, SMOKE_SCALE);
+        cpu.write32(f + E_SCALES + 4, SMOKE_SCALE);
+        nested!(cpu, 0x0605_7454, actors::drift_effect(cpu, f));
+    }
+    if cpu.read16(o + ROUTE_FLAGS) & FIRING == 0 || cpu.read32(o + BOXES) == PLAIN_BOXES || !wounded(cpu) {
+        return;
+    }
+    let wait = cpu.read16(o + WOUND_WAIT).wrapping_add(1);
+    cpu.write16(o + WOUND_WAIT, wait);
+    let d = cpu.read8(DIFFICULTY) as i8 as i32;
+    if (wait as i16 as i32) <= 120 - d * 12 {
+        return;
+    }
+    cpu.write16(o + WOUND_WAIT, 0);
+    let mut i = 0;
+    while i < cpu.read8(DIFFICULTY) as i8 as i32 * 2 {
+        for x in SIDE_SHOT_X {
+            cpu.call(SIDE_SHOT, &[o, x]);
+        }
+        i = (i + 1) & 0xff;
+    }
+}
