@@ -1763,522 +1763,114 @@ pub fn sl_tan(cpu: &mut Cpu, a: u32) -> u32 {
     (v << shift) ^ xor
 }
 
-/// The current matrix inverted in place (Gauss-Jordan, as SGL's asm does it): at each of the
-/// first two steps the row with the biggest pivot swapped up (its first columns kept in
-/// registers, the swap noted in a code byte), the other rows reduced by it with the quotients on
-/// the divide unit (each started one step before it is read; the place's products a byte lower),
-/// the pivot row divided through; the swaps undone at the end. Written step for step from the
-/// SH-2 code (tools/port/asm2rs.py), each step with its address, and its registers left as it
-/// leaves them.
-#[allow(unused_assignments, clippy::all)]
+/// The current matrix inverted in place: Gauss-Jordan elimination, as SGL's asm does it. The
+/// first two pivots are the biggest left in their column (a row swapped up for it), the third is
+/// what is left; the swaps are undone on the columns at the end. Each step divides on the divide
+/// unit in the SH-2 code's order, and the registers are left as the SH-2 code leaves them.
 pub fn sl_inverse(cpu: &mut Cpu) {
-    let w = cpu.gbr();
-    let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7, mut r8, mut r9, mut r10, ..] = cpu.sh2.r;
-    let mut mac: i64;
-    let mut t: bool;
-    r0 = cpu.read32(w + MATRIX);
-    // the first pivot: the biggest of the first column
-    r6 = r0; // 06071d34 mov r0,r6
-    r0 = cpu.read32(r6.wrapping_add(0)); // 06071d36 mov.l @(0,r6),r0
-    r9 = 0i32 as u32; // 06071d38 mov #0,r9
-    r3 = r0; // 06071d3a mov r0,r3
-    t = r0 as i32 >= 0; // 06071d3c cmp/pz r0
-    r1 = cpu.read32(r6.wrapping_add(16));
-    if !t {
-        r3 = r0.wrapping_neg();
-    }
-    r4 = r1; // 06071d44 mov r1,r4
-    t = r1 as i32 >= 0; // 06071d46 cmp/pz r1
-    r2 = cpu.read32(r6.wrapping_add(32));
-    if !t {
-        r4 = r1.wrapping_neg();
-    }
-    t = r3 >= r4;
-    r5 = r2;
-    if !t {
-        r3 = r4;
-        r9 = 1;
-    }
-    t = r2 as i32 >= 0;
-    if !t {
-        r5 = r2.wrapping_neg();
-    }
-    t = r3 >= r5;
-    r8 = cpu.read32(r6.wrapping_add(4));
-    let swapped = if !t {
-        // the third row's: rows 0 and 2 swapped (their first column kept in registers)
-        r9 = cpu.read32(r6.wrapping_add(8)); // 06071d64 mov.l @(8,r6),r9
-        r3 = cpu.read32(r6.wrapping_add(12)); // 06071d66 mov.l @(12,r6),r3
-        r4 = cpu.read32(r6.wrapping_add(44)); // 06071d68 mov.l @(44,r6),r4
-        r7 = cpu.read32(r6.wrapping_add(40)); // 06071d6a mov.l @(40,r6),r7
-        r5 = cpu.read32(r6.wrapping_add(36)); // 06071d6c mov.l @(36,r6),r5
-        cpu.write32(r6.wrapping_add(44), r3); // 06071d6e mov.l r3,@(44,r6)
-        cpu.write32(r6.wrapping_add(12), r4); // 06071d70 mov.l r4,@(12,r6)
-        cpu.write32(r6.wrapping_add(40), r9); // 06071d72 mov.l r9,@(40,r6)
-        cpu.write32(r6.wrapping_add(8), r7); // 06071d74 mov.l r7,@(8,r6)
-        cpu.write32(r6.wrapping_add(36), r8); // 06071d76 mov.l r8,@(36,r6)
-        r3 = r2; // 06071d78 mov r2,r3
-        r2 = r0; // 06071d7a mov r0,r2
-        r9 = 2;
-        true
-    } else {
-        t = r9 == 0;
-        if !t {
-            // the second row's: rows 0 and 1 swapped
-            r9 = cpu.read32(r6.wrapping_add(8)); // 06071d84 mov.l @(8,r6),r9
-            r3 = cpu.read32(r6.wrapping_add(12)); // 06071d86 mov.l @(12,r6),r3
-            r4 = cpu.read32(r6.wrapping_add(28)); // 06071d88 mov.l @(28,r6),r4
-            r7 = cpu.read32(r6.wrapping_add(24)); // 06071d8a mov.l @(24,r6),r7
-            r5 = cpu.read32(r6.wrapping_add(20)); // 06071d8c mov.l @(20,r6),r5
-            cpu.write32(r6.wrapping_add(28), r3); // 06071d8e mov.l r3,@(28,r6)
-            cpu.write32(r6.wrapping_add(12), r4); // 06071d90 mov.l r4,@(12,r6)
-            cpu.write32(r6.wrapping_add(24), r9); // 06071d92 mov.l r9,@(24,r6)
-            cpu.write32(r6.wrapping_add(8), r7); // 06071d94 mov.l r7,@(8,r6)
-            cpu.write32(r6.wrapping_add(20), r8); // 06071d96 mov.l r8,@(20,r6)
-            r3 = r1; // 06071d98 mov r1,r3
-            r1 = r0; // 06071d9a mov r0,r1
-            r9 = 1i32 as u32; // 06071d9c mov #1,r9
-            true
-        } else {
-            false
-        }
-    };
-    if swapped {
-        r8 = r5;
-        r0 = r3;
-    }
-    // the first elimination (pivot row 0), the quotients on the divide unit one step behind
-    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071da2 dmuls.l r1,r8
-    r10 = -1i32 as u32; // 06071da4 mov #-1,r10
-    r10 <<= 8; // 06071da6 shll8 r10
-    cpu.write32(r10.wrapping_add(0), r0); // 06071da8 mov.l r0,@(0,r10)
-    r4 = (mac >> 32) as u32; // 06071daa sts mach,r4
-    r5 = mac as u32; // 06071dac sts macl,r5
-    cpu.write32(r10.wrapping_add(16), r4); // 06071dae mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r5); // 06071db0 mov.l r5,@(20,r10)
-    r5 = cpu.read32(r6.wrapping_add(20)); // 06071db2 mov.l @(20,r6),r5
-    r4 = cpu.read32(r10.wrapping_add(28)); // 06071db4 mov.l @(28,r10),r4
-    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071db6 dmuls.l r2,r8
-    r5 = r5.wrapping_sub(r4); // 06071db8 sub r4,r5
-    cpu.write32(r6.wrapping_add(20), r5); // 06071dba mov.l r5,@(20,r6)
-    cpu.write32(r10.wrapping_add(0), r0); // 06071dbc mov.l r0,@(0,r10)
-    r4 = (mac >> 32) as u32; // 06071dbe sts mach,r4
-    r5 = mac as u32; // 06071dc0 sts macl,r5
-    cpu.write32(r10.wrapping_add(16), r4); // 06071dc2 mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r5); // 06071dc4 mov.l r5,@(20,r10)
-    r5 = cpu.read32(r6.wrapping_add(36)); // 06071dc6 mov.l @(36,r6),r5
-    r3 = r8.rotate_left(16); // 06071dc8 swap.w r8,r3
-    r3 = r3 as i16 as i32 as u32; // 06071dca exts.w r3,r3
-    r8 <<= 16; // 06071dcc shll16 r8
-    r4 = cpu.read32(r10.wrapping_add(28)); // 06071dce mov.l @(28,r10),r4
-    cpu.write32(r10.wrapping_add(0), r0); // 06071dd0 mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r3); // 06071dd2 mov.l r3,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r8); // 06071dd4 mov.l r8,@(20,r10)
-    r5 = r5.wrapping_sub(r4); // 06071dd6 sub r4,r5
-    cpu.write32(r6.wrapping_add(36), r5); // 06071dd8 mov.l r5,@(36,r6)
-    r8 = cpu.read32(r6.wrapping_add(8)); // 06071dda mov.l @(8,r6),r8
-    r3 = cpu.read32(r10.wrapping_add(28)); // 06071ddc mov.l @(28,r10),r3
-    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071dde dmuls.l r1,r8
-    r3 = r3.wrapping_neg(); // 06071de0 neg r3,r3
-    cpu.write32(r6.wrapping_add(4), r3); // 06071de2 mov.l r3,@(4,r6)
-    cpu.write32(r10.wrapping_add(0), r0); // 06071de4 mov.l r0,@(0,r10)
-    r4 = (mac >> 32) as u32; // 06071de6 sts mach,r4
-    r5 = mac as u32; // 06071de8 sts macl,r5
-    cpu.write32(r10.wrapping_add(16), r4); // 06071dea mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r5); // 06071dec mov.l r5,@(20,r10)
-    r5 = cpu.read32(r6.wrapping_add(24)); // 06071dee mov.l @(24,r6),r5
-    r4 = cpu.read32(r10.wrapping_add(28)); // 06071df0 mov.l @(28,r10),r4
-    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071df2 dmuls.l r2,r8
-    r5 = r5.wrapping_sub(r4); // 06071df4 sub r4,r5
-    cpu.write32(r6.wrapping_add(24), r5); // 06071df6 mov.l r5,@(24,r6)
-    cpu.write32(r10.wrapping_add(0), r0); // 06071df8 mov.l r0,@(0,r10)
-    r4 = (mac >> 32) as u32; // 06071dfa sts mach,r4
-    r5 = mac as u32; // 06071dfc sts macl,r5
-    cpu.write32(r10.wrapping_add(16), r4); // 06071dfe mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r5); // 06071e00 mov.l r5,@(20,r10)
-    r3 = r8.rotate_left(16); // 06071e02 swap.w r8,r3
-    r3 = r3 as i16 as i32 as u32; // 06071e04 exts.w r3,r3
-    r8 <<= 16; // 06071e06 shll16 r8
-    r5 = cpu.read32(r6.wrapping_add(40)); // 06071e08 mov.l @(40,r6),r5
-    r4 = cpu.read32(r10.wrapping_add(28)); // 06071e0a mov.l @(28,r10),r4
-    cpu.write32(r10.wrapping_add(0), r0); // 06071e0c mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r3); // 06071e0e mov.l r3,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r8); // 06071e10 mov.l r8,@(20,r10)
-    r5 = r5.wrapping_sub(r4); // 06071e12 sub r4,r5
-    cpu.write32(r6.wrapping_add(40), r5); // 06071e14 mov.l r5,@(40,r6)
-    r8 = cpu.read32(r6.wrapping_add(12)); // 06071e16 mov.l @(12,r6),r8
-    r3 = cpu.read32(r10.wrapping_add(28)); // 06071e18 mov.l @(28,r10),r3
-    r4 = r8.rotate_left(16); // 06071e1a swap.w r8,r4
-    r4 = (r4 & 0xffff_0000) | ((r4 & 0xff) << 8) | ((r4 >> 8) & 0xff); // 06071e1c swap.b r4,r4
-    r4 = r4 as i8 as i32 as u32; // 06071e1e exts.b r4,r4
-    r8 <<= 8; // 06071e20 shll8 r8
-    cpu.write32(r10.wrapping_add(0), r0); // 06071e22 mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r4); // 06071e24 mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r8); // 06071e26 mov.l r8,@(20,r10)
-    r3 = r3.wrapping_neg(); // 06071e28 neg r3,r3
-    cpu.write32(r6.wrapping_add(8), r3); // 06071e2a mov.l r3,@(8,r6)
-    r8 = cpu.read32(r10.wrapping_add(28)); // 06071e2c mov.l @(28,r10),r8
-    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071e2e dmuls.l r1,r8
-    r5 = cpu.read32(r6.wrapping_add(28)); // 06071e30 mov.l @(28,r6),r5
-    r3 = (mac >> 32) as u32; // 06071e32 sts mach,r3
-    r4 = mac as u32; // 06071e34 sts macl,r4
-    r3 <<= 8; // 06071e36 shll8 r3
-    r3 <<= 16; // 06071e38 shll16 r3
-    r4 >>= 8; // 06071e3a shlr8 r4
-    r4 |= r3; // 06071e3c or r3,r4
-    r5 = r5.wrapping_sub(r4); // 06071e3e sub r4,r5
-    cpu.write32(r6.wrapping_add(28), r5); // 06071e40 mov.l r5,@(28,r6)
-    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071e42 dmuls.l r2,r8
-    r5 = cpu.read32(r6.wrapping_add(44)); // 06071e44 mov.l @(44,r6),r5
-    r3 = (mac >> 32) as u32; // 06071e46 sts mach,r3
-    r4 = mac as u32; // 06071e48 sts macl,r4
-    r3 <<= 8; // 06071e4a shll8 r3
-    r3 <<= 16; // 06071e4c shll16 r3
-    r4 >>= 8; // 06071e4e shlr8 r4
-    r4 |= r3; // 06071e50 or r3,r4
-    r5 = r5.wrapping_sub(r4); // 06071e52 sub r4,r5
-    cpu.write32(r6.wrapping_add(44), r5); // 06071e54 mov.l r5,@(44,r6)
-    r8 = r8.wrapping_neg(); // 06071e56 neg r8,r8
-    r8 <<= 8; // 06071e58 shll8 r8
-    cpu.write32(r6.wrapping_add(12), r8); // 06071e5a mov.l r8,@(12,r6)
-    r3 = r1.rotate_left(16); // 06071e5c swap.w r1,r3
-    r3 = r3 as i16 as i32 as u32; // 06071e5e exts.w r3,r3
-    r1 <<= 16; // 06071e60 shll16 r1
-    cpu.write32(r10.wrapping_add(0), r0); // 06071e62 mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r3); // 06071e64 mov.l r3,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r1); // 06071e66 mov.l r1,@(20,r10)
-    r3 = r2.rotate_left(16); // 06071e68 swap.w r2,r3
-    r3 = r3 as i16 as i32 as u32; // 06071e6a exts.w r3,r3
-    r2 <<= 16; // 06071e6c shll16 r2
-    r8 = cpu.read32(r10.wrapping_add(28)); // 06071e6e mov.l @(28,r10),r8
-    cpu.write32(r10.wrapping_add(0), r0); // 06071e70 mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r3); // 06071e72 mov.l r3,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r2); // 06071e74 mov.l r2,@(20,r10)
-    cpu.write32(r6.wrapping_add(16), r8); // 06071e76 mov.l r8,@(16,r6)
-    r1 = 1i32 as u32; // 06071e78 mov #1,r1
-    r3 = 0i32 as u32; // 06071e7a mov #0,r3
-    r5 = cpu.read32(r10.wrapping_add(28)); // 06071e7c mov.l @(28,r10),r5
-    cpu.write32(r10.wrapping_add(0), r0); // 06071e7e mov.l r0,@(0,r10)
-    cpu.write32(r6.wrapping_add(32), r5); // 06071e80 mov.l r5,@(32,r6)
-    cpu.write32(r10.wrapping_add(16), r1); // 06071e82 mov.l r1,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r3); // 06071e84 mov.l r3,@(20,r10)
-    r0 = cpu.read32(r6.wrapping_add(20)); // 06071e86 mov.l @(20,r6),r0
-    r3 = 0i32 as u32; // 06071e88 mov #0,r3
-    r4 = r0; // 06071e8a mov r0,r4
-    t = r0 as i32 >= 0; // 06071e8c cmp/pz r0
-    r2 = cpu.read32(r6.wrapping_add(36));
-    if !t {
-        r4 = r0.wrapping_neg();
-    }
-    t = r2 as i32 >= 0;
-    r1 = r2;
-    if !t {
-        r1 = r2.wrapping_neg();
-    }
+    let m = matrix(cpu);
+    let at = |row: usize, col: usize| m + (16 * row + 4 * col) as u32;
+    let size = |cpu: &mut Cpu, row: usize, col: usize| (cpu.read32(at(row, col)) as i32).unsigned_abs();
+    // the first pivot: the biggest of the first column (a tie to the upper row)
+    let sizes = [0, 1, 2].map(|row| size(cpu, row, 0));
+    let upper = if sizes[0] >= sizes[1] { 0 } else { 1 };
+    let first = if sizes[upper] >= sizes[2] { upper } else { 2 };
+    // (the swap passes the lower row's third element through r7)
+    let r7 = if first == 0 { cpu.sh2.r[7] } else { cpu.read32(at(first, 2)) };
+    swap_rows(cpu, m, 0, first);
+    inverse_step(cpu, m, 0, [1, 2]);
     // the second pivot: the bigger of rows 1 and 2 in the second column
-    t = r4 >= r1;
-    r8 = cpu.read32(r6.wrapping_add(16));
-    if !t {
-        r3 = cpu.read32(r6.wrapping_add(28)); // 06071ea2 mov.l @(28,r6),r3
-        r4 = cpu.read32(r6.wrapping_add(44)); // 06071ea4 mov.l @(44,r6),r4
-        r5 = cpu.read32(r6.wrapping_add(24)); // 06071ea6 mov.l @(24,r6),r5
-        r1 = cpu.read32(r6.wrapping_add(40)); // 06071ea8 mov.l @(40,r6),r1
-        cpu.write32(r6.wrapping_add(44), r3); // 06071eaa mov.l r3,@(44,r6)
-        cpu.write32(r6.wrapping_add(28), r4); // 06071eac mov.l r4,@(28,r6)
-        cpu.write32(r6.wrapping_add(40), r5); // 06071eae mov.l r5,@(40,r6)
-        cpu.write32(r6.wrapping_add(24), r1); // 06071eb0 mov.l r1,@(24,r6)
-        r5 = cpu.read32(r6.wrapping_add(32)); // 06071eb2 mov.l @(32,r6),r5
-        cpu.write32(r6.wrapping_add(32), r8); // 06071eb4 mov.l r8,@(32,r6)
-        r8 = r5; // 06071eb6 mov r5,r8
-        r3 = r2; // 06071eb8 mov r2,r3
-        r2 = r0; // 06071eba mov r0,r2
-        r0 = r3; // 06071ebc mov r3,r0
-        r3 = 2i32 as u32; // 06071ebe mov #2,r3
+    let second = if size(cpu, 1, 1) >= size(cpu, 2, 1) { 1 } else { 2 };
+    swap_rows(cpu, m, 1, second);
+    inverse_step(cpu, m, 1, [0, 2]);
+    let (factors, translation) = inverse_step(cpu, m, 2, [0, 1]);
+    // the swaps undone, the second's first
+    if second == 2 {
+        swap_columns(cpu, m, 1, 2);
     }
-    // the second and third eliminations
-    r1 = cpu.read32(r6.wrapping_add(4)); // 06071ec0 mov.l @(4,r6),r1
-    r9 <<= 8; // 06071ec2 shll8 r9
-    r9 |= r3; // 06071ec4 or r3,r9
-    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071ec6 dmuls.l r1,r8
-    r3 = cpu.read32(r10.wrapping_add(28)); // 06071ec8 mov.l @(28,r10),r3
-    cpu.write32(r10.wrapping_add(0), r0); // 06071eca mov.l r0,@(0,r10)
-    cpu.write32(r6.wrapping_add(0), r3); // 06071ecc mov.l r3,@(0,r6)
-    r4 = (mac >> 32) as u32; // 06071ece sts mach,r4
-    r5 = mac as u32; // 06071ed0 sts macl,r5
-    cpu.write32(r10.wrapping_add(16), r4); // 06071ed2 mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r5); // 06071ed4 mov.l r5,@(20,r10)
-    r4 = cpu.read32(r10.wrapping_add(28)); // 06071ed6 mov.l @(28,r10),r4
-    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071ed8 dmuls.l r2,r8
-    r3 = r3.wrapping_sub(r4); // 06071eda sub r4,r3
-    cpu.write32(r6.wrapping_add(0), r3); // 06071edc mov.l r3,@(0,r6)
-    cpu.write32(r10.wrapping_add(0), r0); // 06071ede mov.l r0,@(0,r10)
-    r4 = (mac >> 32) as u32; // 06071ee0 sts mach,r4
-    r5 = mac as u32; // 06071ee2 sts macl,r5
-    cpu.write32(r10.wrapping_add(16), r4); // 06071ee4 mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r5); // 06071ee6 mov.l r5,@(20,r10)
-    r3 = r8.rotate_left(16); // 06071ee8 swap.w r8,r3
-    r3 = r3 as i16 as i32 as u32; // 06071eea exts.w r3,r3
-    r8 <<= 16; // 06071eec shll16 r8
-    r5 = cpu.read32(r6.wrapping_add(32)); // 06071eee mov.l @(32,r6),r5
-    r4 = cpu.read32(r10.wrapping_add(28)); // 06071ef0 mov.l @(28,r10),r4
-    cpu.write32(r10.wrapping_add(0), r0); // 06071ef2 mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r3); // 06071ef4 mov.l r3,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r8); // 06071ef6 mov.l r8,@(20,r10)
-    r5 = r5.wrapping_sub(r4); // 06071ef8 sub r4,r5
-    cpu.write32(r6.wrapping_add(32), r5); // 06071efa mov.l r5,@(32,r6)
-    r8 = cpu.read32(r6.wrapping_add(24)); // 06071efc mov.l @(24,r6),r8
-    r3 = cpu.read32(r10.wrapping_add(28)); // 06071efe mov.l @(28,r10),r3
-    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071f00 dmuls.l r1,r8
-    r3 = r3.wrapping_neg(); // 06071f02 neg r3,r3
-    cpu.write32(r6.wrapping_add(16), r3); // 06071f04 mov.l r3,@(16,r6)
-    cpu.write32(r10.wrapping_add(0), r0); // 06071f06 mov.l r0,@(0,r10)
-    r4 = (mac >> 32) as u32; // 06071f08 sts mach,r4
-    r5 = mac as u32; // 06071f0a sts macl,r5
-    cpu.write32(r10.wrapping_add(16), r4); // 06071f0c mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r5); // 06071f0e mov.l r5,@(20,r10)
-    r5 = cpu.read32(r6.wrapping_add(8)); // 06071f10 mov.l @(8,r6),r5
-    r4 = cpu.read32(r10.wrapping_add(28)); // 06071f12 mov.l @(28,r10),r4
-    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071f14 dmuls.l r2,r8
-    r5 = r5.wrapping_sub(r4); // 06071f16 sub r4,r5
-    cpu.write32(r6.wrapping_add(8), r5); // 06071f18 mov.l r5,@(8,r6)
-    cpu.write32(r10.wrapping_add(0), r0); // 06071f1a mov.l r0,@(0,r10)
-    r4 = (mac >> 32) as u32; // 06071f1c sts mach,r4
-    r5 = mac as u32; // 06071f1e sts macl,r5
-    cpu.write32(r10.wrapping_add(16), r4); // 06071f20 mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r5); // 06071f22 mov.l r5,@(20,r10)
-    r3 = r8.rotate_left(16); // 06071f24 swap.w r8,r3
-    r3 = r3 as i16 as i32 as u32; // 06071f26 exts.w r3,r3
-    r8 <<= 16; // 06071f28 shll16 r8
-    r5 = cpu.read32(r6.wrapping_add(40)); // 06071f2a mov.l @(40,r6),r5
-    r4 = cpu.read32(r10.wrapping_add(28)); // 06071f2c mov.l @(28,r10),r4
-    cpu.write32(r10.wrapping_add(0), r0); // 06071f2e mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r3); // 06071f30 mov.l r3,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r8); // 06071f32 mov.l r8,@(20,r10)
-    r5 = r5.wrapping_sub(r4); // 06071f34 sub r4,r5
-    cpu.write32(r6.wrapping_add(40), r5); // 06071f36 mov.l r5,@(40,r6)
-    r8 = cpu.read32(r6.wrapping_add(28)); // 06071f38 mov.l @(28,r6),r8
-    r3 = cpu.read32(r10.wrapping_add(28)); // 06071f3a mov.l @(28,r10),r3
-    r4 = r8.rotate_left(16); // 06071f3c swap.w r8,r4
-    r4 = (r4 & 0xffff_0000) | ((r4 & 0xff) << 8) | ((r4 >> 8) & 0xff); // 06071f3e swap.b r4,r4
-    r4 = r4 as i8 as i32 as u32; // 06071f40 exts.b r4,r4
-    r8 <<= 8; // 06071f42 shll8 r8
-    cpu.write32(r10.wrapping_add(0), r0); // 06071f44 mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r4); // 06071f46 mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r8); // 06071f48 mov.l r8,@(20,r10)
-    r3 = r3.wrapping_neg(); // 06071f4a neg r3,r3
-    cpu.write32(r6.wrapping_add(24), r3); // 06071f4c mov.l r3,@(24,r6)
-    r8 = cpu.read32(r10.wrapping_add(28)); // 06071f4e mov.l @(28,r10),r8
-    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071f50 dmuls.l r1,r8
-    r5 = cpu.read32(r6.wrapping_add(12)); // 06071f52 mov.l @(12,r6),r5
-    r3 = (mac >> 32) as u32; // 06071f54 sts mach,r3
-    r4 = mac as u32; // 06071f56 sts macl,r4
-    r3 <<= 8; // 06071f58 shll8 r3
-    r3 <<= 16; // 06071f5a shll16 r3
-    r4 >>= 8; // 06071f5c shlr8 r4
-    r4 |= r3; // 06071f5e or r3,r4
-    r5 = r5.wrapping_sub(r4); // 06071f60 sub r4,r5
-    cpu.write32(r6.wrapping_add(12), r5); // 06071f62 mov.l r5,@(12,r6)
-    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071f64 dmuls.l r2,r8
-    r5 = cpu.read32(r6.wrapping_add(44)); // 06071f66 mov.l @(44,r6),r5
-    r3 = (mac >> 32) as u32; // 06071f68 sts mach,r3
-    r4 = mac as u32; // 06071f6a sts macl,r4
-    r3 <<= 8; // 06071f6c shll8 r3
-    r3 <<= 16; // 06071f6e shll16 r3
-    r4 >>= 8; // 06071f70 shlr8 r4
-    r4 |= r3; // 06071f72 or r3,r4
-    r5 = r5.wrapping_sub(r4); // 06071f74 sub r4,r5
-    cpu.write32(r6.wrapping_add(44), r5); // 06071f76 mov.l r5,@(44,r6)
-    cpu.write32(r10.wrapping_add(0), r0); // 06071f78 mov.l r0,@(0,r10)
-    r3 = r1.rotate_left(16); // 06071f7a swap.w r1,r3
-    r3 = r3 as i16 as i32 as u32; // 06071f7c exts.w r3,r3
-    cpu.write32(r10.wrapping_add(16), r3); // 06071f7e mov.l r3,@(16,r10)
-    r1 <<= 16; // 06071f80 shll16 r1
-    cpu.write32(r10.wrapping_add(20), r1); // 06071f82 mov.l r1,@(20,r10)
-    r8 = r8.wrapping_neg(); // 06071f84 neg r8,r8
-    r8 <<= 8; // 06071f86 shll8 r8
-    cpu.write32(r6.wrapping_add(28), r8); // 06071f88 mov.l r8,@(28,r6)
-    r1 = cpu.read32(r10.wrapping_add(28)); // 06071f8a mov.l @(28,r10),r1
-    cpu.write32(r10.wrapping_add(0), r0); // 06071f8c mov.l r0,@(0,r10)
-    cpu.write32(r6.wrapping_add(4), r1); // 06071f8e mov.l r1,@(4,r6)
-    r3 = r2.rotate_left(16); // 06071f90 swap.w r2,r3
-    r3 = r3 as i16 as i32 as u32; // 06071f92 exts.w r3,r3
-    cpu.write32(r10.wrapping_add(16), r3); // 06071f94 mov.l r3,@(16,r10)
-    r2 <<= 16; // 06071f96 shll16 r2
-    cpu.write32(r10.wrapping_add(20), r2); // 06071f98 mov.l r2,@(20,r10)
-    r1 = 1i32 as u32; // 06071f9a mov #1,r1
-    r3 = 0i32 as u32; // 06071f9c mov #0,r3
-    r2 = cpu.read32(r10.wrapping_add(28)); // 06071f9e mov.l @(28,r10),r2
-    cpu.write32(r10.wrapping_add(0), r0); // 06071fa0 mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r1); // 06071fa2 mov.l r1,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r3); // 06071fa4 mov.l r3,@(20,r10)
-    cpu.write32(r6.wrapping_add(36), r2); // 06071fa6 mov.l r2,@(36,r6)
-    r0 = cpu.read32(r6.wrapping_add(40)); // 06071fa8 mov.l @(40,r6),r0
-    r8 = cpu.read32(r6.wrapping_add(32)); // 06071faa mov.l @(32,r6),r8
-    r1 = cpu.read32(r6.wrapping_add(8)); // 06071fac mov.l @(8,r6),r1
-    r2 = cpu.read32(r6.wrapping_add(24)); // 06071fae mov.l @(24,r6),r2
-    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071fb0 dmuls.l r1,r8
-    r3 = cpu.read32(r10.wrapping_add(28)); // 06071fb2 mov.l @(28,r10),r3
-    cpu.write32(r6.wrapping_add(20), r3); // 06071fb4 mov.l r3,@(20,r6)
-    cpu.write32(r10.wrapping_add(0), r0); // 06071fb6 mov.l r0,@(0,r10)
-    r4 = (mac >> 32) as u32; // 06071fb8 sts mach,r4
-    r5 = mac as u32; // 06071fba sts macl,r5
-    cpu.write32(r10.wrapping_add(16), r4); // 06071fbc mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r5); // 06071fbe mov.l r5,@(20,r10)
-    r5 = cpu.read32(r6.wrapping_add(0)); // 06071fc0 mov.l @(0,r6),r5
-    r4 = cpu.read32(r10.wrapping_add(28)); // 06071fc2 mov.l @(28,r10),r4
-    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06071fc4 dmuls.l r2,r8
-    r5 = r5.wrapping_sub(r4); // 06071fc6 sub r4,r5
-    cpu.write32(r6.wrapping_add(0), r5); // 06071fc8 mov.l r5,@(0,r6)
-    cpu.write32(r10.wrapping_add(0), r0); // 06071fca mov.l r0,@(0,r10)
-    r4 = (mac >> 32) as u32; // 06071fcc sts mach,r4
-    r5 = mac as u32; // 06071fce sts macl,r5
-    cpu.write32(r10.wrapping_add(16), r4); // 06071fd0 mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r5); // 06071fd2 mov.l r5,@(20,r10)
-    r3 = r8.rotate_left(16); // 06071fd4 swap.w r8,r3
-    r3 = r3 as i16 as i32 as u32; // 06071fd6 exts.w r3,r3
-    r8 <<= 16; // 06071fd8 shll16 r8
-    r5 = cpu.read32(r6.wrapping_add(16)); // 06071fda mov.l @(16,r6),r5
-    r4 = cpu.read32(r10.wrapping_add(28)); // 06071fdc mov.l @(28,r10),r4
-    cpu.write32(r10.wrapping_add(0), r0); // 06071fde mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r3); // 06071fe0 mov.l r3,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r8); // 06071fe2 mov.l r8,@(20,r10)
-    r5 = r5.wrapping_sub(r4); // 06071fe4 sub r4,r5
-    cpu.write32(r6.wrapping_add(16), r5); // 06071fe6 mov.l r5,@(16,r6)
-    r8 = cpu.read32(r6.wrapping_add(36)); // 06071fe8 mov.l @(36,r6),r8
-    r3 = cpu.read32(r10.wrapping_add(28)); // 06071fea mov.l @(28,r10),r3
-    mac = r1 as i32 as i64 * r8 as i32 as i64; // 06071fec dmuls.l r1,r8
-    r3 = r3.wrapping_neg(); // 06071fee neg r3,r3
-    cpu.write32(r6.wrapping_add(32), r3); // 06071ff0 mov.l r3,@(32,r6)
-    cpu.write32(r10.wrapping_add(0), r0); // 06071ff2 mov.l r0,@(0,r10)
-    r4 = (mac >> 32) as u32; // 06071ff4 sts mach,r4
-    r5 = mac as u32; // 06071ff6 sts macl,r5
-    cpu.write32(r10.wrapping_add(16), r4); // 06071ff8 mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r5); // 06071ffa mov.l r5,@(20,r10)
-    r5 = cpu.read32(r6.wrapping_add(4)); // 06071ffc mov.l @(4,r6),r5
-    r4 = cpu.read32(r10.wrapping_add(28)); // 06071ffe mov.l @(28,r10),r4
-    mac = r2 as i32 as i64 * r8 as i32 as i64; // 06072000 dmuls.l r2,r8
-    r5 = r5.wrapping_sub(r4); // 06072002 sub r4,r5
-    cpu.write32(r6.wrapping_add(4), r5); // 06072004 mov.l r5,@(4,r6)
-    cpu.write32(r10.wrapping_add(0), r0); // 06072006 mov.l r0,@(0,r10)
-    r4 = (mac >> 32) as u32; // 06072008 sts mach,r4
-    r5 = mac as u32; // 0607200a sts macl,r5
-    cpu.write32(r10.wrapping_add(16), r4); // 0607200c mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r5); // 0607200e mov.l r5,@(20,r10)
-    r3 = r8.rotate_left(16); // 06072010 swap.w r8,r3
-    r3 = r3 as i16 as i32 as u32; // 06072012 exts.w r3,r3
-    r8 <<= 16; // 06072014 shll16 r8
-    r5 = cpu.read32(r6.wrapping_add(20)); // 06072016 mov.l @(20,r6),r5
-    r4 = cpu.read32(r10.wrapping_add(28)); // 06072018 mov.l @(28,r10),r4
-    cpu.write32(r10.wrapping_add(0), r0); // 0607201a mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r3); // 0607201c mov.l r3,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r8); // 0607201e mov.l r8,@(20,r10)
-    r5 = r5.wrapping_sub(r4); // 06072020 sub r4,r5
-    cpu.write32(r6.wrapping_add(20), r5); // 06072022 mov.l r5,@(20,r6)
-    r8 = cpu.read32(r6.wrapping_add(44)); // 06072024 mov.l @(44,r6),r8
-    r3 = cpu.read32(r10.wrapping_add(28)); // 06072026 mov.l @(28,r10),r3
-    r4 = r8.rotate_left(16); // 06072028 swap.w r8,r4
-    r4 = (r4 & 0xffff_0000) | ((r4 & 0xff) << 8) | ((r4 >> 8) & 0xff); // 0607202a swap.b r4,r4
-    r4 = r4 as i8 as i32 as u32; // 0607202c exts.b r4,r4
-    r8 <<= 8; // 0607202e shll8 r8
-    cpu.write32(r10.wrapping_add(0), r0); // 06072030 mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r4); // 06072032 mov.l r4,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r8); // 06072034 mov.l r8,@(20,r10)
-    r3 = r3.wrapping_neg(); // 06072036 neg r3,r3
-    cpu.write32(r6.wrapping_add(36), r3); // 06072038 mov.l r3,@(36,r6)
-    r8 = cpu.read32(r10.wrapping_add(28)); // 0607203a mov.l @(28,r10),r8
-    mac = r1 as i32 as i64 * r8 as i32 as i64; // 0607203c dmuls.l r1,r8
-    r5 = cpu.read32(r6.wrapping_add(12)); // 0607203e mov.l @(12,r6),r5
-    r3 = (mac >> 32) as u32; // 06072040 sts mach,r3
-    r4 = mac as u32; // 06072042 sts macl,r4
-    r3 <<= 8; // 06072044 shll8 r3
-    r3 <<= 16; // 06072046 shll16 r3
-    r4 >>= 8; // 06072048 shlr8 r4
-    r4 |= r3; // 0607204a or r3,r4
-    r5 = r5.wrapping_sub(r4); // 0607204c sub r4,r5
-    mac = r2 as i32 as i64 * r8 as i32 as i64; // 0607204e dmuls.l r2,r8
-    cpu.write32(r6.wrapping_add(12), r5); // 06072050 mov.l r5,@(12,r6)
-    r5 = cpu.read32(r6.wrapping_add(28)); // 06072052 mov.l @(28,r6),r5
-    r3 = (mac >> 32) as u32; // 06072054 sts mach,r3
-    r4 = mac as u32; // 06072056 sts macl,r4
-    r3 <<= 8; // 06072058 shll8 r3
-    r3 <<= 16; // 0607205a shll16 r3
-    r4 >>= 8; // 0607205c shlr8 r4
-    r4 |= r3; // 0607205e or r3,r4
-    r5 = r5.wrapping_sub(r4); // 06072060 sub r4,r5
-    cpu.write32(r6.wrapping_add(28), r5); // 06072062 mov.l r5,@(28,r6)
-    r3 = r1.rotate_left(16); // 06072064 swap.w r1,r3
-    r3 = r3 as i16 as i32 as u32; // 06072066 exts.w r3,r3
-    r1 <<= 16; // 06072068 shll16 r1
-    cpu.write32(r10.wrapping_add(0), r0); // 0607206a mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r3); // 0607206c mov.l r3,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r1); // 0607206e mov.l r1,@(20,r10)
-    r8 = r8.wrapping_neg(); // 06072070 neg r8,r8
-    r8 <<= 8; // 06072072 shll8 r8
-    cpu.write32(r6.wrapping_add(44), r8); // 06072074 mov.l r8,@(44,r6)
-    r3 = r2.rotate_left(16); // 06072076 swap.w r2,r3
-    r3 = r3 as i16 as i32 as u32; // 06072078 exts.w r3,r3
-    r2 <<= 16; // 0607207a shll16 r2
-    r1 = cpu.read32(r10.wrapping_add(28)); // 0607207c mov.l @(28,r10),r1
-    cpu.write32(r10.wrapping_add(0), r0); // 0607207e mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r3); // 06072080 mov.l r3,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r2); // 06072082 mov.l r2,@(20,r10)
-    cpu.write32(r6.wrapping_add(8), r1); // 06072084 mov.l r1,@(8,r6)
-    r1 = 1i32 as u32; // 06072086 mov #1,r1
-    r3 = 0i32 as u32; // 06072088 mov #0,r3
-    r2 = cpu.read32(r10.wrapping_add(28)); // 0607208a mov.l @(28,r10),r2
-    cpu.write32(r10.wrapping_add(0), r0); // 0607208c mov.l r0,@(0,r10)
-    cpu.write32(r10.wrapping_add(16), r1); // 0607208e mov.l r1,@(16,r10)
-    cpu.write32(r10.wrapping_add(20), r3); // 06072090 mov.l r3,@(20,r10)
-    cpu.write32(r6.wrapping_add(24), r2); // 06072092 mov.l r2,@(24,r6)
-    r0 = r9 & 0xff; // 06072094 extu.b r9,r0
-    t = r0 & r0 == 0; // 06072096 tst r0,r0
-    r8 = cpu.read32(r10.wrapping_add(28));
-    // the swaps undone, by the codes kept in r9
-    if !t {
-        r0 = cpu.read32(r6.wrapping_add(4)); // 0607209c mov.l @(4,r6),r0
-        r1 = cpu.read32(r6.wrapping_add(8)); // 0607209e mov.l @(8,r6),r1
-        r2 = cpu.read32(r6.wrapping_add(20)); // 060720a0 mov.l @(20,r6),r2
-        r3 = cpu.read32(r6.wrapping_add(24)); // 060720a2 mov.l @(24,r6),r3
-        r4 = cpu.read32(r6.wrapping_add(36)); // 060720a4 mov.l @(36,r6),r4
-        cpu.write32(r6.wrapping_add(8), r0); // 060720a6 mov.l r0,@(8,r6)
-        cpu.write32(r6.wrapping_add(4), r1); // 060720a8 mov.l r1,@(4,r6)
-        cpu.write32(r6.wrapping_add(24), r2); // 060720aa mov.l r2,@(24,r6)
-        cpu.write32(r6.wrapping_add(20), r3); // 060720ac mov.l r3,@(20,r6)
-        cpu.write32(r6.wrapping_add(36), r8); // 060720ae mov.l r8,@(36,r6)
-        r8 = r4; // 060720b0 mov r4,r8
+    if first != 0 {
+        swap_columns(cpu, m, 0, first);
     }
-    r9 >>= 8;
-    t = r9 == 0;
-    r9 = r9.wrapping_sub(1);
-    if !t {
-        r0 = cpu.read32(r6);
-        r1 = cpu.read32(r6.wrapping_add(16));
-        t = r9 == 0;
-        r2 = cpu.read32(r6.wrapping_add(32));
-        if !t {
-            r3 = cpu.read32(r6.wrapping_add(8)); // 060720c4 mov.l @(8,r6),r3
-            r4 = cpu.read32(r6.wrapping_add(24)); // 060720c6 mov.l @(24,r6),r4
-            r5 = r8; // 060720c8 mov r8,r5
-            cpu.write32(r6.wrapping_add(8), r0); // 060720ca mov.l r0,@(8,r6)
-            cpu.write32(r6.wrapping_add(24), r1); // 060720cc mov.l r1,@(24,r6)
-            r8 = r2;
-        } else {
-            r3 = cpu.read32(r6.wrapping_add(4)); // 060720d2 mov.l @(4,r6),r3
-            r4 = cpu.read32(r6.wrapping_add(20)); // 060720d4 mov.l @(20,r6),r4
-            r5 = cpu.read32(r6.wrapping_add(36)); // 060720d6 mov.l @(36,r6),r5
-            cpu.write32(r6.wrapping_add(4), r0); // 060720d8 mov.l r0,@(4,r6)
-            cpu.write32(r6.wrapping_add(20), r1); // 060720da mov.l r1,@(20,r6)
-            cpu.write32(r6.wrapping_add(36), r2); // 060720dc mov.l r2,@(36,r6)
+    // the registers: the last swap's values (both columns it swapped, the other one first), or
+    // what the third step left
+    let product = factors[1] as i32 as i64 * translation as i32 as i64;
+    let regs = if first != 0 {
+        [at(0, first), at(1, first), at(2, first), at(0, 0), at(1, 0), at(2, 0)].map(|a| cpu.read32(a))
+    } else if second == 2 {
+        [at(0, 2), at(0, 1), at(1, 2), at(1, 1), at(2, 2), at(1, 3)].map(|a| cpu.read32(a))
+    } else {
+        [0, 1, cpu.read32(at(1, 2)), 0, (product >> 8) as u32, cpu.read32(at(1, 3))]
+    };
+    let [r0, r1, r2, r3, r4, r5] = regs;
+    cpu.leave(&[(0, r0), (1, r1), (2, r2), (3, r3), (4, r4), (5, r5), (6, m), (7, r7)]);
+    cpu.leave_mac(product);
+    cpu.leave_t(first != 2);
+}
+
+/// One step of SGL's inverse: pivot row and column `p`, the `others` reduced by it. Each other
+/// column's element in the other rows less its factor times the pivot row's over the pivot, the
+/// pivot row's over the pivot and negated (the translation column at 8 fraction bits, the other
+/// rows less products of that); the pivot column's factors over the pivot; the pivot its
+/// reciprocal. Returns the other rows' factors and the translation's quotient.
+fn inverse_step(cpu: &mut Cpu, m: u32, p: usize, others: [usize; 2]) -> ([u32; 2], u32) {
+    let at = |row: usize, col: usize| m + (16 * row + 4 * col) as u32;
+    let wide = |v: u32| v as i32 as i64;
+    let pivot = cpu.read32(at(p, p));
+    let factors = others.map(|row| cpu.read32(at(row, p)));
+    for col in (0..3).filter(|&col| col != p) {
+        let x = cpu.read32(at(p, col));
+        for (row, f) in others.into_iter().zip(factors) {
+            let q = inverse_divide(cpu, pivot, wide(f) * wide(x));
+            let v = cpu.read32(at(row, col)).wrapping_sub(q);
+            cpu.write32(at(row, col), v);
         }
-        cpu.write32(r6.wrapping_add(0), r3); // 060720de mov.l r3,@(0,r6)
-        cpu.write32(r6.wrapping_add(16), r4); // 060720e0 mov.l r4,@(16,r6)
-        cpu.write32(r6.wrapping_add(32), r5); // 060720e2 mov.l r5,@(32,r6)
+        let q = inverse_divide(cpu, pivot, wide(x) << 16);
+        cpu.write32(at(p, col), q.wrapping_neg());
     }
-    cpu.write32(r6.wrapping_add(40), r8);
-    let _ = (r9, r10);
-    cpu.leave(&[(0, r0), (1, r1), (2, r2), (3, r3), (4, r4), (5, r5), (6, r6), (7, r7)]);
-    cpu.leave_mac(mac);
-    cpu.leave_t(t);
+    let x = cpu.read32(at(p, 3));
+    let translation = inverse_divide(cpu, pivot, wide(x) << 8);
+    for (row, f) in others.into_iter().zip(factors) {
+        let v = cpu.read32(at(row, 3)).wrapping_sub(((wide(f) * wide(translation)) >> 8) as u32);
+        cpu.write32(at(row, 3), v);
+    }
+    cpu.write32(at(p, 3), translation.wrapping_neg() << 8);
+    for (row, f) in others.into_iter().zip(factors) {
+        let q = inverse_divide(cpu, pivot, wide(f) << 16);
+        cpu.write32(at(row, p), q);
+    }
+    let reciprocal = inverse_divide(cpu, pivot, 1 << 32);
+    cpu.write32(at(p, p), reciprocal);
+    (factors, translation)
+}
+
+/// `dividend` (64 bits) over `divisor` on the divide unit, its quotient read back.
+fn inverse_divide(cpu: &mut Cpu, divisor: u32, dividend: i64) -> u32 {
+    cpu.write32(DVSR, divisor);
+    cpu.write32(DVDNTH, (dividend >> 32) as u32);
+    cpu.write32(DVDNTL, dividend as u32);
+    cpu.read32(DVDNTL_AGAIN)
+}
+
+/// Rows `a` and `b` of the matrix at `m` swapped (none when they are the same).
+fn swap_rows(cpu: &mut Cpu, m: u32, a: usize, b: usize) {
+    if a != b {
+        for col in 0..4 {
+            swap_words(cpu, m + (16 * a + 4 * col) as u32, m + (16 * b + 4 * col) as u32);
+        }
+    }
+}
+
+/// Columns `a` and `b` of the matrix at `m` swapped, in its three rows.
+fn swap_columns(cpu: &mut Cpu, m: u32, a: usize, b: usize) {
+    for row in 0..3 {
+        swap_words(cpu, m + (16 * row + 4 * a) as u32, m + (16 * row + 4 * b) as u32);
+    }
+}
+
+fn swap_words(cpu: &mut Cpu, a: u32, b: u32) {
+    let (x, y) = (cpu.read32(a), cpu.read32(b));
+    cpu.write32(a, y);
+    cpu.write32(b, x);
 }
 
 /// slInversMatrix: the current matrix inverted (sl_inverse), its third column negated.
