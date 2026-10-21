@@ -25,9 +25,8 @@ const GAME_STATE_INDEX: u32 = 0x3d;
 const CUT_SHORT: u8 = 9;
 const END_STEP: u8 = 4;
 
-/// The script (a function a step, none at its end), the graphics' loader, the sound.
+/// The script (a function a step, none at its end), the sound.
 const SCRIPT: u32 = 0x0607_2cd4;
-const LOAD: u32 = 0x0605_fc38;
 const SE_BANNER: u32 = 0x2d;
 
 /// The colours: kind `KIND`'s first colour (the kinds' word +0xc), colour RAM's image and its
@@ -41,6 +40,32 @@ const CRAM_CHANGED: u32 = 1;
 const PHASES: u32 = 24;
 const TOP: i32 = 11;
 
+/// The banner's graphics loaded: no picture on the text plane; by SGL's screen mode (the low four
+/// bits of its word; 4 and past 5 none) a sprite priority byte given 6 (SGL's slPriority: -8 is
+/// PRISA's high byte, -5 PRISB's low, -3 PRISC's low); its cells (where the mode's files left
+/// them) queued to the text plane's cells after the fonts', its 32 colours to colour RAM from 0x370.
+const PICTURE_SHOWN: u32 = 0x0607_3c8c;
+const SL_SCREEN_MODE: u32 = 0x060f_fda0;
+const SL_PRIORITY: u32 = 0x0606_98dc;
+const BY_MODE: [Option<i32>; 6] = [Some(-8), Some(-5), Some(-8), Some(-5), None, Some(-3)];
+pub const BANNER_CELLS: u32 = 0x0607_4000;
+pub const BANNER_COLOURS: u32 = 0x0607_4004;
+const BANNER_CELLS_TO: u32 = 0x25e7_9500;
+const BANNER_CELL_BYTES: u32 = 0x14c0;
+const BANNER_COLOURS_TO: (u32, u32) = (0x370, 32);
+
+pub fn banner_load(cpu: &mut Cpu) {
+    cpu.write32(PICTURE_SHOWN, 0);
+    let mode = cpu.read16(SL_SCREEN_MODE) as usize & 0xf;
+    if let Some(Some(v)) = BY_MODE.get(mode) {
+        cpu.call(SL_PRIORITY, &[*v as u32, 6]);
+    }
+    let cells = cpu.read32(BANNER_CELLS);
+    nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, cells, BANNER_CELLS_TO, BANNER_CELL_BYTES));
+    let colours = cpu.read32(BANNER_COLOURS);
+    nested!(cpu, 0x0600_5b18, super::palette::set_colours(cpu, colours, BANNER_COLOURS_TO.0, BANNER_COLOURS_TO.1));
+}
+
 pub fn banner_exec(cpu: &mut Cpu, o: u32) {
     let step = cpu.read8(o + STEP) as i8;
     if step > 0 && step <= 3 {
@@ -51,7 +76,7 @@ pub fn banner_exec(cpu: &mut Cpu, o: u32) {
     }
     match cpu.read8(o + STEP) {
         0 => {
-            cpu.call(LOAD, &[]);
+            nested!(cpu, 0x0605_fc38, banner_load(cpu));
             nested!(cpu, 0x0600_50d4, sound::se_set(cpu, SE_BANNER));
             cpu.write32(o + CYCLE_FRAME, 0);
             cpu.write32(o + PHASE, 0);

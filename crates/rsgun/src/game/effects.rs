@@ -273,9 +273,9 @@ const A_LINK_FLAGS: u32 = 0x7c;
 const SLOWS: u8 = 8;
 const LOOPS: u8 = 2;
 const PARENT_SCALES: u8 = 0x40;
-/// SGL's (as far as can be told): a 16.16 division.
-const SL_DIV: u32 = 0x0606_62d8;
-const SL_TURN: u32 = 0x0606_4eac;
+/// The C library's signed division (clib.rs).
+const DIVIDE: u32 = 0x0606_62d8;
+const TURN_POINT: u32 = 0x0606_4eac;
 const QUOTIENT: u32 = 0x0600_6a78;
 const APPROACH: u32 = 0x0604_6168;
 const LINK_STEP: u32 = 0x0604_6558;
@@ -358,7 +358,7 @@ fn effect_frame(cpu: &mut Cpu, obj: u32, variant: Variant) {
             for k in 0..2 {
                 let n = cpu.read8(obj + A_COUNT_B) as i8 as i32 as u32;
                 let scale = cpu.read32(obj + A_SCALES + 4 * k);
-                let step = cpu.call(SL_DIV, &[scale, n]);
+                let step = nested!(cpu, DIVIDE, super::clib::divide(cpu, scale, n));
                 cpu.write32(obj + A_SCALE_SPEED + 4 * k, step.wrapping_neg());
             }
             cpu.write8(obj + A_COUNT_B, 0xff);
@@ -442,7 +442,7 @@ fn effect_frame(cpu: &mut Cpu, obj: u32, variant: Variant) {
         cpu.write32(t + 0x14, 0);
         let turn = cpu.read16(parent + A_ANGLE).wrapping_add(cpu.read16(obj + A_50 + 2));
         cpu.write16(t + 0x18, turn);
-        cpu.call(SL_TURN, &[t]);
+        nested!(cpu, TURN_POINT, super::math::turn_point(cpu, t));
         for k in 0..2 {
             let p = cpu.read32(parent + A_POSITION + 4 * k).wrapping_add(cpu.read32(t + 4 * k));
             cpu.write32(obj + A_POSITION + 4 * k, p);
@@ -576,7 +576,6 @@ pub fn polygon_set(cpu: &mut Cpu, fx: u32) -> u32 {
 const A_SCALE_ACCEL: u32 = 0x60;
 const GROW_EXEC: u32 = 0x0604_dd88;
 const ACCEL_EXEC: u32 = 0x0604_de5c;
-const SL_DIV_2: u32 = SL_DIV;
 
 /// A growing effect's behaviour: effect_exec's frame, then (while its shrink count is not
 /// negative) its scales' speed slowed by its acceleration down to none; with none left (or a
@@ -606,12 +605,12 @@ pub fn grow_set(cpu: &mut Cpu, obj: u32, size: u32, frames: u32) {
     // the SH-2 code keeps the effect's address in its frame
     let frame = cpu.stack();
     cpu.write32(frame, obj);
-    let speed = cpu.call(SL_DIV_2, &[size.wrapping_mul(2), frames]);
+    let speed = nested!(cpu, DIVIDE, super::clib::divide(cpu, size.wrapping_mul(2), frames));
     cpu.write32(obj + A_SCALE_SPEED, speed);
     cpu.write32(obj + A_SCALE_SPEED + 4, speed);
     for k in 0..2 {
         let v = cpu.read32(obj + A_SCALE_SPEED + 4 * k);
-        let a = cpu.call(SL_DIV_2, &[v, frames]);
+        let a = nested!(cpu, DIVIDE, super::clib::divide(cpu, v, frames));
         cpu.write32(obj + A_SCALE_ACCEL + 4 * k, a.wrapping_neg());
     }
     cpu.write32(obj + A_BEHAVIOUR, GROW_EXEC);

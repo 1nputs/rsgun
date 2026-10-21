@@ -1,7 +1,7 @@
 //! Small pieces of the game's system: the VBlank count, coins and credits as the game keeps them,
 //! the SH-2's cache and DMA, the interrupt mask.
 
-use super::Cpu;
+use super::{nested, Cpu};
 use super::globals::VBLANKS;
 
 /// The coin and credit state, a 4-byte entry for each coin slot (player), kept by the BIOS: +0 the
@@ -79,6 +79,36 @@ const BIOS_USE_CREDIT: u32 = 0x0600_0664;
 /// A credit taken for `slot`'s player: nonzero if there was one.
 pub fn use_credit(cpu: &mut Cpu, slot: u32) -> u32 {
     bios(cpu, BIOS_USE_CREDIT, &[slot])
+}
+
+/// Player `p` started: the BIOS's function at 0x06000688 told (0 first if no player has started
+/// yet, then the player with 0x10: its lamp, as far as can be told), the player's bit kept.
+const BIOS_PLAYERS: u32 = 0x0600_0688;
+const STARTED: u32 = 0x0600_cb54;
+const STARTED_BIT: u32 = 0x10;
+
+pub fn player_started(cpu: &mut Cpu, p: u32) {
+    if cpu.read8(STARTED) == 0 {
+        bios(cpu, BIOS_PLAYERS, &[0]);
+    }
+    let bit = nested!(cpu, 0x0600_69d8, shift_left(cpu, 1, p));
+    let started = cpu.read8(STARTED) | bit as u8;
+    cpu.write8(STARTED, started);
+    bios(cpu, BIOS_PLAYERS, &[p | STARTED_BIT]);
+}
+
+/// Player `p` ended: the BIOS's function told (the player with 0x20; then 1 once no player is
+/// left), the player's bit cleared.
+const ENDED_BIT: u32 = 0x20;
+
+pub fn player_ended(cpu: &mut Cpu, p: u32) {
+    bios(cpu, BIOS_PLAYERS, &[p | ENDED_BIT]);
+    let bit = nested!(cpu, 0x0600_69d8, shift_left(cpu, 1, p));
+    let started = cpu.read8(STARTED) & !(bit as u8);
+    cpu.write8(STARTED, started);
+    if started == 0 {
+        bios(cpu, BIOS_PLAYERS, &[1]);
+    }
 }
 
 /// The settings byte's low half the credit display reads.

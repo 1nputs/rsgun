@@ -248,11 +248,18 @@ pub struct Prologue {
 
 const PR_PUSH: u8 = 16;
 
+/// Prologues the reader cannot take from the code: SGL's on-screen check pushes r0 for a while
+/// after its two pushes, before its first branch (it is popped again: not part of its frame).
+const PROLOGUES: [(u32, &[u8]); 1] = [(0x0606_e9fc, &[6, 7])];
+
 impl Prologue {
-    /// Read from the code at `entry`, up to its first branch: the pushes (`mov.l Rm,@-R15`, then
+    /// Read from the code at `entry` (but PROLOGUES), up to its first branch: the pushes (`mov.l Rm,@-R15`, then
     /// `sts.l PR,@-R15`, after which a push is an argument's), and the locals (`add #imm,R15`, or
     /// `mov.w @(disp,PC),Rn` then `add Rn,R15`). Other instructions may be scheduled among them.
     pub fn read(bus: &mut dyn Bus, entry: u32) -> Prologue {
+        if let Some((_, pushes)) = PROLOGUES.iter().find(|(e, _)| *e == entry) {
+            return Prologue { pushes: pushes.to_vec(), locals: 0 };
+        }
         let mut p = Prologue { pushes: Vec::new(), locals: 0 };
         let mut words = [None; 16];
         let mut pc = entry;
@@ -321,6 +328,12 @@ pub(crate) use nested;
 /// arguments from r4-r7 and the result to r0, and returns to PR.
 macro_rules! rewrites {
     ($n:ident; $($entry:literal => $f:path [$($arg:ident),* $(; $($sarg:ident),+)?] -> $ret:tt),* $(,)?) => {
+        // a second entry at an address would silently replace the first
+        let mut entries = [$($entry),*];
+        entries.sort_unstable();
+        if let Some(w) = entries.windows(2).find(|w| w[0] == w[1]) {
+            panic!("{:#010x} is rewritten twice", w[0]);
+        }
         $(
             $n.register_as(
                 $entry,
@@ -373,6 +386,7 @@ pub fn register(n: &mut Natives) {
         0x0600_57f8 => objects::obj_size[bytes] -> u32,
         0x0600_6aac => objects::find_free[area, blocks] -> u32,
         0x0600_5694 => objects::obj_set_after[area, blocks, exec, after] -> u32,
+        0x0600_5714 => objects::obj_set_before[area, blocks, exec, before] -> u32,
         0x0600_6b00 => objects::obj_set[area, blocks, exec] -> u32,
         0x0600_579c => objects::obj_free[obj] -> (),
         0x0600_6b64 => objects::obj_exec[] -> (),
@@ -381,6 +395,7 @@ pub fn register(n: &mut Natives) {
         0x0600_58a8 => pads::pad_read[] -> (),
         0x0600_5b18 => palette::set_colours[colours, index, count] -> (),
         0x0600_5b5c => palette::set_vdp1_colours[colours, index, count] -> (),
+        0x0600_5ba4 => palette::colours_blend[b] -> (),
         0x0600_5a70 => palette::send_colours[] -> (),
         0x0600_5da0 => files::file_no[name] -> u32,
         0x0600_5e40 => files::load_file[name] -> u32,
@@ -422,12 +437,24 @@ pub fn register(n: &mut Natives) {
         0x0600_52e0 => sound::se_stop[se, control] -> u32,
         0x0600_53dc => sound::sound_exec[m] -> (),
         0x0600_5598 => sound::sound_manager_set[] -> u32,
+        0x0600_813a => clib::ashiftrt_r4::<24>[v] -> (),
+        0x0600_815a => clib::ashiftrt_r4::<13>[v] -> (),
+        0x0600_815c => clib::ashiftrt_r4::<12>[v] -> (),
+        0x0600_815e => clib::ashiftrt_r4::<11>[v] -> (),
+        0x0600_8160 => clib::ashiftrt_r4::<10>[v] -> (),
+        0x0600_8162 => clib::ashiftrt_r4::<9>[v] -> (),
+        0x0600_8164 => clib::ashiftrt_r4::<8>[v] -> (),
+        0x0600_8166 => clib::ashiftrt_r4::<7>[v] -> (),
+        0x0600_8168 => clib::ashiftrt_r4::<6>[v] -> (),
         0x0600_817c => clib::memset[dst, c, n] -> u32,
+        0x0606_62d8 => clib::divide[a, b] -> u32,
         0x0600_81d0 => clib::memcpy[dst, src, n] -> u32,
         0x0600_79a8 => sound::seq_status[buf, control] -> (),
         0x0600_46d8 => sound::load_sound_data[n, dst] -> u32,
         0x0600_8058 => system::set_scu_mask[mask, bits] -> (),
         0x0600_69d8 => system::shift_left[x, bits] -> u32,
+        0x0600_68d8 => system::player_started[p] -> (),
+        0x0600_6928 => system::player_ended[p] -> (),
         0x0600_6364 => backup::backup_byte[i] -> u32,
         0x0600_637c => backup::backup_long[i] -> u32,
         0x0600_63a4 => backup::set_backup_byte[i, v] -> (),
@@ -438,6 +465,7 @@ pub fn register(n: &mut Natives) {
         0x0604_2db8 => director::game_set[] -> u32,
         0x0604_2b14 => director::game_exec[game] -> (),
         0x0604_0c64 => director::mode_done[] -> (),
+        0x0604_0c8c => director::mode_skipped[] -> (),
         0x0604_0cb4 => director::director_flags[] -> u32,
         0x0604_02c4 => states::load_mode_file[mode] -> u32,
         0x0604_12e8 => states::state_reset[game] -> (),
@@ -452,6 +480,7 @@ pub fn register(n: &mut Natives) {
         0x0605_e8dc => screen::fade_new[r, g, b, speed] -> u32,
         0x0605_e93c => screen::fade_to[r, g, b, speed] -> (),
         0x0605_e9d8 => screen::stop_fades[] -> (),
+        0x0605_61e0 => screen::bullets_cleared[] -> (),
         0x0605_e73c => screen::fade_exec[fade] -> (),
         0x0605_e1b0 => screen::screen_set[] -> (),
         0x0605_e49c => screen::screen_exec[s] -> (),
@@ -657,6 +686,7 @@ pub fn register(n: &mut Natives) {
         0x0605_72ec => timeline::timeline_exec[t] -> (),
         0x0605_7354 => timeline::timeline_set[events] -> u32,
         0x0605_7210 => timeline::timeline_run[t] -> (),
+        0x0605_64f8 => timeline::scroll_event[] -> u32,
         0x0605_6b14 => parts::body_exec[body] -> (),
         0x0605_6a58 => aim::nearer_player[p] -> u32,
         0x0605_6ad4 => aim::angle_to_target[obj, delay] -> u32,
@@ -672,7 +702,6 @@ pub fn register(n: &mut Natives) {
         0x0605_933c => orbits::frame_2[o] -> u32,
         0x0605_93c0 => orbits::frame_4[o] -> u32,
         0x0605_3b10 => bullets::bullet_ends[b, back] -> u32,
-        0x0605_3f70 => bullets::heavy_exec[o] -> (),
         0x0605_4050 => bullets::heavy_set[d] -> u32,
         0x0605_41d0 => bullets::heavy_bullet[d] -> u32,
         0x0605_41f0 => bullets::laser_segment_exec[o] -> (),
@@ -706,6 +735,7 @@ pub fn register(n: &mut Natives) {
         0x0605_b568 => ground::wounded_exec[o] -> (),
         0x0605_b748 => ground::on_body[o] -> u32,
         0x0605_b7d4 => ground::big_gun_exec[o] -> (),
+        0x0605_bbac => ground::wounded_set[d, script, aim] -> u32,
         0x0605_be90 => ground::route_exec[o] -> (),
         0x0605_bf28 => ground::launcher_exec[o] -> (),
         0x0605_c1d4 => ground::turret_exec[o] -> (),
@@ -725,6 +755,8 @@ pub fn register(n: &mut Natives) {
         0x0605_dd54 => ground::hatch_opens[o] -> (),
         0x0605_e030 => ground::hatch_set[d, script] -> u32,
         0x0605_c700 => ground::ride[o] -> (),
+        0x0605_c760 => ground::rider_set[d, on] -> u32,
+        0x0605_c86c => ground::platform_set[d, script] -> u32,
         0x0606_38c0 => aim::point_area_wide[p] -> u32,
         0x0606_3620 => ribbons::ribbon_init[o, d, mover] -> u32,
         0x0606_3884 => ribbons::ribbon_draw[s] -> (),
@@ -751,6 +783,9 @@ pub fn register(n: &mut Natives) {
         0x0606_4d34 => models::pod_set[exec, n] -> u32,
         0x0606_4d98 => models::pod_normals[] -> (),
         0x0606_2b54 => models::model31_draw[s] -> (),
+        0x0606_2db0 => models::model31_init[o] -> (),
+        0x0606_2df4 => models::model31_set[exec] -> u32,
+        0x0606_4e54 => models::pods_shading[] -> (),
         0x0606_3900 => aim::point_area[p] -> u32,
         0x0605_3bfc => bullets::bullet_frame[b] -> (),
         0x0605_3ccc => bullets::bullet_move[b] -> (),
@@ -776,6 +811,8 @@ pub fn register(n: &mut Natives) {
         0x0605_2f3c => models::group_end[s] -> (),
         0x0605_2f54 => models::end_with_parent[obj] -> (),
         0x0605_2f78 => models::group_end_set[head] -> u32,
+        0x0605_332c => models::model_parts_set[root, table] -> u32,
+        0x0605_2ff0 => models::model_group_set[root, table] -> u32,
         0x0605_ecb4 => screen::queue_fill[src, dst, size] -> u32,
         0x0605_ecf0 => screen::queue_copy[src, dst, size] -> u32,
         0x0605_ed2c => screen::queue_long_copy[src, dst, size, piece] -> u32,
@@ -820,6 +857,7 @@ pub fn register(n: &mut Natives) {
         0x0604_3088 => hits::damage[obj, power] -> u32,
         0x0604_34e4 => hits::weapon_hit[shot, target] -> (),
         0x0604_3108 => hits::score_kill[p, weapon, target, points] -> (),
+        0x0605_61ac => hits::score_hit_by[target, points] -> (),
         0x0606_4f3c => math::clamp[x, limit] -> u32,
         0x0606_4f50 => math::at_least[x, least] -> u32,
         0x0606_2e7c => math::lerp[a, b, t] -> u32,
@@ -847,10 +885,13 @@ pub fn register(n: &mut Natives) {
         0x0604_5ee4 => aim::distance[a, b] -> u32,
         0x0604_5f70 => aim::nearer_player_to[obj] -> u32,
         0x0604_5b1c => models::model_colour[kind, frame, colour] -> (),
+        0x0604_5b60 => models::models_colour[kind, colour] -> (),
+        0x0604_5c50 => models::model_mesh[kind, frame, on] -> (),
         0x0604_5cdc => models::model_flip_bits[kind, frame, bits] -> (),
         0x0604_61cc => camera::angle_ahead[a, b] -> u32,
         0x0604_61f0 => camera::angle_behind[a, b] -> u32,
         0x0605_6294 => actors::fill_bytes[at, v, n] -> (),
+        0x0605_62dc => actors::fill_words[at, v, n] -> (),
         0x0605_6628 => actors::script_start[s, script] -> (),
         0x0605_fdd8 => screen::set_plane_shared_next[v] -> (),
         0x0605_e71c => screen::set_offset_b[r, g, b] -> (),
@@ -870,12 +911,29 @@ pub fn register(n: &mut Natives) {
         0x0606_721c => sgl::sl_translate[x, y, z] -> (),
         0x0606_73ec => sgl::sl_scale[x, y, z] -> (),
         0x0606_745c => sgl::sl_put_polygon[pd] -> u32,
+        0x0606_750c => sgl::sl_convert[p, out] -> u32,
+        0x0606_76fc => sgl::sl_convert_pixels[p, out] -> u32,
         0x0606_780c => sgl::sl_atan[x, y] -> u32,
         0x0606_713c => sgl::sl_cur_window[win] -> u32,
         0x0606_db2c => sgl::sl_calc_point[x, y, z, out] -> (),
         0x0606_db5c => sgl::sl_push_no_copy[] -> u32,
         0x0606_db7c => sgl::sl_load_matrix[src] -> (),
         0x0606_db9c => sgl::sl_get_matrix[dst] -> (),
+        0x0606_9a54 => sgl::sl_sin_cos[a] -> (),
+        0x0606_75ac => sgl::sl_put_sprite[pos, attr, angle] -> u32,
+        0x0606_778c => sgl::sl_put_quad[cmd, z] -> u32,
+        0x0606_e9fc => sgl::sl_check_on_screen[p, size] -> u32,
+        0x0606_98dc => sgl::sl_priority[screen, pri] -> (),
+        0x0606_98ec => sgl::sl_col_offset_a[r, g, b] -> (),
+        0x0606_98fc => sgl::sl_col_offset_b[r, g, b] -> (),
+        0x0607_1c0c => sgl::sl_sqrt64[hi, lo] -> u32,
+        0x0606_993c => sgl::sl_look_at[cam, target, twist] -> (),
+        0x0606_72ec => sgl::sl_rot_x[a] -> (),
+        0x0606_736c => sgl::sl_rot_y[a] -> (),
+        0x0606_726c => sgl::sl_rot_z[a] -> (),
+        0x0606_72f6 => sgl::sl_rot_x_sc[s, c] -> (),
+        0x0606_7376 => sgl::sl_rot_y_sc[s, c] -> (),
+        0x0606_7276 => sgl::sl_rot_z_sc[s, c] -> (),
         0x0606_e23c => sgl::sl_bg_on[bits] -> (),
         0x0603_511a => sgl::sl_push_unit_matrix[] -> u32,
         0x0606_9a0c => math::sl_sin[a] -> u32,
@@ -884,6 +942,8 @@ pub fn register(n: &mut Natives) {
         0x0606_4eac => math::turn_point[t] -> (),
         0x0606_29fc => models::spinner_draw[s] -> (),
         0x0606_2aa0 => models::spinner_turn[o] -> (),
+        0x0606_2af8 => models::spinner_init[o] -> (),
+        0x0606_2940 => actors::puffs_around[centre, angle, points, count] -> (),
         0x0604_0ccc => aim::target[obj, delay, out] -> u32,
         0x0604_0df0 => aim::aim[obj, delay] -> u32,
         0x0604_5df8 => aim::free_number[from] -> u32,
@@ -931,10 +991,17 @@ pub fn register(n: &mut Natives) {
         0x0605_e27c => screen::play_screen_set[] -> (),
         0x0605_e34c => screen::screen_reset[] -> (),
         0x0605_e3e0 => screen::screen_start[table, a, b] -> (),
+        0x0605_fe8c => screen::picture_screen_set[] -> (),
+        0x0605_fb00 => screen::pictures_load[p] -> u32,
+        0x0605_ea18 => screen::text_plane_set[] -> (),
+        0x0606_0260 => text::fonts_load[p] -> u32,
+        0x0606_165c => kinds::demo_load[p] -> u32,
+        0x0606_001c => screen::picture_load[p, bytes, count] -> (),
         0x0606_00f0 => screen::planes_ab[] -> (),
         0x0606_00d4 => screen::plane_a[] -> (),
         0x0604_5af8 => kinds::kind_colour_bank[k] -> u32,
         0x0605_64e0 => banner::banner_start[] -> u32,
+        0x0605_fc38 => banner::banner_load[] -> (),
         0x0605_e17c => states::stage_data_set[p] -> (),
         0x0605_fe78 => states::stage_table[i] -> u32,
         0x0606_333c => models::model_lit[kind, frame] -> (),
@@ -958,6 +1025,7 @@ pub fn register(n: &mut Natives) {
         0x0605_99c8 => text::opening_set[l1, l2, l3, l4; wait] -> (),
         0x0606_131c => text::typewriter_exec[obj] -> (),
         0x0606_1504 => text::message_exec[obj] -> (),
+        0x0606_1620 => text::message_set[lines] -> (),
         0x0606_12bc => text::stop_text_objects[] -> (),
         0x0605_fe34 => hud::put_digits[n, digits, at, p] -> (),
         0x0606_0388 => hud::status_line[p, line] -> (),

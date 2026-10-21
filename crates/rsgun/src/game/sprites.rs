@@ -41,10 +41,10 @@ const MARGIN_Y: u32 = 0x80;
 /// otherwise as scaled, as far as can be told: one less).
 const FLAT_Z: u32 = 0xb0_0000;
 
-/// SGL's (as far as can be told): a vector turned and scaled by a struct's angle and scales, a
+/// math.rs's turn_point (a vector turned and scaled by a struct's angle and scales), SGL's: a
 /// point brought into view space (its depth back), and the sprite draws with one scale and with
 /// two.
-const SL_TURN: u32 = 0x0606_4eac;
+const TURN_POINT: u32 = 0x0606_4eac;
 const SL_CONVERT: u32 = 0x0606_750c;
 const SL_SPRITE: u32 = 0x0606_75ac;
 const SL_SPRITE_HV: u32 = 0x0606_76ac;
@@ -110,7 +110,7 @@ pub fn draw_sprite(cpu: &mut Cpu, s: u32) {
         cpu.write32(o + O_SCALES + 4, sy);
         let flip = cpu.read32(s + FLAGS) & FLIP as u32;
         cpu.write32(o + O_FLIP, flip);
-        cpu.call(SL_TURN, &[o]);
+        nested!(cpu, TURN_POINT, super::math::turn_point(cpu, o));
         let x = cpu.read32(f + P).wrapping_add(cpu.read32(o));
         cpu.write32(f + P, x);
         let y = cpu.read32(f + P + 4).wrapping_add(cpu.read32(o + 4));
@@ -204,7 +204,7 @@ pub fn draw_distorted(cpu: &mut Cpu, s: u32) {
     if dx != 0 || dy != 0 {
         cpu.write32(t, (dx << 16) as u32);
         cpu.write32(t + 4, (dy << 16) as u32);
-        cpu.call(SL_TURN, &[t]);
+        nested!(cpu, TURN_POINT, super::math::turn_point(cpu, t));
         for k in 0..2 {
             let v = cpu.read32(f + D_OFFSET + 4 * k).wrapping_add(cpu.read32(t + 4 * k));
             cpu.write32(f + D_OFFSET + 4 * k, v);
@@ -235,7 +235,7 @@ pub fn draw_distorted(cpu: &mut Cpu, s: u32) {
         cpu.write32(t, (cx << 16) as u32);
         let cy = cpu.read16(f + D_CORNERS + 4 * i + 2) as i16 as i32;
         cpu.write32(t + 4, (cy << 16) as u32);
-        cpu.call(SL_TURN, &[t]);
+        nested!(cpu, TURN_POINT, super::math::turn_point(cpu, t));
         let x = cpu.read32(t).wrapping_add(cpu.read32(s + POS).wrapping_add(cpu.read32(f + D_OFFSET)));
         cpu.write32(t, x);
         let y = cpu.read32(t + 4).wrapping_add(cpu.read32(s + POS + 4).wrapping_add(cpu.read32(f + D_OFFSET + 4)));
@@ -457,7 +457,7 @@ pub fn draw(cpu: &mut Cpu, s: u32) {
         if cx != 0 || cy != 0 {
             cpu.write32(t, (cx << 16) as u32);
             cpu.write32(t + 4, (cy << 16) as u32);
-            cpu.call(SL_TURN, &[t]);
+            nested!(cpu, TURN_POINT, super::math::turn_point(cpu, t));
         }
         let x = cpu.read32(t).wrapping_add(cpu.read32(s + POS));
         cpu.write32(t, x);

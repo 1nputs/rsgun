@@ -24,7 +24,7 @@ const SL_ROT_Y: u32 = 0x0606_736c;
 const SL_ROT_Z: u32 = 0x0606_726c;
 const SL_SCALE: u32 = 0x0606_73ec;
 const SL_PUT_POLYGON: u32 = 0x0606_745c;
-/// By its use: negative when a point (and a size around it) is off screen.
+/// SGL's on-screen check (sgl.rs): negative when a point (and a size around it) is off screen.
 const SL_CHECK_ON_SCREEN: u32 = 0x0606_e9fc;
 /// The rotation scroll's parameters from the current matrix (two steps, not known yet).
 const SL_0606E4DC: u32 = 0x0606_e4dc;

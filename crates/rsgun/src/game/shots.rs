@@ -50,8 +50,8 @@ const LEVELS: u32 = 0x0607_4088;
 /// The ship's counts of shots alive (player.rs's): A's, all.
 const ALIVE_A: u32 = 0x80;
 const ALIVE_ALL: u32 = 0x87;
-/// SGL's: a vector turned (sprites.rs's SL_TURN).
-const SL_TURN: u32 = 0x0606_4eac;
+/// A vector turned (math.rs's turn_point).
+const TURN_POINT: u32 = 0x0606_4eac;
 
 fn end(cpu: &mut Cpu, s: u32) {
     cpu.write8(s + OBJ_MODE, ENDING);
@@ -192,7 +192,7 @@ pub fn shot_a_side_exec(cpu: &mut Cpu, s: u32) {
             cpu.write32(f + 0x14, 0);
             let a = cpu.read16(s + ANGLE);
             cpu.write16(f + 0x18, a);
-            cpu.call(SL_TURN, &[f]);
+            nested!(cpu, TURN_POINT, super::math::turn_point(cpu, f));
             let (vx, vy) = (cpu.read32(f), cpu.read32(f + 4));
             cpu.write32(s + SPEED, vx);
             cpu.write32(s + SPEED + 4, vy);
@@ -298,7 +298,7 @@ pub fn shot_b_exec(cpu: &mut Cpu, s: u32) {
     cpu.write32(f + 0x14, 0);
     let a = cpu.read16(s + ANGLE);
     cpu.write16(f + 0x18, a);
-    cpu.call(SL_TURN, &[f]);
+    nested!(cpu, TURN_POINT, super::math::turn_point(cpu, f));
     let (vx, vy) = (cpu.read32(f), cpu.read32(f + 4));
     let x = cpu.read32(s + POSITION).wrapping_add(vx);
     cpu.write32(s + POSITION, x);
@@ -763,7 +763,7 @@ fn bolt_start(cpu: &mut Cpu, s: u32) {
     cpu.write32(f + 0x14, flip);
     let a = cpu.read16(s + ANGLE);
     cpu.write16(f + 0x18, a);
-    cpu.call(SL_TURN, &[f]);
+    nested!(cpu, TURN_POINT, super::math::turn_point(cpu, f));
     let (vx, vy) = (cpu.read32(f), cpu.read32(f + 4));
     cpu.write32(s + SPEED, vx);
     cpu.write32(s + SPEED + 4, vy);
@@ -999,7 +999,7 @@ pub fn seeker_exec(cpu: &mut Cpu, o: u32) {
     cpu.write32(f + 0x14, flip);
     let a = cpu.read16(ship + ANGLE);
     cpu.write16(f + 0x18, a);
-    cpu.call(SL_TURN, &[f]);
+    nested!(cpu, TURN_POINT, super::math::turn_point(cpu, f));
     for k in 0..2 {
         let p = cpu.read32(ship + POSITION + 4 * k).wrapping_add(cpu.read32(f + 4 * k));
         cpu.write32(o + POSITION + 4 * k, p);
@@ -1140,7 +1140,7 @@ fn nearest_ahead(cpu: &mut Cpu, o: u32, ship: u32, mut reach: i32, or_as_near: b
             let d = cpu.read32(t + POSITION + 4 * k).wrapping_sub(cpu.read32(o + POSITION + 4 * k));
             cpu.write32(f + 4 * k, d);
         }
-        cpu.call(SL_TURN, &[f]);
+        nested!(cpu, TURN_POINT, super::math::turn_point(cpu, f));
         let (x, y) = (cpu.read32(f) as i32, cpu.read32(f + 4) as i32);
         if x.wrapping_abs() > LINE_HALF_WIDTH || y >= 0 {
             continue;
@@ -1492,7 +1492,7 @@ fn turn_segments(cpu: &mut Cpu, b: u32, seeker: u32) {
         cpu.write32(f + 4, SEGMENT_STEP);
         let a = cpu.read16(angle);
         cpu.write16(f + 0x18, a);
-        cpu.call(SL_TURN, &[f]);
+        nested!(cpu, TURN_POINT, super::math::turn_point(cpu, f));
         x = x.wrapping_add(cpu.read32(f));
         cpu.write32(f + F_X, x);
         y = y.wrapping_add(cpu.read32(f + 4));
@@ -1532,7 +1532,7 @@ pub fn beam_boxes(cpu: &mut Cpu, b: u32) {
         cpu.write32(f + 0x10, segment);
         cpu.write32(f + 0x48, y);
         cpu.write32(f + 0x4c, x);
-        cpu.call(SL_TURN, &[f]);
+        nested!(cpu, TURN_POINT, super::math::turn_point(cpu, f));
         let (dx, dy) = (cpu.read32(f), cpu.read32(f + 4));
         if drawn_in == 0 {
             let at = b + BEAM_BOXES_AT + 8 * count;
@@ -1611,7 +1611,7 @@ pub fn beam_draw(cpu: &mut Cpu, s: u32) {
             }
             cpu.write32(t, 0);
             cpu.write32(t + 4, (drawn_in as u32).wrapping_neg());
-            cpu.call(SL_TURN, &[t]);
+            nested!(cpu, TURN_POINT, super::math::turn_point(cpu, t));
             for k in 0..2 {
                 let p = cpu.read32(f + 4 + 4 * k).wrapping_add(cpu.read32(t + 4 * k));
                 cpu.write32(f + 4 + 4 * k, p);
@@ -1629,7 +1629,7 @@ pub fn beam_draw(cpu: &mut Cpu, s: u32) {
         }
         cpu.write32(t, 0);
         cpu.write32(t + 4, SEGMENT_STEP);
-        cpu.call(SL_TURN, &[t]);
+        nested!(cpu, TURN_POINT, super::math::turn_point(cpu, t));
         for k in 0..2 {
             let p = cpu.read32(f + 4 + 4 * k).wrapping_add(cpu.read32(t + 4 * k));
             cpu.write32(f + 4 + 4 * k, p);
@@ -1675,7 +1675,7 @@ pub fn shot_ac_exec(cpu: &mut Cpu, s: u32) {
         cpu.write32(f + 0x14, 0);
         let a = cpu.read16(s + ANGLE);
         cpu.write16(f + 0x18, a);
-        cpu.call(SL_TURN, &[f]);
+        nested!(cpu, TURN_POINT, super::math::turn_point(cpu, f));
         let (vx, vy) = (cpu.read32(f), cpu.read32(f + 4));
         cpu.write32(s + SPEED, vx);
         cpu.write32(s + SPEED + 4, vy);
@@ -1994,7 +1994,7 @@ pub fn ring_draw(cpu: &mut Cpu, sp: u32) {
         cpu.write32(t, 0);
         let r = cpu.read32(s + RING_RADIUS);
         cpu.write32(t + 4, r);
-        cpu.call(SL_TURN, &[t]);
+        nested!(cpu, TURN_POINT, super::math::turn_point(cpu, t));
         for k in 0..2 {
             let p = cpu.read32(s + POSITION + 4 * k).wrapping_add(cpu.read32(t + 4 * k));
             cpu.write32(f + 4 + 4 * k, p);
@@ -2370,7 +2370,7 @@ pub fn strike_exec(cpu: &mut Cpu, t: u32) {
     cpu.write32(f + 0x14, 0);
     let a = cpu.read16(t + ANGLE);
     cpu.write16(f + 0x18, a);
-    cpu.call(SL_TURN, &[f]);
+    nested!(cpu, TURN_POINT, super::math::turn_point(cpu, f));
     for k in 0..2 {
         let p = cpu.read32(t + POSITION + 4 * k).wrapping_add(cpu.read32(f + 4 * k));
         cpu.write32(t + POSITION + 4 * k, p);
@@ -2762,7 +2762,7 @@ pub fn sword_exec(cpu: &mut Cpu, s: u32) {
     cpu.write32(f + 0x14, flip);
     let a = cpu.read16(s + SWORD_POINTS);
     cpu.write16(f + 0x18, a);
-    cpu.call(SL_TURN, &[f]);
+    nested!(cpu, TURN_POINT, super::math::turn_point(cpu, f));
     for k in 0..2 {
         let p = cpu.read32(ship + POSITION + 4 * k).wrapping_add(cpu.read32(f + 4 * k));
         cpu.write32(s + POSITION + 4 * k, p);
@@ -2979,13 +2979,13 @@ fn blade(cpu: &mut Cpu, s: u32, f: u32, i: i32, base: u32, tip: u32, fading: boo
     cpu.write32(t + 0x14, 0);
     let a = cpu.read16(image + 2);
     cpu.write16(t + 0x18, a);
-    cpu.write32(f + 0x90, SL_TURN);
+    cpu.write32(f + 0x90, TURN_POINT);
     for (at, x, y) in [(base, half, 0), (tip, half.wrapping_neg(), (cpu.read16(s + SWORD_LENGTH) as i16 as i32) << 16)] {
         if at == tip {
             cpu.write32(t, x.wrapping_mul(0x8000) as u32);
             cpu.write32(t + 4, y as u32);
         }
-        cpu.call(SL_TURN, &[t]);
+        nested!(cpu, TURN_POINT, super::math::turn_point(cpu, t));
         let px = pixels(cpu.read32(t)).wrapping_add(cpu.read16(image + 4));
         cpu.write16(at, px);
         let py = pixels(cpu.read32(t + 4)).wrapping_add(cpu.read16(image + 6));
@@ -3142,7 +3142,7 @@ const HYPER_DROP_STEP: u32 = 0xfff8_0000;
 const HYPER_DROP_MOST: i32 = -38;
 
 fn hyper_turn_point(cpu: &mut Cpu, f: u32) {
-    cpu.call(SL_TURN, &[f]);
+    nested!(cpu, TURN_POINT, super::math::turn_point(cpu, f));
 }
 
 pub fn hyper_exec(cpu: &mut Cpu, o: u32) {

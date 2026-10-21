@@ -5,7 +5,7 @@
 //! to the screen each frame. A beam's boxes are a column of one box repeated.
 
 use super::globals::{GAME_FLAGS, HELD};
-use super::{hits, nested, sprites, Cpu};
+use super::{aim, hits, nested, objects, sprites, Cpu};
 
 /// SGL's.
 const SL_PUSH_MATRIX: u32 = 0x0606_71cc;
@@ -66,8 +66,9 @@ const MODEL_BOXES: u32 = 0x114;
 const MADE_BOXES: u32 = 0x118;
 /// Cleared with the rest (not known yet).
 const FIELD_6C: u32 = 0x6c;
-const FIELD_6E: u32 = 0x6e;
-const FIELD_B0: u32 = 0xb0;
+/// A part's place among its root's parts (model_parts_set's) and the end of the group it opens.
+const PART_INDEX: u32 = 0x6e;
+const GROUP_END: u32 = 0xb0;
 
 /// The camera (camera.rs's) and the eye's depth it is to have: the model's depths are from it.
 const CAMERA: u32 = 0x0607_46e4;
@@ -80,10 +81,10 @@ pub fn model_init(cpu: &mut Cpu, obj: u32) {
     nested!(cpu, 0x0604_6284, hits::hit_init(cpu, obj + BOXES));
     let flags = cpu.read32(obj + FLAGS) | UNHURT | BOXES_UNFLIPPED;
     cpu.write32(obj + FLAGS, flags);
-    for field in [FIELD_B0, PLACE + 8, PLACE + 4, PLACE, MODEL_BOXES] {
+    for field in [GROUP_END, PLACE + 8, PLACE + 4, PLACE, MODEL_BOXES] {
         cpu.write32(obj + field, 0);
     }
-    cpu.write8(obj + FIELD_6E, 0);
+    cpu.write8(obj + PART_INDEX, 0);
     cpu.write16(obj + FIELD_6C, 0);
 }
 
@@ -135,6 +136,212 @@ pub fn end_with_parent(cpu: &mut Cpu, obj: u32) {
     if cpu.read8(parent) == 0 || cpu.read8(parent + OBJ_MODE) as i8 >= ENDING as i8 {
         cpu.write8(obj + OBJ_MODE, ENDING);
     }
+}
+
+/// Makes `root`'s model parts from the table at `table`: the models' kind (a long), then a part
+/// each 7 longs (until a behaviour of 0): its behaviour, its model (of the kind), its model boxes,
+/// its place (x, y, z) and its flags. Each part is linked in after the last (after the group's
+/// end once a group closes), before it (TP_BEFORE) or at the list's end (TP_AT_END), numbered on
+/// its own (TP_NUMBERED: the next free number after the last's; else the last's). It has the
+/// root's side, type and parent, its parent part (the innermost open group's part, else the
+/// root) and its place among the root's parts (at PARTS). By its shape (the flags' rest): 0 opens
+/// a group (drawn open, its group's end made; the parts after it are inside until closed), 1 is
+/// drawn open with its end straight after it, 2 is a part, 3 a part closing the innermost group,
+/// 4 one closing them all. 1 when all are made; else 0, the parts made so far ended (their groups'
+/// ends freed).
+const PART_SIZE: u32 = 0x178;
+const PART_LIST: u32 = 2;
+const ACTOR_EXEC: u32 = 0x0604_d780;
+const NUMBERED_EXEC: u32 = 0x0604_d600;
+const PART_LIFE: u32 = 0x10_0000;
+const EXEC: u32 = 4;
+const LIFE: u32 = 0x50;
+const SIDE: u32 = 0x54;
+const TYPE: u32 = 0x55;
+const PARENT_PART: u32 = 0xd4;
+/// The root's parts (as many as the table has; 0 once ended).
+const PARTS: u32 = 0xb4;
+const PART_DRAW: u32 = 0x0605_2d6c;
+const MODEL_DRAW: u32 = 0x0605_2e50;
+/// A table part's fields and size; the flags and the shapes.
+const TP_BEHAVIOUR: u32 = 0;
+const TP_MODEL: u32 = 4;
+const TP_MODEL_BOXES: u32 = 8;
+const TP_PLACE: u32 = 0xc;
+const TP_FLAGS: u32 = 0x18;
+const TABLE_PART: u32 = 28;
+const TP_AT_END: u32 = 0x20;
+const TP_NUMBERED: u32 = 0x40;
+const TP_BEFORE: u32 = 0x80;
+const TP_SHAPE: u32 = !(TP_AT_END | TP_NUMBERED | TP_BEFORE);
+const OPENS: u32 = 0;
+const OPEN_ALONE: u32 = 1;
+const PLAIN: u32 = 2;
+const CLOSES: u32 = 3;
+const CLOSES_ALL: u32 = 4;
+/// The frame: the open groups' ends (16 at most), the parts made, the last number, the kind;
+/// model_group_set's keeps the count in a register, the number and the parent part where these
+/// keep the count and the number.
+const F_ENDS: u32 = 0;
+const F_COUNT: u32 = 0x40;
+const F_NUMBER: u32 = 0x44;
+const F_KIND: u32 = 0x48;
+const FG_NUMBER: u32 = 0x40;
+const FG_PARENT: u32 = 0x44;
+
+pub fn model_parts_set(cpu: &mut Cpu, root: u32, table: u32) -> u32 {
+    parts_make(cpu, root, table, false)
+}
+
+/// model_parts_set's parts made inside `root`, a group of its own: it drawn open (group_draw) with
+/// its group's end made first (0 if that cannot be); its count of parts kept (at PART_INDEX), the
+/// parts' parent its number; on failure its end ended too.
+const GROUP_DRAW: u32 = 0x0605_2d04;
+
+pub fn model_group_set(cpu: &mut Cpu, root: u32, table: u32) -> u32 {
+    let fl = cpu.read32(root + FLAGS) | OWN_MODEL;
+    cpu.write32(root + FLAGS, fl);
+    cpu.write32(root + OWN_DRAW_AT, GROUP_DRAW);
+    let end = nested!(cpu, 0x0605_2f78, group_end_set(cpu, root));
+    cpu.write32(root + GROUP_END, end);
+    if end == 0 {
+        return 0;
+    }
+    parts_make(cpu, root, table, true)
+}
+
+fn parts_make(cpu: &mut Cpu, root: u32, table: u32, group: bool) -> u32 {
+    let f = cpu.stack();
+    let kind = cpu.read32(table);
+    cpu.write32(f + F_KIND, kind);
+    let number_at = f + if group { FG_NUMBER } else { F_NUMBER };
+    let mut number = cpu.read8(root + NUMBER) as i8 as i32;
+    cpu.write32(number_at, number as u32);
+    let mut count = 0i8;
+    match group {
+        true => cpu.write32(f + FG_PARENT, root),
+        false => cpu.write32(f + F_COUNT, 0),
+    }
+    let (mut last, mut parent, mut top) = (root, root, -1i8);
+    let set_parent = |cpu: &mut Cpu, parent: u32| {
+        if group {
+            cpu.write32(f + FG_PARENT, parent);
+        }
+        parent
+    };
+    let end_at = |top: i8| f.wrapping_add((F_ENDS as i32 + 4 * top as i32) as u32);
+    let mut p = table + 4;
+    loop {
+        if group {
+            cpu.write8(root + PART_INDEX, count as u8);
+        }
+        let behaviour = cpu.read32(p + TP_BEHAVIOUR);
+        if behaviour == 0 {
+            return 1;
+        }
+        let flags = cpu.read32(p + TP_FLAGS);
+        let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, PART_SIZE)) as i8 as i32 as u32;
+        let o = if flags & TP_BEFORE != 0 {
+            nested!(cpu, 0x0600_5714, objects::obj_set_before(cpu, PART_LIST, blocks, ACTOR_EXEC, last))
+        } else if flags & TP_AT_END != 0 {
+            nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, PART_LIST, blocks, ACTOR_EXEC))
+        } else {
+            nested!(cpu, 0x0600_5694, objects::obj_set_after(cpu, PART_LIST, blocks, ACTOR_EXEC, last))
+        };
+        if o == 0 {
+            break;
+        }
+        last = o;
+        nested!(cpu, 0x0605_2908, model_init(cpu, o));
+        let fl = cpu.read32(o + FLAGS) | OWN_MODEL;
+        cpu.write32(o + FLAGS, fl);
+        cpu.write32(o + BEHAVIOUR, behaviour);
+        cpu.write32(o + LIFE, PART_LIFE);
+        for field in [SIDE, TYPE] {
+            let v = cpu.read8(root + field);
+            cpu.write8(o + field, v);
+        }
+        let model = cpu.read32(p + TP_MODEL);
+        let models = kind_model(cpu, kind, model);
+        cpu.write32(o + MODELS, models);
+        cpu.write32(o + PARENT_PART, parent);
+        let boxes = cpu.read32(p + TP_MODEL_BOXES);
+        cpu.write32(o + MODEL_BOXES, boxes);
+        for k in 0..3 {
+            let v = cpu.read32(p + TP_PLACE + 4 * k);
+            cpu.write32(o + PLACE + 4 * k, v);
+        }
+        if flags & TP_NUMBERED != 0 {
+            number += 1;
+            cpu.write32(number_at, number as u32);
+            number = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, number as i8 as i32 as u32)) as i8 as i32;
+            cpu.write32(number_at, number as u32);
+            if number == -1 {
+                nested!(cpu, 0x0600_579c, objects::obj_free(cpu, o));
+                break;
+            }
+            cpu.write32(o + EXEC, NUMBERED_EXEC);
+            cpu.write32(NUMBERED.wrapping_add((4 * number) as u32), o);
+        }
+        cpu.write8(o + NUMBER, number as u8);
+        cpu.write8(o + PART_INDEX, count as u8);
+        let n = cpu.read8(root + if group { NUMBER } else { PARENT });
+        cpu.write8(o + PARENT, n);
+        cpu.write32(root.wrapping_add((PARTS as i32 + 4 * count as i32) as u32), o);
+        match flags & TP_SHAPE {
+            OPENS => {
+                cpu.write32(o + OWN_DRAW_AT, PART_DRAW);
+                top = top.wrapping_add(1);
+                let end = nested!(cpu, 0x0605_2f78, group_end_set(cpu, o));
+                cpu.write32(o + GROUP_END, end);
+                cpu.write32(end_at(top), end);
+                parent = set_parent(cpu, o);
+            }
+            OPEN_ALONE => {
+                cpu.write32(o + OWN_DRAW_AT, PART_DRAW);
+                let end = nested!(cpu, 0x0605_2f78, group_end_set(cpu, o));
+                cpu.write32(o + GROUP_END, end);
+                last = end;
+            }
+            PLAIN => cpu.write32(o + OWN_DRAW_AT, MODEL_DRAW),
+            CLOSES => {
+                cpu.write32(o + OWN_DRAW_AT, MODEL_DRAW);
+                last = cpu.read32(end_at(top));
+                top = top.wrapping_sub(1);
+                let up = cpu.read32(parent + PARENT_PART);
+                parent = set_parent(cpu, up);
+            }
+            CLOSES_ALL => {
+                cpu.write32(o + OWN_DRAW_AT, MODEL_DRAW);
+                last = cpu.read32(end_at(0));
+                top = -1;
+                parent = set_parent(cpu, root);
+            }
+            _ => {}
+        }
+        p += TABLE_PART;
+        count = count.wrapping_add(1);
+        if !group {
+            cpu.write32(f + F_COUNT, count as i32 as u32);
+        }
+    }
+    let mut i = 0i8;
+    while i < count {
+        let at = root.wrapping_add((PARTS as i32 + 4 * i as i32) as u32);
+        let part = cpu.read32(at);
+        let end = cpu.read32(part + GROUP_END);
+        if end != 0 {
+            nested!(cpu, 0x0600_579c, objects::obj_free(cpu, end));
+        }
+        cpu.write8(part + OBJ_MODE, ENDING);
+        cpu.write32(at, 0);
+        i = i.wrapping_add(1);
+    }
+    if group {
+        let end = cpu.read32(root + GROUP_END);
+        cpu.write8(end + OBJ_MODE, ENDING);
+    }
+    0
 }
 
 /// A model box (12 bytes, the last with LAST_BOX): what it is and its kind (as a box's), its point
@@ -493,6 +700,27 @@ pub fn spinner_turn(cpu: &mut Cpu, o: u32) {
     cpu.write16(o + SPIN_ANGLE, a);
 }
 
+/// A spinner's fields set up: its sprite, drawn by spinner_draw (as a model), no lift or number,
+/// its phase and the long before it 0, its bytes +0x3c and +0x3d 0 and 1.
+const SPINNER_DRAW: u32 = 0x0606_29fc;
+const LIFT: u32 = 0x33;
+const SPINNER_40: u32 = 0x40;
+const SPINNER_3C: u32 = 0x3c;
+const SPINNER_3D: u32 = 0x3d;
+
+pub fn spinner_init(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    let flags = cpu.read32(o + FLAGS) | OWN_MODEL;
+    cpu.write32(o + FLAGS, flags);
+    cpu.write32(o + OWN_DRAW_AT, SPINNER_DRAW);
+    cpu.write8(o + LIFT, 0);
+    cpu.write8(o + NUMBER, 0);
+    cpu.write16(o + SPIN_PHASE, 0);
+    cpu.write32(o + SPINNER_40, 0);
+    cpu.write8(o + SPINNER_3C, 0);
+    cpu.write8(o + SPINNER_3D, 1);
+}
+
 /// Sprite kind `kind`'s models (sprites.rs's kinds: each kind's table, its +0x1c the models: for
 /// each frame a pointer to its plain model and its flashing one; SGL's polygon data: +0xc the
 /// polygons' count, +0x10 their attributes, 12 bytes each).
@@ -519,6 +747,41 @@ pub fn model_colour(cpu: &mut Cpu, kind: u32, frame: u32, colour: u32) {
         let attrs = cpu.read32(pd + PD_ATTRS);
         cpu.write16(attrs + ATTR_SIZE * k + ATTR_COLOUR, colour as u16);
         k += 1;
+    }
+}
+
+/// Kind `kind`'s model `frame` drawn as a mesh (VDP1's MESHon in its polygons' draw modes) or not
+/// (`on` 0): each polygon of the plain model not as asked changed, its flashing one with it.
+const MESH_ON: u16 = 0x100;
+
+pub fn model_mesh(cpu: &mut Cpu, kind: u32, frame: u32, on: u32) {
+    let at = kind_model(cpu, kind, frame);
+    let (plain, flashing) = (cpu.read32(at), cpu.read32(at + 4));
+    let mut k = 0;
+    while k < cpu.read32(plain + PD_COUNT) {
+        let a = cpu.read32(plain + PD_ATTRS) + ATTR_SIZE * k + ATTR_BITS;
+        let bits = cpu.read16(a);
+        if (bits & MESH_ON != 0) != (on != 0) {
+            let set = |v: u16| if on != 0 { v | MESH_ON } else { v & !MESH_ON };
+            cpu.write16(a, set(bits));
+            let b = cpu.read32(flashing + PD_ATTRS) + ATTR_SIZE * k + ATTR_BITS;
+            let v = cpu.read16(b);
+            cpu.write16(b, set(v));
+        }
+        k += 1;
+    }
+}
+
+/// All of kind `kind`'s plain models given colour `colour` (the kind's model count at +0x20).
+const KIND_MODEL_COUNT: u32 = 0x20;
+
+pub fn models_colour(cpu: &mut Cpu, kind: u32, colour: u32) {
+    let table = cpu.read32(MODEL_KINDS.wrapping_add(kind << 4));
+    let colour = colour & 0xffff;
+    let mut frame = 0;
+    while (frame as i32) < cpu.read32(table + KIND_MODEL_COUNT) as i32 {
+        nested!(cpu, 0x0604_5b1c, model_colour(cpu, kind, frame, colour));
+        frame += 1;
     }
 }
 
@@ -901,4 +1164,47 @@ pub fn pod_normals(cpu: &mut Cpu) {
         let pd = pod_model_pd(cpu, part);
         nested!(cpu, 0x0606_34e0, super::gouraud::point_normals(cpu, pd, out));
     }
+}
+
+/// A kind 31 model set up (its sprite, drawn by model31_draw, not lifted, number and step 0).
+const MODEL31_DRAW: u32 = 0x0606_2b54;
+const MODEL31_STEP: u32 = 0x3c;
+
+pub fn model31_init(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    let flags = cpu.read32(o + FLAGS) | OWN_MODEL;
+    cpu.write32(o + FLAGS, flags);
+    cpu.write32(o + OWN_DRAW_AT, MODEL31_DRAW);
+    cpu.write8(o + LIFT_AT, 0);
+    cpu.write8(o + NUMBER, 0);
+    cpu.write8(o + MODEL31_STEP, 0);
+}
+
+/// Makes a kind 31 model (list 2) with behaviour `exec`. It, or 0.
+const MODEL31_SIZE: u32 = 0x54;
+
+pub fn model31_set(cpu: &mut Cpu, exec: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, MODEL31_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, 2, blocks, PLAIN_EXEC));
+    if o != 0 {
+        nested!(cpu, 0x0606_2db0, model31_init(cpu, o));
+        cpu.write32(o + BEHAVIOUR, exec);
+    }
+    o
+}
+
+/// The pods' shading: kind 33's 21 models given high-speed shrink and Gouraud shading, three
+/// longs of theirs cleared, the first pod's normals made.
+const POD_MODEL_COUNT: u32 = 21;
+const POD_SHADING_CLEARED: [u32; 3] = [0x0607_6848, 0x0607_6844, 0x0607_6840];
+
+pub fn pods_shading(cpu: &mut Cpu) {
+    nested!(cpu, 0x0606_2f74, super::gouraud::models_hss(cpu, 33, POD_MODEL_COUNT));
+    for i in 0..POD_MODEL_COUNT {
+        nested!(cpu, 0x0606_32b0, model_gouraud(cpu, 33, i));
+    }
+    for at in POD_SHADING_CLEARED {
+        cpu.write32(at, 0);
+    }
+    nested!(cpu, 0x0606_4d98, pod_normals(cpu));
 }

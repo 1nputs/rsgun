@@ -1,6 +1,7 @@
 //! The C library's memset and memcpy as the game links them (Hitachi's for the SH): over a dozen
 //! bytes they go by 32-bit words, and they write with the widths they choose, which matters when
-//! the memory is a video chip's.
+//! the memory is a video chip's. And GCC's shift helpers (lib1funcs), which keep their own
+//! convention: the value in and out in r4.
 
 use super::Cpu;
 
@@ -75,4 +76,56 @@ pub fn memcpy(cpu: &mut Cpu, dst: u32, src: u32, n: u32) -> u32 {
         copy_byte(cpu, &mut d, &mut s);
     }
     dst
+}
+
+/// GCC's __ashiftrt_r4_N: r4 shifted right arithmetically by N, left in r4. Up to 15 it is a run
+/// of shar (T left the last bit shifted out); 24 is shlr16, shlr8, exts.b (T as it was).
+pub fn ashiftrt_r4<const N: u32>(cpu: &mut Cpu, v: u32) {
+    let v = v as i32;
+    cpu.leave(&[(4, (v >> N) as u32)]);
+    if N <= 15 {
+        cpu.leave_t((v >> (N - 1)) & 1 != 0);
+    }
+}
+
+/// The C library's signed division (Hitachi's, by the SH-2's division steps): `a` / `b` toward
+/// zero, 0 when `b` is 0. Run as its code runs it (div0s, then 32 of rotcl and div1, on the CPU's
+/// own registers), for what the steps leave: the partial remainder in r3, and SR's Q, M and T.
+pub fn divide(cpu: &mut Cpu, a: u32, b: u32) -> u32 {
+    let s = &mut *cpu.sh2;
+    s.r[1] = a;
+    if b == 0 {
+        s.set_t(true);
+        return 0;
+    }
+    s.r[2] = 0;
+    // div0s r2,r1 (M the zero's sign); the dividend's sign into r3 and a one off a negative one
+    s.set_q(a >> 31 != 0);
+    s.set_m(false);
+    s.set_t(a >> 31 != 0);
+    s.r[3] = 0u32.wrapping_sub(s.t() as u32);
+    let borrow = a < s.t() as u32;
+    s.r[1] = a.wrapping_sub(s.t() as u32);
+    s.set_t(borrow);
+    // div0s r0,r3
+    s.r[0] = b;
+    s.set_q(s.r[3] >> 31 != 0);
+    s.set_m(b >> 31 != 0);
+    s.set_t(s.q() != s.m());
+    let rotcl = |s: &mut stv::sh2::Sh2| {
+        let out = s.r[1] >> 31 != 0;
+        s.r[1] = (s.r[1] << 1) | s.t() as u32;
+        s.set_t(out);
+    };
+    for _ in 0..32 {
+        rotcl(s);
+        s.div1(3, 0);
+    }
+    rotcl(s);
+    // addc r2,r1
+    let t = s.t() as u32;
+    let q = s.r[1].wrapping_add(t);
+    s.set_t(q < t);
+    s.r[1] = q;
+    q
 }

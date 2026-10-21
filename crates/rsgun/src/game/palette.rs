@@ -4,14 +4,14 @@
 //! staging buffer to the video chip (SGL's transfer list), so the colours change with the picture
 //! drawn with them.
 
-use super::Cpu;
+use super::{nested, Cpu};
 
 /// What changed this frame (bit 0 colour RAM, bit 1 VDP1's table) and what is staged for this
 /// VBlank (bit 2, bit 3).
-const CHANGED: u32 = 0x0603_0e30;
+pub const CHANGED: u32 = 0x0603_0e30;
 const CRAM_CHANGED: u32 = 1 << 0;
 const VDP1_CHANGED: u32 = 1 << 1;
-const CRAM_STAGED: u32 = 1 << 2;
+pub const CRAM_STAGED: u32 = 1 << 2;
 const VDP1_STAGED: u32 = 1 << 3;
 
 /// Colour RAM's colours as set, its image, its staging buffer, and where it goes.
@@ -53,6 +53,41 @@ pub fn set_vdp1_colours(cpu: &mut Cpu, colours: u32, index: u32, count: u32) {
     }
     let changed = cpu.read32(CHANGED);
     cpu.write32(CHANGED, changed | VDP1_CHANGED);
+}
+
+/// A blend of colours (the struct at `b`: how far (a word, 0-0x1000), the count (a word), the
+/// colours from, to and the result's place): each channel moved that far from the first colour
+/// toward the second (bit 15 the first's); colour RAM and VDP1's table both changed.
+const B_HOW_FAR: u32 = 0;
+const B_COUNT: u32 = 2;
+const B_FROM: u32 = 4;
+const B_TO: u32 = 8;
+const B_OUT: u32 = 0xc;
+const CHANNELS: [u16; 3] = [0x1f, 0x3e0, 0x7c00];
+const RGB_BIT: u16 = 0x8000;
+
+pub fn colours_blend(cpu: &mut Cpu, b: u32) {
+    let f = cpu.stack();
+    cpu.write32(f, b);
+    let t = ((cpu.read16(b + B_HOW_FAR) as i16 as i32) << 4).clamp(0, 0x1_0000) as u32;
+    cpu.write32(f + 4, t);
+    let mut i = 0;
+    while i < cpu.read16(b + B_COUNT) as i16 as i32 {
+        let at = 2 * i as u32;
+        let (from, to) = (cpu.read32(b + B_FROM), cpu.read32(b + B_TO));
+        let (from, to) = (cpu.read16(from + at), cpu.read16(to + at));
+        let mut c = from & RGB_BIT;
+        for mask in CHANNELS {
+            let (a, z) = ((from & mask) as u32, (to & mask) as u32);
+            let step = nested!(cpu, 0x0600_6a58, super::math::fixed_mul(cpu, z.wrapping_sub(a), t));
+            c = c.wrapping_add((step.wrapping_add(a) as u16) & mask);
+        }
+        let out = cpu.read32(b + B_OUT);
+        cpu.write16(out + at, c);
+        i += 1;
+    }
+    let changed = cpu.read32(CHANGED);
+    cpu.write32(CHANGED, changed | CRAM_CHANGED | VDP1_CHANGED);
 }
 
 /// At the frame's end: what was staged goes to the video chips at this VBlank, and what changed is

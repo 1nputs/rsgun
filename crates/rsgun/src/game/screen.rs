@@ -6,7 +6,7 @@
 
 use super::nested;
 use super::globals::{GAME_FLAGS, HELD};
-use super::{objects, vblank, Cpu};
+use super::{actors, hud, objects, palette, vblank, Cpu};
 
 /// The screen object (its fields as far as known below).
 pub const SCREEN: u32 = 0x0607_4740;
@@ -41,8 +41,7 @@ const STOPPING: u8 = b's';
 
 /// SGL's slMulFX (16.16).
 const SL_MUL_FX: u32 = 0x0606_e26c;
-/// The screen's set up: VDP2's scroll screens (not rewritten yet), and the VBlank callback.
-const SCROLL_SETUP: u32 = 0x0605_ea18;
+/// The screen's set up: the text plane (text_plane_set), and the VBlank callback.
 const SCREEN_VBLANK: u32 = 0x0605_ea98;
 /// Cleared as the screen is set up: the VBlank's copy queue, its long copies, and its cell
 /// writes (the counts).
@@ -99,6 +98,28 @@ pub fn stop_fades(cpu: &mut Cpu) {
     for c in (0..CHANNEL_COUNT).rev() {
         cpu.write32(CHANNELS + 4 * c, 0);
     }
+}
+
+/// The enemies' bullets cleared (ended this frame and the next) with a flash: the fades stopped,
+/// the colour offset reddened (blued while the boss's gauge shows life; the gauge then emptied)
+/// and faded back to nothing.
+const BULLETS: u32 = 0x400;
+const FOR_TWO_FRAMES: u32 = 0x8000_0000;
+const FLASH_RED: [u32; 3] = [100, 50, 50];
+const FLASH_BLUE: [u32; 3] = [50, 50, 100];
+const FLASH_SPEED: u32 = 0x200;
+
+pub fn bullets_cleared(cpu: &mut Cpu) {
+    let w = cpu.read32(actors::END_FLAGS) | FOR_TWO_FRAMES | BULLETS;
+    cpu.write32(actors::END_FLAGS, w);
+    nested!(cpu, 0x0605_e9d8, stop_fades(cpu));
+    let gauge = cpu.read32(hud::BOSS_GAUGE);
+    let [r, g, b] = if gauge != 0 && cpu.read32(gauge + hud::BG_LIFE) as i32 > 0 { FLASH_BLUE } else { FLASH_RED };
+    nested!(cpu, 0x0605_e6dc, set_fade_offset(cpu, r, g, b));
+    if gauge != 0 {
+        nested!(cpu, 0x0604_64b8, hud::boss_gauge_life(cpu, 0));
+    }
+    nested!(cpu, 0x0605_e93c, fade_to(cpu, 0, 0, 0, FLASH_SPEED));
 }
 
 /// A fade's frame: once its channel is free it takes it and the colour's start; then it moves the
@@ -169,10 +190,31 @@ pub fn fade_exec(cpu: &mut Cpu, fade: u32) {
     }
 }
 
+/// SGL's VDP2 settings for the text plane (its calls, not rewritten yet; as far as can be told
+/// NBG2, its cells at 0x25e78000 and its map at 0x25e7e000), its priority 7 (on top), the plane
+/// cleared.
+const SL_E_E2A0: u32 = 0x0606_e2a0;
+const SL_E_E2EC: u32 = 0x0606_e2ec;
+const SL_E_E39C: u32 = 0x0606_e39c;
+const SL_E_E3AC: u32 = 0x0606_e3ac;
+const SL_E_E1A6: u32 = 0x0606_e1a6;
+const SL_E_E45C: u32 = 0x0606_e45c;
+
+pub fn text_plane_set(cpu: &mut Cpu) {
+    cpu.call(SL_E_E2A0, &[0, 0]);
+    cpu.call(SL_E_E2EC, &[TEXT_CELLS, 0x600, 0x8000]);
+    cpu.call(SL_E_E39C, &[0]);
+    cpu.call(SL_E_E3AC, &[TEXT_MAP; 4]);
+    cpu.call(SL_PRIORITY, &[3, 7]);
+    cpu.call(SL_E_E1A6, &[3]);
+    cpu.call(SL_E_E45C, &[3, 0xc]);
+    nested!(cpu, 0x0605_fdfc, clear_text_plane(cpu));
+}
+
 /// screen_set: the screen made (object list 0; off until told), its VBlank callback set, the
 /// queues and the fade channels empty.
 pub fn screen_set(cpu: &mut Cpu) {
-    cpu.call(SCROLL_SETUP, &[]);
+    nested!(cpu, 0x0605_ea18, text_plane_set(cpu));
     let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, SCREEN_SIZE));
     let s = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks as i8 as i32 as u32, SCREEN_EXEC));
     cpu.write32(SCREEN, s);
@@ -571,7 +613,7 @@ fn long_copy_piece(cpu: &mut Cpu) {
 }
 
 /// The pictures the text plane is shared with (their cells at PICTURES_AT's address, palette 7
-/// plus 0xa8, VDP2's colour offsets then on screens 7, or 6 for the first: as far as can be told):
+/// plus 0xa8, the text plane (NBG2) then given priority 7, or 6 for the first: SL_PRIORITY):
 /// each its offset into the cells, where in the text plane, its size in cells, and whether the
 /// plane is cleared first. 0 clears it; -1 leaves it be.
 const PICTURE_SHOWN: u32 = 0x0607_3c8c;
@@ -584,7 +626,8 @@ const PICTURES: [(u32, bool, u32, u32, u32, u32); 4] = [
 ];
 const PICTURE_PALETTE: u32 = 7;
 const PICTURE_ADD: u32 = 0xa8;
-const SL_COLOR_OFFSET_USE: u32 = 0x0606_98dc;
+/// SGL's slPriority (sgl.rs).
+const SL_PRIORITY: u32 = 0x0606_98dc;
 const QUEUE_CELLS: u32 = 0x0605_ed94;
 static QUEUE_CELLS_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
 
@@ -598,12 +641,12 @@ pub fn plane_picture(cpu: &mut Cpu, picture: u32) {
         return;
     }
     if picture == 0 {
-        cpu.call(SL_COLOR_OFFSET_USE, &[3, 7]);
+        cpu.call(SL_PRIORITY, &[3, 7]);
         nested!(cpu, 0x0605_fdfc, clear_text_plane(cpu));
         return;
     }
     let (screens, clear, offset, dst, w, h) = PICTURES[picture as usize - 1];
-    cpu.call(SL_COLOR_OFFSET_USE, &[3, screens]);
+    cpu.call(SL_PRIORITY, &[3, screens]);
     if clear {
         nested!(cpu, 0x0605_fdfc, clear_text_plane(cpu));
     }
@@ -611,6 +654,67 @@ pub fn plane_picture(cpu: &mut Cpu, picture: u32) {
     cpu.nested_with_stack(&QUEUE_CELLS_PROLOGUE, QUEUE_CELLS, &[PICTURE_PALETTE, PICTURE_ADD], |cpu| queue_cells(cpu, src, dst, w, h, PICTURE_PALETTE, PICTURE_ADD));
 }
 
+/// The pictures made (kinds.rs's loader, at `p`; kept: the pictures, then WARNINGB.BIN up to its
+/// cells): the file read in after the pictures' room, its table's (its third part's) pairs of maps
+/// put together, each 44 by 28 cells (the first 32 columns from one, the rest from the other: 32
+/// words a row each), the small one (21 by 4), and its last two rows' first 18 columns after it;
+/// the banner's cells and colours where the file has them (its first and second parts).
+const WARNINGB: u32 = 0x0600_9024;
+const PICTURES_ROOM: u32 = 0x1430;
+const MAP_ROW: u32 = 0x40;
+const MAP_SPLIT: u32 = 32;
+const PICTURE_W: u32 = 44;
+const PICTURE_H: u32 = 28;
+const SMALL_WORDS: u32 = 84;
+const SMALL_ROW: u32 = 21;
+const LAST_AT: u32 = 0xa8;
+const LAST_W: u32 = 18;
+const LAST_H: u32 = 2;
+
+fn pictures_part(cpu: &mut Cpu, f: u32, k: u32) -> u32 {
+    let at = cpu.read32(f + 4 * k);
+    cpu.read32(f.wrapping_add(at)).wrapping_add(f)
+}
+
+pub fn pictures_load(cpu: &mut Cpu, p: u32) -> u32 {
+    cpu.write32(PICTURES_AT, p);
+    let f = p + PICTURES_ROOM;
+    nested!(cpu, 0x0600_5f10, super::files::read_file(cpu, WARNINGB, f));
+    let table = cpu.read32(f + 8).wrapping_add(f);
+    let mut dst = cpu.read32(PICTURES_AT);
+    for pair in 0..2 {
+        let left = cpu.read32(table + 8 * pair).wrapping_add(f);
+        let right = cpu.read32(table + 8 * pair + 4).wrapping_add(f);
+        for row in 0..PICTURE_H {
+            for col in 0..PICTURE_W {
+                let src = match col < MAP_SPLIT {
+                    true => left + MAP_ROW * row + 2 * col,
+                    false => right + MAP_ROW * row + 2 * (col - MAP_SPLIT),
+                };
+                let v = cpu.read16(src);
+                cpu.write16(dst + 2 * col, v);
+            }
+            dst += 2 * PICTURE_W;
+        }
+    }
+    let small = cpu.read32(table + 16).wrapping_add(f);
+    for i in 0..SMALL_WORDS {
+        let v = cpu.read16(small + 2 * i);
+        cpu.write16(dst + 2 * i, v);
+    }
+    let (src, dst) = (small + 2 * 2 * SMALL_ROW, dst + LAST_AT);
+    for row in 0..LAST_H {
+        for i in 0..LAST_W {
+            let v = cpu.read16(src + 2 * SMALL_ROW * row + 2 * i);
+            cpu.write16(dst + 2 * LAST_W * row + 2 * i, v);
+        }
+    }
+    let colours = pictures_part(cpu, f, 1);
+    cpu.write32(super::banner::BANNER_COLOURS, colours);
+    let cells = pictures_part(cpu, f, 0);
+    cpu.write32(super::banner::BANNER_CELLS, cells);
+    cpu.read32(f).wrapping_add(PICTURES_ROOM)
+}
 
 /// VDP2's colour offset A as the mode sets it (r, g, b).
 pub fn set_offset_a(cpu: &mut Cpu, r: u32, g: u32, b: u32) {
@@ -694,6 +798,106 @@ pub fn play_screen_set(cpu: &mut Cpu) {
     nested!(cpu, 0x0605_e6c0, offsets_clear(cpu));
     cpu.call(SL_E_DD5C, &[0]);
     cpu.call(SL_E_DD6C, &[4]);
+}
+
+/// The screen set for the pictures (picture_load's): SGL's VDP2 settings (its calls, not
+/// rewritten yet; as far as can be told NBG0 the text plane, its cells at 0x25e78000 and its map
+/// at 0x25e7e000, zoomed by a half (twice the size) and cleared, and NBG1 the picture, its cells
+/// at VRAM's start and its map's pages from 0x25e40000, unzoomed; both at 0, 0), a flag of SGL's
+/// set, the settings to their start, the screen's fields, the pictures' scroll table, the fades
+/// stopped, the screen on.
+const SL_E_E288: u32 = 0x0606_e288;
+const SL_E_E294: u32 = 0x0606_e294;
+const SL_E_E2E4: u32 = 0x0606_e2e4;
+const SL_E_E300: u32 = 0x0606_e300;
+const SL_0_0C3C: u32 = 0x0607_0c3c;
+const SL_0_0C4C: u32 = 0x0607_0c4c;
+const SL_0_0CFC: u32 = 0x0607_0cfc;
+const SL_0_0D0C: u32 = 0x0607_0d0c;
+const SL_0_0D1C: u32 = 0x0607_0d1c;
+const SL_0_0DDC: u32 = 0x0607_0ddc;
+const SL_0_0DEC: u32 = 0x0607_0dec;
+const SL_SCR_POS_NBG0: u32 = 0x0606_e47c;
+const SL_ZOOM_NBG0: u32 = 0x0606_e46c;
+const SL_SCR_POS_NBG1: u32 = 0x0606_e4cc;
+const SL_ZOOM_NBG1: u32 = 0x0606_e4bc;
+const TEXT_CELLS: u32 = 0x25e7_8000;
+const TEXT_MAP: u32 = 0x25e7_e000;
+const BACK_COLOUR_AT: u32 = 0x25e5_fffe;
+const HALF: u32 = 0x8000;
+const PICTURES_SCROLL: u32 = 0x0607_35a8;
+
+pub fn picture_screen_set(cpu: &mut Cpu) {
+    cpu.call(SL_E_DC8A, &[0x1c]);
+    cpu.call(SL_E_DCEC, &[1]);
+    cpu.write8(SL_FLAG_FC12, 1);
+    cpu.call(SL_E_DD4C, &[2]);
+    cpu.call(SL_E_E288, &[0, 0]);
+    cpu.call(SL_E_E300, &[TEXT_CELLS, 0x600, 0x8000]);
+    cpu.call(SL_0_0C3C, &[0]);
+    cpu.call(SL_0_0C4C, &[TEXT_MAP; 4]);
+    cpu.call(SL_0_0CFC, &[1, 0]);
+    cpu.call(SL_SCR_POS_NBG0, &[0, 0]);
+    cpu.call(SL_ZOOM_NBG0, &[HALF, HALF]);
+    nested!(cpu, 0x0605_fdfc, clear_text_plane(cpu));
+    cpu.call(SL_E_E294, &[0x10, 0]);
+    cpu.call(SL_E_E2E4, &[PICTURE_CELLS, 0, 0x4000]);
+    cpu.call(SL_0_0D0C, &[0]);
+    let [a, b] = PICTURE_PAGES;
+    cpu.call(SL_0_0D1C, &[a, b, a, a]);
+    cpu.call(SL_SCR_POS_NBG1, &[0, 0]);
+    cpu.call(SL_ZOOM_NBG1, &[ONE as u32, ONE as u32]);
+    cpu.call(SL_E_DD5C, &[2]);
+    cpu.call(SL_0_0DDC, &[0]);
+    cpu.call(SL_PRIORITY, &[1, 7]);
+    cpu.call(SL_PRIORITY, &[0, 4]);
+    cpu.call(SL_0_0DEC, &[BACK_COLOUR_AT, 0]);
+    cpu.call(SL_E_DD6C, &[3]);
+    cpu.call(SL_COLOR_CALC, &[0x42, 0]);
+    nested!(cpu, 0x0605_e34c, screen_reset(cpu));
+    nested!(cpu, 0x0605_e2dc, screen_fields(cpu));
+    cpu.write32(SCROLL_TABLE, PICTURES_SCROLL);
+    nested!(cpu, 0x0605_e9d8, stop_fades(cpu));
+    let s = screen(cpu);
+    cpu.write8(s + SCREEN_OFF, 0);
+}
+
+/// Loads the picture at `p` for NBG1 (three longs, each the offset from `p` of a long holding
+/// the offset from `p` of a part: its cells, its colours, its map): `bytes` of cells to VRAM's
+/// start, `count` colours to colour RAM's start (staged for this VBlank), and its map (88 by 56
+/// words, each a pattern name, made longs) to the pages from 0x25e40000: columns 0-63 to the
+/// first, the rest to the next.
+const PICTURE_CELLS: u32 = 0x25e0_0000;
+const PICTURE_PAGES: [u32; 2] = [0x25e4_0000, 0x25e4_4000];
+const PAGE_ROW: u32 = 0x100;
+const PAGE_COLUMNS: u32 = 64;
+const PICTURE_COLUMNS: u32 = 88;
+const PICTURE_ROWS: u32 = 56;
+
+fn picture_part(cpu: &mut Cpu, p: u32, k: u32) -> u32 {
+    let at = cpu.read32(p + 4 * k);
+    cpu.read32(p.wrapping_add(at)).wrapping_add(p)
+}
+
+pub fn picture_load(cpu: &mut Cpu, p: u32, bytes: u32, count: u32) {
+    let cells = picture_part(cpu, p, 0);
+    nested!(cpu, 0x0605_edf8, copy_words(cpu, cells, PICTURE_CELLS, bytes));
+    let colours = picture_part(cpu, p, 1);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0, count & 0xffff));
+    let c = cpu.read32(palette::CHANGED) | palette::CRAM_STAGED;
+    cpu.write32(palette::CHANGED, c);
+    let mut src = picture_part(cpu, p, 2);
+    for row in 0..PICTURE_ROWS {
+        for col in 0..PICTURE_COLUMNS {
+            let name = cpu.read16(src) as u32;
+            let (page, col) = match col < PAGE_COLUMNS {
+                true => (PICTURE_PAGES[0], col),
+                false => (PICTURE_PAGES[1], col - PAGE_COLUMNS),
+            };
+            cpu.write32(page + PAGE_ROW * row + 4 * col, name);
+            src += 2;
+        }
+    }
 }
 
 /// SGL's VDP2 settings back to their start (its calls: the planes' eight settings, three more,

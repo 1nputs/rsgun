@@ -47,7 +47,7 @@ const GAUGE_AT: [u32; 2] = [0x0607_3634, 0x0607_3682];
 const ICON_COLOURS_AT: [u32; 2] = [0x308, 0x318];
 const ICON_STILL: u32 = 0x0607_3918;
 const ICON_CHARGING: [u32; 3] = [0x0607_3914, 0x0607_391c, 0x0607_3920];
-/// Moves a value toward a target by a step (not rewritten yet).
+/// Moves a value toward a target by a step (actors.rs's approach).
 const APPROACH: u32 = 0x0604_6168;
 
 fn attr(p: u32) -> u16 {
@@ -116,7 +116,7 @@ pub fn gauge(cpu: &mut Cpu, p: u32) {
     let target = target.max(0);
     let shown = cpu.read32(GAUGE_SHOWN + 4 * p) as i32;
     let step = (target.wrapping_sub(shown).wrapping_abs() / 8).wrapping_add(1);
-    let shown = cpu.call(APPROACH, &[shown as u32, target as u32, step as u32]) as i32;
+    let shown = nested!(cpu, APPROACH, super::actors::approach(cpu, shown as u32, target as u32, step as u32)) as i32;
     cpu.write32(GAUGE_SHOWN + 4 * p, shown as u32);
     let value = if shown > 9999 { 0 } else { shown };
     // 64ths: value × 64 / 10000
@@ -178,7 +178,7 @@ const STATUS_BUFFERS: [u32; 2] = [0x0607_3614, 0x0607_3662];
 /// 224 pixels at (-112, 92), its length by the life shown over the most, in the first kind's colour
 /// (0x40 on above half) shimmering with the passes; the life shown rises toward the life by a
 /// sixteenth of the way (at least 1) and drops to it at once. It ends once the life shown is 0.
-const BOSS_GAUGE: u32 = 0x0607_46ec;
+pub const BOSS_GAUGE: u32 = 0x0607_46ec;
 const BOSS_GAUGE_EXEC: u32 = 0x0604_62dc;
 const BOSS_GAUGE_SIZE: u32 = 0x80;
 const BG_LIST: u32 = 4;
@@ -194,7 +194,7 @@ const BG_NUMBER: u32 = 0x32;
 const BG_LIFT: u32 = 0x33;
 const BG_CORNERS_AT: u32 = 0x34;
 const BG_PHASE: u32 = 0x3c;
-const BG_LIFE: u32 = 0x60;
+pub const BG_LIFE: u32 = 0x60;
 const BG_MOST: u32 = 0x64;
 const BG_SHOWN: u32 = 0x68;
 const BG_CORNERS: u32 = 0x70;

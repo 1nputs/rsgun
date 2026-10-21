@@ -208,7 +208,7 @@ const MESSAGE_SECOND: u32 = 14;
 const MESSAGE_SHORT: u32 = 12;
 /// The fade to black's speed as a screen ends.
 const FADE_OUT_SPEED: u32 = 0x8d3;
-/// Sets bit 2 of the director's flags (not rewritten: never reached in the evidence).
+/// Sets bit 2 of the director's flags (director.rs's mode_skipped).
 const SET_SKIPPED: u32 = 0x0604_0c8c;
 
 /// States 2-4 (the name entry, the result, the opening): the screen faded in from black, the
@@ -240,7 +240,7 @@ pub fn state_screen(cpu: &mut Cpu, game: u32) {
                         nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 0));
                         nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 1));
                         cpu.write8(NEXT_MODE, 1);
-                        cpu.call(SET_SKIPPED, &[]);
+                        nested!(cpu, SET_SKIPPED, super::director::mode_skipped(cpu));
                         go_to(cpu, game, 9);
                     }
                 } else if second > 39 {
@@ -401,9 +401,9 @@ const LAST_DEMO_MODE: u8 = 15;
 /// The picture's size by the BIOS's setting (1 or else), and its palette's offset.
 const PICTURE_BYTES: [u32; 2] = [0x29080, 0x28a80];
 const PICTURE_PALETTE: u32 = 0x100;
-/// Not rewritten yet: the title screen's VDP2 set up; a scroll screen shown (SGL); the title's
-/// object made (if there is none); a player started (lamps and the BIOS told, as far as can be
-/// told); the picture put in VRAM; the screen shown.
+/// The title screen's VDP2 set up (screen.rs's picture screen); NBG0 shown; the title's object
+/// made (if there is none: kinds.rs's kinds_set); a player started (system.rs); the picture put
+/// in VRAM; NBG0 and NBG1 shown.
 const TITLE_SCREEN_SET: u32 = 0x0605_fe8c;
 const TITLE_SCREEN_SHOW: u32 = 0x0606_00d4;
 const TITLE_OBJ_SET: u32 = 0x0605_3aa0;
@@ -427,10 +427,10 @@ pub fn state_title(cpu: &mut Cpu, game: u32) {
                 cpu.write32(game + PICTURE_SHOWN, 1);
             } else {
                 cpu.write32(game + PICTURE_SHOWN, 0);
-                cpu.call(TITLE_SCREEN_SET, &[]);
-                cpu.call(TITLE_SCREEN_SHOW, &[]);
+                nested!(cpu, TITLE_SCREEN_SET, screen::picture_screen_set(cpu));
+                nested!(cpu, TITLE_SCREEN_SHOW, screen::plane_a(cpu));
             }
-            cpu.call(TITLE_OBJ_SET, &[]);
+            nested!(cpu, TITLE_OBJ_SET, super::kinds::kinds_set(cpu));
             for i in (0..4).rev() {
                 cpu.write8(CONTINUING + i, 0);
             }
@@ -501,7 +501,7 @@ fn title_players(cpu: &mut Cpu, game: u32) {
                 if cpu.read16(PAD_TRIG[p as usize]) & START != 0 && nested!(cpu, 0x0604_0f5c, system::use_credit(cpu, p)) != 0 {
                     let lives = cpu.read8(START_LIVES);
                     cpu.write8(LIVES + p, lives);
-                    cpu.call(PLAYER_STARTED, &[p]);
+                    nested!(cpu, PLAYER_STARTED, system::player_started(cpu, p));
                     let bit = nested!(cpu, 0x0600_69d8, system::shift_left(cpu, 1, p));
                     let started = cpu.read32(game + STARTED);
                     cpu.write32(game + STARTED, started | bit);
@@ -619,8 +619,8 @@ fn title_time(cpu: &mut Cpu, game: u32) {
     if cpu.read32(game + PICTURE_SHOWN) == 0 && cpu.read32(game + GAME_FLAGS_44) & PICTURE_READY != 0 {
         let bytes = PICTURE_BYTES[if super::globals::bios_setting_is_1(cpu) { 0 } else { 1 }];
         let picture = cpu.read32(game + PICTURE);
-        cpu.call(PICTURE_LOAD, &[picture, bytes, PICTURE_PALETTE]);
-        cpu.call(PICTURE_SHOW, &[]);
+        nested!(cpu, PICTURE_LOAD, screen::picture_load(cpu, picture, bytes, PICTURE_PALETTE));
+        nested!(cpu, PICTURE_SHOW, screen::planes_ab(cpu));
         cpu.write32(game + PICTURE_SHOWN, 1);
     }
 }
@@ -698,14 +698,14 @@ const OVER_TEXT: u32 = 0x0604_1dc4;
 const OVER_AT: u32 = 0x25e7_e608;
 const BLANK_DIGIT: u32 = 0x0604_1dd8;
 const BLANK_LINE: u32 = 0x0604_1ddc;
-/// The colour offsets that darken the screens under the continue screen (SGL's: the screens they
-/// apply to, offsets A and B; as far as can be told), and the darkening.
-const SL_COLOR_OFFSET_USE: u32 = 0x0606_98dc;
+/// The continue screen's: the text plane (NBG2) put on top (SGL's slPriority) and the screens under
+/// it darkened by colour offsets A and B (slColOffsetA, slColOffsetB), and the darkening.
+const SL_PRIORITY: u32 = 0x0606_98dc;
 const SL_COLOR_OFFSET_A: u32 = 0x0606_98ec;
 const SL_COLOR_OFFSET_B: u32 = 0x0606_98fc;
 const DARKER: u32 = -80i32 as u32;
-/// Not rewritten yet: a player object made (from a struct: x, y, z, the player), a player ended
-/// (lamps and the BIOS told, as far as can be told).
+/// A player object made (from a struct: x, y, z, the player: actors.rs's player_set), a player
+/// ended (system.rs).
 const PLAYER_SET: u32 = 0x0604_816c;
 const PLAYER_ENDED: u32 = 0x0600_6928;
 
@@ -804,7 +804,7 @@ fn stage_demo(cpu: &mut Cpu, game: u32) {
         nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 0));
         nested!(cpu, 0x0606_0b34, text::hide_line(cpu, 1));
         cpu.write8(NEXT_MODE, GAME_TITLE);
-        cpu.call(SET_SKIPPED, &[]);
+        nested!(cpu, SET_SKIPPED, super::director::mode_skipped(cpu));
         go_to(cpu, game, 9);
     }
 }
@@ -825,7 +825,7 @@ fn stage_player(cpu: &mut Cpu, game: u32, p: u32) {
             cpu.write32(start + 4, PLAYER_START_Y);
             cpu.write32(start + 8, 0);
             cpu.write8(start + PLAYER_NUMBER, p as u8);
-            cpu.call(PLAYER_SET, &[start]);
+            nested!(cpu, PLAYER_SET, super::actors::player_set(cpu, start));
             if cpu.read8(GAME_MODE).wrapping_sub(FIRST_COUNTED_STAGE) < COUNTED_STAGES {
                 let n = cpu.read8(lives);
                 cpu.write8(lives, n.wrapping_sub(1));
@@ -878,7 +878,7 @@ fn stage_player(cpu: &mut Cpu, game: u32, p: u32) {
                     cpu.write32(game + COUNTDOWN, COUNT_FROM);
                     cpu.write32(game + TICKS, 0);
                     frames = 0;
-                    cpu.call(PLAYER_ENDED, &[p]);
+                    nested!(cpu, PLAYER_ENDED, system::player_ended(cpu, p));
                     state = PLAYER_CONTINUE;
                 }
             }
@@ -970,7 +970,7 @@ fn player_line(cpu: &mut Cpu, game: u32, p: u32, state: u32, frames: &mut u32, p
                 } else {
                     cpu.write8(continues, 0xff);
                 }
-                cpu.call(PLAYER_STARTED, &[p]);
+                nested!(cpu, PLAYER_STARTED, system::player_started(cpu, p));
                 state = PLAYER_JOINED;
             }
         }
@@ -996,7 +996,7 @@ fn stage_continue(cpu: &mut Cpu, game: u32) {
         if cpu.read32(PLAYERS) != 0 || cpu.read32(PLAYERS + 4) != 0 {
             return;
         }
-        cpu.call(SL_COLOR_OFFSET_USE, &[3, 7]);
+        cpu.call(SL_PRIORITY, &[3, 7]);
         cpu.write32(GAME_FLAGS, CONTINUE_SCREEN);
         cpu.write32(game + COUNTDOWN, COUNT_FROM);
         cpu.write32(game + TICKS, 0);

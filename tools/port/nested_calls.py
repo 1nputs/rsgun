@@ -16,11 +16,20 @@ GAME = ROOT / "crates/rsgun/src/game"
 
 
 def literals_by_function(image, entries):
-    """{function entry: {32-bit words in its range}} for the main program (work RAM-H)."""
+    """{function entry: {32-bit words in its range}} for the main program (work RAM-H). A range
+    with no return in it (no rts) runs on into the next: that entry is another way into the same
+    code (SGL's slRotXSC is slRotX past its call for the sine)."""
     entries = sorted(e for e in entries if 0x06000000 <= e < 0x06080000)
     out = {}
+
+    def returns(lo, hi):
+        return any(image[i:i + 2] == b"\x00\x0b" for i in range(lo - 0x06000000, hi - 0x06000000, 2))
+
     for k, e in enumerate(entries):
-        end = entries[k + 1] if k + 1 < len(entries) else e + 0x1000
+        j = k + 1
+        while j < len(entries) and not returns(entries[j - 1] if j > k + 1 else e, entries[j]):
+            j += 1
+        end = entries[j] if j < len(entries) else e + 0x1000
         a, b = e - 0x06000000, min(end, e + 0x4000) - 0x06000000
         out[e] = {int.from_bytes(image[i:i + 4], "big") for i in range(a & ~3, b, 4)}
     return out

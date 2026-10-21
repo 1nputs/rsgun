@@ -6,7 +6,7 @@
 
 use super::nested;
 use super::globals::{GAME_FLAGS, HELD};
-use super::{objects, screen, sound, system, Cpu};
+use super::{files, hud, objects, palette, screen, sound, system, Cpu};
 
 /// The font: each character's tile (i16 a character, plus TILE_BASE), and the large font's (four
 /// tiles a character, 2x2; from index LARGE_NARROW on, one column of two).
@@ -208,6 +208,46 @@ pub fn credits_hidden(cpu: &mut Cpu) -> u32 {
     cpu.write8(d + SHOWN, 0);
     cpu.write32(d + DRAWN, u32::MAX);
     cpu.write32(d + DRAWN + 4, u32::MAX);
+    0
+}
+
+/// The text's fonts loaded (kinds.rs's loader, at `p`; none of it kept: 0): CONSOLE.BIN's cells
+/// (its first part) to the text plane's cells, its colours (its second) to colour RAM from 0x300;
+/// the coin setting's digit put in its message, both players' status lines to be drawn whole;
+/// then BGASCII.BIN's cells after them, and the credit display made.
+const CONSOLE: u32 = 0x0600_9034;
+const BGASCII: u32 = 0x0600_9040;
+const TEXT_CELLS: u32 = 0x25e7_8000;
+const CONSOLE_BYTES: u32 = 0x420;
+const BGASCII_BYTES: u32 = 0x10e0;
+const CONSOLE_COLOURS: (u32, u32) = (0x300, 32);
+const COIN_MESSAGE: u32 = 14;
+
+fn file_part(cpu: &mut Cpu, p: u32, k: u32) -> u32 {
+    let at = cpu.read32(p + 4 * k);
+    cpu.read32(p.wrapping_add(at)).wrapping_add(p)
+}
+
+pub fn fonts_load(cpu: &mut Cpu, p: u32) -> u32 {
+    nested!(cpu, 0x0600_5f10, files::read_file(cpu, CONSOLE, p));
+    let cells = file_part(cpu, p, 0);
+    nested!(cpu, 0x0605_edf8, screen::copy_words(cpu, cells, TEXT_CELLS, CONSOLE_BYTES));
+    let colours = file_part(cpu, p, 1);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, CONSOLE_COLOURS.0, CONSOLE_COLOURS.1));
+    // (the SH-2 code rewrites the status lines' buffers' 30 words each as they are)
+    let digit = nested!(cpu, 0x0604_0fac, system::coin_settings_low(cpu)).wrapping_add(b'0' as u32);
+    let message = cpu.read32(MESSAGES + 4 * COIN_MESSAGE);
+    cpu.write8(message + 1, digit as u8);
+    for player in 0..2 {
+        nested!(cpu, 0x0606_0354, hud::status_reset(cpu, player));
+    }
+    nested!(cpu, 0x0606_e24c, system::wait_dma0(cpu));
+    nested!(cpu, 0x0600_5f10, files::read_file(cpu, BGASCII, p));
+    let cells = file_part(cpu, p, 0);
+    nested!(cpu, 0x0605_edf8, screen::copy_words(cpu, cells, TEXT_CELLS + CONSOLE_BYTES, BGASCII_BYTES));
+    nested!(cpu, 0x0606_e24c, system::wait_dma0(cpu));
+    let d = nested!(cpu, 0x0606_0fc8, credits_set(cpu));
+    cpu.write32(CREDITS, d);
     0
 }
 
@@ -786,4 +826,15 @@ pub fn opening_set(cpu: &mut Cpu, l1: u32, l2: u32, l3: u32, l4: u32, wait: u32)
     cpu.write8(o + MS_PHASE, 0);
     cpu.write16(o + MS_WAIT, wait as u16);
     cpu.write16(o + MS_BAR, 0);
+}
+
+/// Makes a message (list 0) of the lines at `lines`.
+const MESSAGE_SIZE: u32 = 0x20;
+
+pub fn message_set(cpu: &mut Cpu, lines: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, MESSAGE_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks, MESSAGE_EXEC));
+    if o != 0 {
+        cpu.write32(o + MESSAGE_LINES_AT, lines);
+    }
 }

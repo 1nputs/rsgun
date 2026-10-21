@@ -118,3 +118,9 @@ pub fn timeline_set(cpu: &mut Cpu, events: u32) -> u32 {
     }
     t
 }
+
+/// An event: the screen's next scroll, done at once.
+pub fn scroll_event(cpu: &mut Cpu) -> u32 {
+    nested!(cpu, 0x0605_e648, super::screen::scroll_next(cpu));
+    1
+}

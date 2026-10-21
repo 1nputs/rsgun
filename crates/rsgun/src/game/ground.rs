@@ -313,6 +313,51 @@ pub fn ride(cpu: &mut Cpu, o: u32) {
     cpu.write32(o + POSITION + 8, z);
 }
 
+/// Makes a rider (ride's) on `on` from the description at `d`: its offset (x, y: longs, their
+/// pixel words taken) and number (+0x1e: its carrier's); not hittable, of the enemies' side, in
+/// `on`'s kind and colour, its frame by its place (above or below, or to a side; STG03 has its
+/// own). 1, or 0 when there is no room.
+const RIDE_EXEC: u32 = 0x0605_c700;
+const RD_NUMBER: u32 = 0x1e;
+const RIDER_LIFT: u8 = 0xf9;
+const STG03: u8 = super::globals::mode::STG01 + 2;
+/// The frames: in line (x 0) and to a side; STG03's.
+const RIDER_FRAMES: [u8; 2] = [9, 10];
+const STG03_RIDER_FRAMES: [u8; 2] = [2, 1];
+
+pub fn rider_set(cpu: &mut Cpu, d: u32, on: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, BARREL_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, GUN_LIST, blocks, NUMBERED_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, o + SPRITE));
+    nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, o + BOXES));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + BEHAVIOUR, RIDE_EXEC);
+    cpu.write32(o + FLAGS, NO_HITS);
+    let n = cpu.read8(d + RD_NUMBER);
+    cpu.write8(o + NUMBER, n);
+    cpu.write32(o + RIDES_ON, on);
+    let k = cpu.read8(on + KIND);
+    cpu.write8(o + KIND, k);
+    let frames = if cpu.read8(super::globals::GAME_MODE) == STG03 { STG03_RIDER_FRAMES } else { RIDER_FRAMES };
+    let aside = cpu.read32(d) != 0;
+    cpu.write8(o + FRAME, frames[aside as usize]);
+    let c = cpu.read16(on + COLOUR);
+    cpu.write16(o + COLOUR, c);
+    let c = cpu.read16(on + COLOUR);
+    cpu.write16(o + OWN_COLOUR, c);
+    cpu.write8(o + SIDE, ENEMIES);
+    cpu.write8(o + TYPE, 0);
+    cpu.write8(o + LIFT, RIDER_LIFT);
+    for k in 0..2 {
+        let v = cpu.read16(d + 4 * k + 2);
+        cpu.write16(o + RIDE_OFFSET + 2 * k, v);
+    }
+    1
+}
+
 
 /// A ground enemy (a tank or the like) moving along its route script: it dies where the ground's
 /// map says it cannot be (its life -1) or when its life runs out (an explosion by its kind; the
@@ -1591,6 +1636,134 @@ pub fn big_gun_exec(cpu: &mut Cpu, o: u32) {
     cpu.write16(o + ANGLE, a);
 }
 
+/// Makes the wounded ground enemy described at `d` (wounded_exec, numbered, list 2, turned half
+/// round), moving by route `script`, with its big gun (big_gun_exec, the body's number, colour,
+/// type, place and lift; its mode and count from the description, its frame by mode) aiming by
+/// `aim` with the description's mirror and offset, or with none facing the script's first turn
+/// from the body's direction, mirrored. By kind (0-2) the body's frame, life and boxes (the last
+/// plain and smaller). The body, or 0 when there is no number or room.
+const WOUNDED_EXEC: u32 = 0x0605_b568;
+const WOUNDED_FLAGS: u32 = 0x2008_0000;
+const WOUNDED_KIND: u8 = 7;
+const WOUNDED_COLOUR: u32 = 0x0607_426c;
+const WOUNDED_BOXES: u32 = 0x0607_3328;
+const WOUNDED_FRAMES: [u8; 3] = [0, 5, 4];
+const WOUNDED_LIVES: [u32; 3] = [8000, 20000, 6000];
+const WOUNDED_SCALE: u32 = 0xe000;
+const SCALES: u32 = 0x20;
+const HALF_TURN: u16 = 0x8000;
+const BIG_GUN: u32 = 0x74;
+const BIG_GUN_EXEC: u32 = 0x0605_b7d4;
+/// The description's gun: mode and count (a word: count in the low 4 bits, mode the next 2),
+/// mirror and offset.
+const D_GUN: u32 = 0x30;
+const D_GUN_MIRROR: u32 = 0x33;
+const D_GUN_OFFSET: u32 = 0x34;
+/// The big gun's frame by mode (the low bytes of words).
+const G_FRAMES: u32 = 0x0607_34f3;
+/// The frame's slots: the route script (moved on to the turn when there is no aim) and the aim.
+const W_SCRIPT: u32 = 0;
+const W_AIM: u32 = 4;
+
+pub fn wounded_set(cpu: &mut Cpu, d: u32, script: u32, aim: u32) -> u32 {
+    let f = cpu.stack();
+    cpu.write32(f + W_SCRIPT, script);
+    cpu.write32(f + W_AIM, aim);
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, ENEMY_NUMBERS)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, BARREL_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, GUN_LIST, blocks, NUMBERED_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, o + SPRITE));
+    nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, o + BOXES));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + BEHAVIOUR, WOUNDED_EXEC);
+    cpu.write32(o + FLAGS, WOUNDED_FLAGS);
+    cpu.write8(o + NUMBER, n as u8);
+    let n = cpu.read8(o + NUMBER) as i8 as i32;
+    cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), o);
+    let kind = cpu.read16(d + D_KIND) as i16;
+    if (0..=2).contains(&kind) {
+        let k = kind as usize;
+        cpu.write8(o + FRAME, WOUNDED_FRAMES[k]);
+        cpu.write32(o + LIFE, WOUNDED_LIVES[k]);
+        if k == 2 {
+            cpu.write32(o + BOXES, PLAIN_BOXES);
+            cpu.write32(o + SCALES, WOUNDED_SCALE);
+            cpu.write32(o + SCALES + 4, WOUNDED_SCALE);
+        } else {
+            cpu.write32(o + BOXES, WOUNDED_BOXES);
+        }
+    }
+    cpu.write8(o + KIND, WOUNDED_KIND);
+    let colour = cpu.read16(WOUNDED_COLOUR).wrapping_add(cpu.read16(d + D_COLOUR).wrapping_mul(16));
+    cpu.write16(o + OWN_COLOUR, colour);
+    cpu.write16(o + COLOUR, colour);
+    let t = cpu.read8(d + D_TYPE);
+    cpu.write8(o + TYPE, t);
+    cpu.write8(o + SIDE, ENEMIES);
+    cpu.write32(o + SCRIPT, script);
+    let direction = cpu.read16(d + D_DIRECTION);
+    cpu.write16(o + BASE_DIRECTION, direction);
+    let mirror = cpu.read8(d + D_MIRROR);
+    cpu.write8(o + MIRROR, mirror);
+    for k in 0..3 {
+        let v = cpu.read32(d + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    cpu.write8(o + LIFT, GUN_LIFT);
+    cpu.write16(o + ANGLE, HALF_TURN);
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, BARREL_SIZE)) as i8 as i32 as u32;
+    let gun = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, GUN_LIST, blocks, ACTOR_EXEC));
+    if gun == 0 {
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, gun + SPRITE));
+    nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, gun + BOXES));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, gun));
+    cpu.write32(gun + BEHAVIOUR, BIG_GUN_EXEC);
+    cpu.write32(gun + FLAGS, GUN_FLAGS);
+    cpu.write8(gun + NUMBER, n as u8);
+    let g = cpu.read16(d + D_GUN) as i16;
+    cpu.write16(gun + G_MODE, ((g / 16) & 3) as u16);
+    cpu.write16(gun + G_COUNT, g as u16 & 0xf);
+    let mode = cpu.read16(gun + G_MODE) as i16 as i32 as u32;
+    let frame = cpu.read8(G_FRAMES.wrapping_add(2 * mode));
+    cpu.write8(gun + FRAME, frame);
+    cpu.write32(gun + G_SCRIPT, aim);
+    if aim != 0 {
+        let mirror = cpu.read8(d + D_GUN_MIRROR);
+        cpu.write8(gun + MIRROR, mirror);
+        let offset = cpu.read16(d + D_GUN_OFFSET);
+        cpu.write16(gun + G_AIM_OFFSET, offset);
+    } else {
+        let turn = script.wrapping_add(2);
+        cpu.write32(f + W_SCRIPT, turn);
+        let a = ((cpu.read8(turn) as u32) << 8).wrapping_add(cpu.read16(o + BASE_DIRECTION) as i16 as i32 as u32);
+        let mirror = cpu.read8(o + MIRROR) as i8 as i32 as u32;
+        cpu.write16(gun + ANGLE, a.wrapping_mul(mirror) as u16);
+    }
+    let t = cpu.read8(o + TYPE);
+    cpu.write8(gun + TYPE, t);
+    cpu.write8(gun + KIND, WOUNDED_KIND);
+    let colour = cpu.read16(o + OWN_COLOUR);
+    cpu.write16(gun + OWN_COLOUR, colour);
+    cpu.write16(gun + COLOUR, colour);
+    for k in 0..3 {
+        let v = cpu.read32(o + POSITION + 4 * k);
+        cpu.write32(gun + POSITION + 4 * k, v);
+    }
+    let lift = cpu.read8(o + LIFT);
+    cpu.write8(gun + LIFT, lift);
+    cpu.write32(o + BIG_GUN, gun);
+    o
+}
+
 /// A ground enemy with a hatch: as ground_exec it dies, leaves and follows its route; when its
 /// route starts it firing its hatch opens (frame 1 for three frames, then its hurt flag cleared
 /// with its opening's effect, then frame 2); while firing it fires a plain bullet every so often
@@ -2138,11 +2311,122 @@ pub fn carrier_set(cpu: &mut Cpu, d: u32, script: u32, kind: u32) -> u32 {
     o
 }
 
+/// Makes the platform described at `d`, moving by route `script` (route_exec's; numbered, list 2,
+/// unhittable at first, of side 3, type 4, 10000 life): kind 9 (its frame the description's kind's
+/// low bit; STG03's kind 11, frame 0) in its kind's colour, its boxes by the description (+0x32:
+/// 0-4, or 5 for none of its life), its settings the description's; then on it, by the bits of the
+/// description's word at +0x2c, three rocket launchers each of four groups (their offsets and
+/// angles from tables, their colours the description's words from +0x34; with turrets unless the
+/// description's kind is past 1) and riders 40 pixels above, below, left and right. The platform,
+/// or 0 when there is no number or room.
+const ROUTE_EXEC: u32 = 0x0605_be90;
+const PLATFORM_FLAGS: u32 = 0xe_0000;
+const PLATFORM_KINDS: [(u8, u32); 2] = [(9, 0x0607_428c), (11, 0x0607_42ac)];
+const PLATFORM_LIFE: u32 = 10000;
+const PLATFORM_BOXES: [u32; 5] = [0x0607_3348, 0x0607_3358, 0x0607_3368, 0x0607_3378, 0x0607_3388];
+const NO_LIFE_BOXES: u16 = 5;
+const SIDE_3: u8 = 3;
+const PLATFORM_TYPE: u8 = 4;
+const D_PARTS: u32 = 0x2c;
+const D_BOXES: u32 = 0x32;
+/// The launchers' groups (by the parts' bits 0-3): their offsets (pairs of bytes), angles (bytes,
+/// the top of a word) and the description's word for their colour.
+const LAUNCHER_GROUPS: [(u32, u32, u32); 4] = [
+    (0x0607_34f8, 0x0607_3510, 0x36),
+    (0x0607_3504, 0x0607_3516, 0x34),
+    (0x0607_350a, 0x0607_3519, 0x38),
+    (0x0607_34fe, 0x0607_3513, 0x3a),
+];
+const GROUP_LAUNCHERS: u32 = 3;
+/// The riders (by the parts' bits 4-7): their offsets.
+const RIDERS: [(i32, i32); 4] = [(0, 40), (0, -40), (-40, 0), (40, 0)];
+
+pub fn platform_set(cpu: &mut Cpu, d: u32, script: u32) -> u32 {
+    let f = cpu.stack();
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, ENEMY_NUMBERS)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, super::objects::obj_size(cpu, BARREL_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, super::objects::obj_set(cpu, GUN_LIST, blocks, NUMBERED_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, super::sprites::sprite_init(cpu, o + SPRITE));
+    nested!(cpu, 0x0604_6284, super::hits::hit_init(cpu, o + BOXES));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + BEHAVIOUR, ROUTE_EXEC);
+    cpu.write32(o + FLAGS, PLATFORM_FLAGS);
+    cpu.write8(o + NUMBER, n as u8);
+    let n = cpu.read8(o + NUMBER) as i8 as i32;
+    cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), o);
+    let stg03 = cpu.read8(super::globals::GAME_MODE) == STG03;
+    let (kind, colour) = PLATFORM_KINDS[stg03 as usize];
+    cpu.write8(o + KIND, kind);
+    let frame = if stg03 { 0 } else { (cpu.read16(d + D_KIND) & 1) as u8 };
+    cpu.write8(o + FRAME, frame);
+    let c = cpu.read16(colour);
+    cpu.write16(o + OWN_COLOUR, c);
+    let c = cpu.read16(o + OWN_COLOUR);
+    cpu.write16(o + COLOUR, c);
+    cpu.write32(o + LIFE, PLATFORM_LIFE);
+    match cpu.read16(d + D_BOXES) {
+        k @ 0..=4 => cpu.write32(o + BOXES, PLATFORM_BOXES[k as usize]),
+        NO_LIFE_BOXES => cpu.write32(o + LIFE, 0),
+        _ => {}
+    }
+    cpu.write8(o + SIDE, SIDE_3);
+    cpu.write8(o + TYPE, PLATFORM_TYPE);
+    cpu.write32(o + SCRIPT, script);
+    let direction = cpu.read16(d + D_DIRECTION);
+    cpu.write16(o + BASE_DIRECTION, direction);
+    let mirror = cpu.read8(d + D_MIRROR);
+    cpu.write8(o + MIRROR, mirror);
+    for k in 0..3 {
+        let v = cpu.read32(d + 4 * k);
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    cpu.write8(o + LIFT, GUN_LIFT);
+    let settings = cpu.read8(d + D_SETTINGS);
+    cpu.write8(o + SETTINGS, settings);
+    cpu.write16(f + TD_RATE, (settings & FIRE_EVERY) as i8 as u16);
+    cpu.write16(f + TD_ALT, 0);
+    let alone = (cpu.read16(d + D_KIND) as i16 > 1) as u16;
+    cpu.write16(f + TD_ONE, alone);
+    for (bit, (offsets, angles, colour)) in LAUNCHER_GROUPS.into_iter().enumerate() {
+        if cpu.read16(d + D_PARTS) & (1 << bit) == 0 {
+            continue;
+        }
+        for i in 0..GROUP_LAUNCHERS {
+            let angle = (cpu.read8(angles + i) as u16) << 8;
+            cpu.write16(f + TD_ANGLE, angle);
+            for k in 0..2 {
+                let v = cpu.read8(offsets + 2 * i + k) as i8 as i32 as u32;
+                cpu.write32(f + 4 * k, v);
+            }
+            let c = cpu.read16(d + colour);
+            cpu.write16(f + TD_COLOUR, c);
+            nested!(cpu, LAUNCHER_SET, launcher_set(cpu, f, o));
+        }
+    }
+    let n = cpu.read8(o + NUMBER);
+    cpu.write8(f + RD_NUMBER, n);
+    for (bit, (x, y)) in RIDERS.into_iter().enumerate() {
+        if cpu.read16(d + D_PARTS) & (0x10 << bit) != 0 {
+            cpu.write32(f, x as u32);
+            cpu.write32(f + 4, y as u32);
+            nested!(cpu, 0x0605_c760, rider_set(cpu, f, o));
+        }
+    }
+    o
+}
+
 /// A ground enemy that fires bursts: off its area (if its route says so) it ends; out of life it
-/// blows up (its pieces, its explosion; above difficulty 2 three parting shots); else along its
-/// route, while firing a burst of 5 bullets every 60 frames (from up to 20 pixels off, at speeds
-/// 1.25 to 1.75 along its angle), turning toward its route's direction (mirrored by its side; at
-/// most 0x1800 a frame, easing over 16 by 0x30), and noting in its route flags when it is hit.
+/// blows up (80 points to the player who hit it, its explosion; above difficulty 2 three parting
+/// shots); else along its route, while firing a burst of 5 bullets every 60 frames (from up to 20
+/// pixels off, at speeds 1.25 to 1.75 along its angle), turning toward its route's direction
+/// (mirrored by its side; at most 0x1800 a frame, easing over 16 by 0x30), and noting in its
+/// route flags when it is hit.
 const BURST_AREA: [u32; 4] = [0xff60_0000, 0x00a0_0000, 0xff30_0000, 0x00d0_0000];
 const BURST_EVERY: u16 = 60;
 const BURST_SPREAD: u32 = 0x14_0000;
@@ -2152,8 +2436,8 @@ const BURST_EASE: u32 = 16;
 const BURST_ACCEL: u32 = 0x30;
 const ROUTE_HIT: u16 = 1;
 const S_SPEED: u32 = 0x30;
-/// Not rewritten yet: the bursting enemy's pieces (with 0x50). Its explosion (below).
-const PIECES: u32 = 0x0605_61ac;
+/// Its points when it blows up; its explosion (below).
+const BURST_POINTS: u32 = 80;
 const BLOWN_UP_BURSTER: u32 = 0x0605_9fc4;
 const BULLET_SET: u32 = 0x0605_3db0;
 static BURSTER_TURN_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
@@ -2168,7 +2452,7 @@ pub fn burster_exec(cpu: &mut Cpu, o: u32) {
         }
     }
     if cpu.read32(o + LIFE) as i32 <= 0 {
-        cpu.call(PIECES, &[o, 0x50]);
+        nested!(cpu, 0x0605_61ac, super::hits::score_hit_by(cpu, o, BURST_POINTS));
         nested!(cpu, BLOWN_UP_BURSTER, blown_up_burster(cpu, o));
         cpu.write8(o + OBJ_MODE, ENDING);
         if cpu.read8(DIFFICULTY) as i8 > 2 {

@@ -47,7 +47,7 @@ const HISTORY_ENTRY: u32 = 16;
 
 /// The table of the game's states (a function each, called with the director).
 const STATES: u32 = 0x0607_23f8;
-/// SYS_WK's initialisation (not rewritten yet).
+/// SYS_WK's initialisation (sprites.rs's sprite_init).
 const SYS_WK_INIT: u32 = 0x0604_6264;
 
 /// The game's flags (globals::GAME_FLAGS): paused by player 1, by player 2, otherwise held (no
@@ -93,7 +93,7 @@ pub fn game_set(cpu: &mut Cpu) -> u32 {
         cpu.write32(counter, 0);
     }
     cpu.write32(ELAPSED, 1);
-    cpu.call(SYS_WK_INIT, &[game + MW]);
+    nested!(cpu, SYS_WK_INIT, super::sprites::sprite_init(cpu, game + MW));
     let game = cpu.read32(GAME);
     cpu.write16(game + STATE, 0);
     cpu.write32(game + X, 0);
@@ -225,6 +225,21 @@ pub fn mode_done(cpu: &mut Cpu) {
     }
     loop {
         cpu.wait(0x0604_0c72, 1);
+    }
+}
+
+/// The current mode is skipped (its code says so). With no director the game stops here.
+const MODE_SKIPPED: u8 = 4;
+
+pub fn mode_skipped(cpu: &mut Cpu) {
+    let game = cpu.read32(GAME);
+    if game != 0 {
+        let f = cpu.read8(game + FLAGS);
+        cpu.write8(game + FLAGS, f | MODE_SKIPPED);
+        return;
+    }
+    loop {
+        cpu.wait(0x0604_0c9a, 1);
     }
 }
 

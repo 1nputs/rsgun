@@ -131,6 +131,35 @@ pub fn obj_set_after(cpu: &mut Cpu, area: u32, blocks: u32, exec: u32, after: u3
     obj
 }
 
+/// obj_set as it links the object in before `before` (in its list) rather than at the end.
+pub fn obj_set_before(cpu: &mut Cpu, area: u32, blocks: u32, exec: u32, before: u32) -> u32 {
+    let (area, blocks) = (area as i8 as i32 as u32, blocks as i8 as i32 as u32);
+    let obj = nested!(cpu, 0x0600_6aac, find_free(cpu, area, blocks));
+    if obj == 0 {
+        return 0;
+    }
+    let prev = cpu.read32(before + BEFORE);
+    cpu.write8(obj + SIZE, blocks as u8);
+    cpu.write8(obj + AREA, area as u8);
+    cpu.write8(obj + POST, 0);
+    cpu.write8(obj + MODE, 0);
+    cpu.write32(obj + EXEC, exec);
+    cpu.write32(obj + BEFORE, prev);
+    cpu.write32(obj + NEXT, before);
+    if cpu.read32(head(area)) == 0 {
+        cpu.write32(head(area), obj);
+    }
+    if cpu.read32(obj + NEXT) == 0 {
+        cpu.write32(tail(area), obj);
+    }
+    cpu.write32(before + BEFORE, obj);
+    match prev {
+        0 => cpu.write32(head(area), obj),
+        _ => cpu.write32(prev + NEXT, obj),
+    }
+    obj
+}
+
 /// Takes `obj` out of its list and frees its blocks.
 pub fn obj_free(cpu: &mut Cpu, obj: u32) {
     let (before, next) = (cpu.read32(obj + BEFORE), cpu.read32(obj + NEXT));

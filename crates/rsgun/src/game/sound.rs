@@ -350,7 +350,7 @@ pub fn se_control(cpu: &mut Cpu, se: u32) -> u32 {
     for c in first..=last {
         let m = manager(cpu);
         if cpu.read8(m + BUSY + c as u32) == 0 {
-            cpu.call(SEQ_STATUS, &[status, c as u8 as u32]);
+            nested!(cpu, SEQ_STATUS, seq_status(cpu, status, c as u8 as u32));
             if cpu.read16(status) == 0 {
                 return c as u32;
             }

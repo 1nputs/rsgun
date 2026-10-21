@@ -35,7 +35,7 @@ const CHAR_BASE: u32 = 0x0607_41fc;
 const FLASH_COLOUR: u16 = 0xe0;
 /// A mask of actor flags: an actor with any of them (bit 31 aside) ends at once (main_loop.rs
 /// keeps it a frame).
-const END_FLAGS: u32 = 0x0607_405c;
+pub const END_FLAGS: u32 = 0x0607_405c;
 /// end_by_flags's SH-2 entry (for nested!).
 const END_BY_FLAGS: u32 = 0x0604_6138;
 /// The draw's SH-2 entry (for nested!).
@@ -372,6 +372,44 @@ pub fn puff_at(cpu: &mut Cpu, p: u32) {
         let flip = nested!(cpu, 0x0604_5d90, super::math::random(cpu, 0)) & 0x30;
         let flags = cpu.read32(e + FLAGS) | flip;
         cpu.write32(e + FLAGS, flags);
+    }
+}
+
+/// Still puffs (puff_at) at `count` points (x, y, z each, at `points`) about `centre` (x, y, z),
+/// turned by `angle` (about z).
+const F_PLACE: u32 = 0;
+const F_POINTS: u32 = 0xc;
+const F_COUNT: u32 = 0x10;
+const F_CENTRE: u32 = 0x14;
+const F_SIN: u32 = 0x20;
+
+pub fn puffs_around(cpu: &mut Cpu, centre: u32, angle: u32, points: u32, count: u32) {
+    let f = cpu.stack();
+    cpu.write32(f + F_POINTS, points);
+    cpu.write32(f + F_COUNT, count);
+    for k in 0..3 {
+        let v = cpu.read32(centre + 4 * k);
+        cpu.write32(f + F_CENTRE + 4 * k, v);
+    }
+    let angle = angle as i16 as i32 as u32;
+    let sin = cpu.call(SL_SIN, &[angle]);
+    cpu.write32(f + F_SIN, sin);
+    let cos = cpu.call(SL_COS, &[angle]);
+    let mul = |cpu: &mut Cpu, a, b| nested!(cpu, 0x0606_e26c, super::math::sl_mul_fx(cpu, a, b));
+    let mut i = 0;
+    while i < count as i32 {
+        let p = points + 12 * i as u32;
+        let (px, py) = (cpu.read32(p), cpu.read32(p + 4));
+        let (a, b) = (mul(cpu, cos, px), mul(cpu, sin, py));
+        let x = a.wrapping_add(cpu.read32(f + F_CENTRE)).wrapping_sub(b);
+        cpu.write32(f + F_PLACE, x);
+        let (a, b) = (mul(cpu, sin, px), mul(cpu, cos, py));
+        let y = a.wrapping_add(cpu.read32(f + F_CENTRE + 4)).wrapping_add(b);
+        cpu.write32(f + F_PLACE + 4, y);
+        let z = cpu.read32(p + 8).wrapping_add(cpu.read32(f + F_CENTRE + 8));
+        cpu.write32(f + F_PLACE + 8, z);
+        nested!(cpu, 0x0606_28cc, puff_at(cpu, f + F_PLACE));
+        i += 1;
     }
 }
 
@@ -809,6 +847,16 @@ pub fn fill_bytes(cpu: &mut Cpu, at: u32, v: u32, n: u32) {
     let mut i: u8 = 0;
     while (i as i32) < n {
         cpu.write8(at + i as u32, v as u8);
+        i = i.wrapping_add(1);
+    }
+}
+
+/// `n` words from `at` set to `v` (the count a byte, as the SH-2 code keeps it).
+pub fn fill_words(cpu: &mut Cpu, at: u32, v: u32, n: u32) {
+    let n = n as i16 as i32;
+    let mut i: u8 = 0;
+    while (i as i32) < n {
+        cpu.write16(at + 2 * i as u32, v as u16);
         i = i.wrapping_add(1);
     }
 }

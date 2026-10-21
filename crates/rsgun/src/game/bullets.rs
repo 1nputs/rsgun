@@ -1657,7 +1657,8 @@ pub fn burst_star_draw(cpu: &mut Cpu, s: u32) {
 
 /// The heavy bullet: a shootable enemy (2 life) flying straight at its speed along its angle,
 /// leaving a puff of smoke as it is fired (from the description: at random, 8 units nearer).
-/// On the ground, or hit, it bursts (a puff thrown back); off screen it ends.
+/// On the ground, or hit, it bursts (a puff thrown back); off screen it ends (its behaviour is
+/// shootable_bullet).
 const HEAVY_EXEC: u32 = 0x0605_3f70;
 const HEAVY_FRAME: u8 = 0x10;
 const HEAVY_BOXES: u32 = 0x0607_2eec;
@@ -1667,9 +1668,6 @@ const HEAVY_PUFF: (u32, u16) = (0x0607_310c, 0xd0);
 const HEAVY_PUFF_NEARER: u32 = 0x8_0000;
 const HEAVY_PUFF_SCALE: u32 = 0x5000;
 const HEAVY_PUFF_SPEED: u32 = 0xffff_4000;
-const HEAVY_BURST: (u32, u16) = (0x0607_30b0, 0x90);
-const HEAVY_BURST_SCALES: [u32; 2] = [0x1_0000, 0x8000];
-const HEAVY_BURST_SPEED: u32 = 0xffff_0000;
 const HEAVY_PUFF_ATTR: u32 = 0x8000;
 
 /// Makes a heavy bullet from the shot description at `d` (its speed at +0x30). It, or 0.
@@ -1728,39 +1726,4 @@ pub fn heavy_set(cpu: &mut Cpu, d: u32) -> u32 {
 pub fn heavy_bullet(cpu: &mut Cpu, d: u32) -> u32 {
     cpu.write32(d + S_SPEED, HEAVY_SPEED);
     nested!(cpu, 0x0605_4050, heavy_set(cpu, d))
-}
-
-/// The heavy bullet's behaviour (see heavy_set).
-pub fn heavy_exec(cpu: &mut Cpu, o: u32) {
-    let f = cpu.stack();
-    let (x, y) = (cpu.read32(o + POSITION), cpu.read32(o + POSITION + 4));
-    if nested!(cpu, 0x0605_ef90, bg::map_hit(cpu, x, y)) != 0 {
-        cpu.write16(o + HIT_FLAGS, HIT_SOMETHING);
-    }
-    let flies = cpu.read16(o + HIT_FLAGS) & HIT_SOMETHING == 0
-        && nested!(cpu, 0x0605_6a24, aim::off_screen(cpu, o + SPRITE)) as u8 == 0
-        && cpu.read32(o + LIFE) as i32 > 0;
-    if flies {
-        for (k, field) in [MS_VX, MS_VY].into_iter().enumerate() {
-            let p = o + POSITION + 4 * k as u32;
-            let v = cpu.read32(p).wrapping_add(cpu.read32(o + field));
-            cpu.write32(p, v);
-        }
-        return;
-    }
-    if cpu.read16(o + HIT_FLAGS) & HIT_OR_GROUND != 0 {
-        cpu.write32(f + E_SCRIPT, HEAVY_BURST.0);
-        cpu.write16(f + E_COLOUR, HEAVY_BURST.1);
-        for k in 0..3 {
-            let v = cpu.read32(o + POSITION + 4 * k);
-            cpu.write32(f + E_POSITION + 4 * k, v);
-        }
-        let a = cpu.read16(o + ANGLE).wrapping_add(0x8000);
-        cpu.write16(f + E_ANGLE, a);
-        cpu.write32(f + E_SPEED, HEAVY_BURST_SPEED);
-        cpu.write32(f + E_SCALES, HEAVY_BURST_SCALES[0]);
-        cpu.write32(f + E_SCALES + 4, HEAVY_BURST_SCALES[1]);
-        nested!(cpu, 0x0605_7454, actors::drift_effect(cpu, f));
-    }
-    cpu.write8(o + OBJ_MODE, ENDING);
 }

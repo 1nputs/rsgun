@@ -123,7 +123,7 @@ const GROUND_SAFE: u32 = 0x0600_edbc;
 const BUTTON_A: u16 = 0x400;
 const BUTTON_B: u16 = 0x100;
 const BUTTON_C: u16 = 0x200;
-const SL_TURN: u32 = 0x0606_4eac;
+const TURN_POINT: u32 = 0x0606_4eac;
 
 fn random(cpu: &mut Cpu, n: u32) -> u32 {
     nested!(cpu, 0x0604_5d90, math::random(cpu, n))
@@ -274,7 +274,7 @@ fn scrape(cpu: &mut Cpu, p: u32) {
     let side = if random(cpu, 0) as i32 > 0 { 0x4800 } else { 0xb800 };
     let a = cpu.read16(f + 0x18).wrapping_add(side);
     cpu.write16(f + 0x18, a);
-    cpu.call(SL_TURN, &[f]);
+    nested!(cpu, TURN_POINT, super::math::turn_point(cpu, f));
     let (vx, vy) = (cpu.read32(f), cpu.read32(f + 4));
     cpu.write32(spark + 0x44, vx);
     cpu.write32(spark + 0x48, vy);
@@ -684,7 +684,7 @@ pub fn weapon_ab(cpu: &mut Cpu, p: u32) {
             wait(cpu, p, 0, 2);
         }
         2 => {
-            cpu.call(SHOT_AB, &[p]);
+            nested!(cpu, SHOT_AB, super::shots::shot_ab_set(cpu, p));
             set_phase(cpu, p, 3);
         }
         _ => {}
@@ -715,7 +715,7 @@ pub fn weapon_ac(cpu: &mut Cpu, p: u32) {
             if limits & LIMIT_EACH != 0 && cpu.read8(p + ALIVE_AC) as i8 as i32 >= most {
                 return;
             }
-            cpu.call(SHOT_AC, &[p]);
+            nested!(cpu, SHOT_AC, super::shots::shot_ac_set(cpu, p));
             nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 3));
             fired(cpu, p);
         }
@@ -752,7 +752,7 @@ pub fn weapon_bc(cpu: &mut Cpu, p: u32) {
             if cpu.read8(p + ALIVE_BC) as i8 > 0 {
                 return;
             }
-            cpu.call(SHOT_BC, &[p]);
+            nested!(cpu, SHOT_BC, super::shots::shot_bc_set(cpu, p));
             nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 5));
             fired(cpu, p);
         }
@@ -779,7 +779,7 @@ pub fn sword_state(cpu: &mut Cpu, p: u32) {
             wait(cpu, p, 0, 2);
         }
         2 => {
-            if cpu.call(SWORD_SET, &[p]) == 0 {
+            if nested!(cpu, SWORD_SET, super::shots::shot_sword_set(cpu, p)) == 0 {
                 return;
             }
             nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 9));

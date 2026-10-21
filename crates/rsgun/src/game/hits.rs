@@ -272,7 +272,7 @@ const POINT_CHAR: u16 = 0x90;
 fn draw_hits(cpu: &mut Cpu, hits: u32) {
     let corners = cpu.stack();
     let sprite = corners + SPRITE;
-    cpu.call(SPRITE_INIT, &[sprite]);
+    nested!(cpu, SPRITE_INIT, super::sprites::sprite_init(cpu, sprite));
     let flags = cpu.read32(sprite + SPRITE_FLAGS);
     cpu.write32(sprite + SPRITE_FLAGS, flags | 2);
     cpu.write8(sprite + SPRITE_PRIORITY, 0x7f);
@@ -293,7 +293,7 @@ fn draw_hits(cpu: &mut Cpu, hits: u32) {
                 cpu.write16(corners + 2 * k as u32, v as u16);
             }
             cpu.write32(sprite + SPRITE_CORNERS, corners);
-            cpu.call(SPRITE_DRAW, &[sprite]);
+            nested!(cpu, SPRITE_DRAW, super::sprites::draw(cpu, sprite));
             i += 1;
         }
     }
@@ -314,7 +314,7 @@ fn draw_hits(cpu: &mut Cpu, hits: u32) {
             cpu.write16(corners + 2 * k, 0);
         }
         cpu.write32(sprite + SPRITE_CORNERS, corners);
-        cpu.call(SPRITE_DRAW, &[sprite]);
+        nested!(cpu, SPRITE_DRAW, super::sprites::draw(cpu, sprite));
         i += 1;
     }
 }
@@ -430,6 +430,20 @@ const WEAPON_HITS: u32 = 0x0607_40a0;
 const AC_TIMER: u32 = 0x0607_40b0;
 const AC_TIME: u16 = 300;
 
+/// `points` scored for `target` by the player whose shot hit it last (as weapon_hit scores a kill:
+/// the shot's number and weapon), unless that was of side 3.
+const SIDE_3: u8 = 3;
+
+pub fn score_hit_by(cpu: &mut Cpu, target: u32, points: u32) {
+    let shot = cpu.read32(target + HIT_OTHER);
+    if cpu.read8(shot + SIDE) == SIDE_3 {
+        return;
+    }
+    let weapon = cpu.read8(shot + TYPE) as i8 as i32 as u32;
+    let p = cpu.read8(shot + NUMBER) as i8 as i32 as u32;
+    nested!(cpu, SCORE_KILL, score_kill(cpu, p, weapon, target, points));
+}
+
 /// A shot of the players' hits `target`: the damage done; a kill scores; then by the shot's weapon
 /// (its type, 7-16: A, B, C's two, A+B, A+C, B+C, one that counts nothing, A+B+C's two, as the
 /// experience they add tells) points, the weapons' experience and the hit counted.
@@ -508,7 +522,7 @@ const TRIPLE_BONUS: u32 = 10000;
 const CHAIN_SCORE_CAP: u32 = 10000;
 const CHAIN_BONUS_CAP: u32 = 100000;
 /// A score shown where it was made (an object, from a struct: x, y, z, the score at +0x14, what it
-/// is at +0x1a (POPUP_*), the player at +0x1e, the object at +0x3c; not rewritten yet).
+/// is at +0x1a (POPUP_*), the player at +0x1e, the object at +0x3c: effects.rs's popup).
 const POPUP: u32 = 0x0604_ea48;
 const POPUP_SCORE: u32 = 0x14;
 const POPUP_WHAT: u32 = 0x1a;
@@ -531,7 +545,7 @@ fn popup(cpu: &mut Cpu, obj: u32, score: u32, what: u16, p: i32) {
     cpu.write16(s + POPUP_WHAT, what);
     cpu.write8(s + POPUP_PLAYER, p as u8);
     cpu.write32(s + POPUP_OBJ, obj);
-    cpu.call(POPUP, &[s]);
+    nested!(cpu, POPUP, super::effects::popup(cpu, s));
 }
 
 /// Player `p` scores `points` with `weapon` for killing `target` (0: points not from a kill, shown
@@ -684,12 +698,12 @@ const SPARK_POINTS: u32 = 3;
 /// A spark (made from a struct in the frame: x, y, z, two scales, a kind, an angle, the player, the
 /// first character, its frames, and more after), its kind, its frames (5 at random, and 15), and
 /// the spark maker; then how it flies: an angle from the struck object's push, turned a quarter
-/// either way (the vector turned by SL_ROTATE, its angle from SL_ATAN; as far as can be told).
+/// either way (the vector turned by TURN_POINT, its angle from SL_ATAN; as far as can be told).
 const SPARK_SET: u32 = 0x0604_e6d8;
 const SPARK_KIND: u32 = 0x2b;
 const SPARK_FRAMES: u16 = 15;
 const SL_ATAN: u32 = 0x0606_780c;
-const SL_ROTATE: u32 = 0x0606_4eac;
+const TURN_POINT: u32 = 0x0606_4eac;
 // (register_boxes calls it with the SH-2 code's return addresses: its push of PR, made before it
 // calls SGL's cosine, is read later as an unset field.)
 /// The effect's struct (in the frame): x, y, z, its scales (16.16), its kind, its angle (a word),
@@ -779,7 +793,7 @@ pub fn sparks(cpu: &mut Cpu, a: u32, b: u32, a_box: u32, b_box: u32) {
     cpu.write16(s + FX_CHAR, ch);
     let n = cpu.read8(a + NUMBER);
     cpu.write8(s + FX_PLAYER, n);
-    let spark = cpu.call(SPARK_SET, &[s]);
+    let spark = nested!(cpu, SPARK_SET, super::effects::polygon_set(cpu, s));
     if spark == 0 {
         return;
     }
@@ -805,7 +819,7 @@ pub fn sparks(cpu: &mut Cpu, a: u32, b: u32, a_box: u32, b_box: u32) {
     let side = nested!(cpu, 0x0604_5d90, math::random(cpu, 0)) as i32;
     angle = cpu.read16(s + FX_ANGLE).wrapping_add(if side > 0 { 0x4800 } else { 0xb800 });
     cpu.write16(s + FX_ANGLE, angle);
-    cpu.call(SL_ROTATE, &[s]);
+    nested!(cpu, TURN_POINT, math::turn_point(cpu, s));
     let x = cpu.read32(s + FX_X);
     cpu.write32(spark + SPARK_SPEED, x);
     let y = cpu.read32(s + FX_Y);
@@ -858,7 +872,7 @@ pub fn absorb(cpu: &mut Cpu, a: u32, b: u32) {
     cpu.write16(s + FX_CHAR, ch);
     let n = cpu.read8(b + NUMBER);
     cpu.write8(s + FX_PLAYER, n);
-    let flash = cpu.call(FLASH_SET, &[s]);
+    let flash = nested!(cpu, FLASH_SET, super::effects::effect_set(cpu, s));
     if flash != 0 {
         cpu.write8(flash + OBJ_33, FLASH_33);
     }
@@ -1024,7 +1038,7 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
             let sy = cpu.read32(obj + OBJ_SCALE_Y);
             cpu.write32(t + 0x10, sy);
             turn_struct(cpu, obj, t);
-            cpu.call_returning(0x0604_53c8, SL_ROTATE, &[t]);
+            cpu.call_returning(0x0604_53c8, TURN_POINT, &[t]);
             (cpu.read32(t), cpu.read32(t + 4))
         };
         let e = entry(cpu);
@@ -1053,7 +1067,7 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
                 cpu.write32(t, d as u32);
                 cpu.write32(t + 8, d as u32);
                 cpu.write32(t + 4, 0);
-                cpu.call_returning(0x0604_54ee, SL_ROTATE, &[t]);
+                cpu.call_returning(0x0604_54ee, TURN_POINT, &[t]);
                 let a = (cpu.read32(t) as i32).wrapping_abs().wrapping_sub(cpu.read32(t + 8) as i32);
                 cpu.write32(t, a as u32);
                 let b = (cpu.read32(t + 4) as i32).wrapping_abs();
@@ -1063,7 +1077,7 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
                 cpu.write32(t + 4, d as u32);
                 cpu.write32(t + 8, d as u32);
                 cpu.write32(t, 0);
-                cpu.call_returning(0x0604_5534, SL_ROTATE, &[t]);
+                cpu.call_returning(0x0604_5534, TURN_POINT, &[t]);
                 let a = (cpu.read32(t) as i32).wrapping_abs();
                 cpu.write32(t, a as u32);
                 let b = (cpu.read32(t + 4) as i32).wrapping_abs().wrapping_sub(cpu.read32(t + 8) as i32);

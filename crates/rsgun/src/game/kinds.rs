@@ -363,6 +363,24 @@ pub fn kinds_exec(cpu: &mut Cpu, o: u32) {
 }
 
 /// A loader run (its size taken off LOAD_AT) unless its flag says it ran.
+/// The demos' file loaded (a loader, at `p`; kept: its size): DEMOCOM.BIN, where it is, its three
+/// parts' places, a byte cleared (the demos' code reads them; not rewritten yet).
+const DEMOCOM: u32 = 0x0600_904c;
+const DEMO_FILE: u32 = 0x0607_4014;
+const DEMO_PARTS: [u32; 3] = [0x0607_400c, 0x0607_4010, 0x0607_4008];
+const DEMO_BYTE: u32 = 0x0607_5b98;
+
+pub fn demo_load(cpu: &mut Cpu, p: u32) -> u32 {
+    let size = nested!(cpu, 0x0600_5f10, files::read_file(cpu, DEMOCOM, p));
+    cpu.write32(DEMO_FILE, p);
+    for (k, at) in DEMO_PARTS.into_iter().enumerate() {
+        let v = cpu.read32(p + 4 * k as u32).wrapping_add(p);
+        cpu.write32(at, v);
+    }
+    cpu.write8(DEMO_BYTE, 0);
+    size
+}
+
 fn run_loader(cpu: &mut Cpu, loader: u32, flag: u32) {
     let game = cpu.read32(GAME);
     if cpu.read32(game + LOADED) & flag != 0 {
