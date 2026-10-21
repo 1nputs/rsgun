@@ -199,9 +199,8 @@ pub fn ribbon_draw(cpu: &mut Cpu, s: u32) {
 }
 
 /// The ribbon ended: it fades (FADE), its points pushed back, and it bursts (bullets.rs's burst,
-/// at its head, the ball in its second colours) or ends the other way (not rewritten yet).
+/// at its head, the ball in its second colours) or flashes (ribbon_flash).
 const BURST: u32 = 0x0605_5310;
-const OTHER_END: u32 = 0x0606_4494;
 const B_NUMBER: u32 = 0x1e;
 const B_FIELDS: [(u32, u16); 4] = [(0x2c, 0x200), (0x2e, 0x60), (0x38, 0xfffa), (0x3a, 0x101)];
 
@@ -213,7 +212,7 @@ pub fn ribbon_end(cpu: &mut Cpu, o: u32) {
         cpu.write32(o + POINTS + POINT_SIZE * k + POINT_Z, ENDED_Z);
     }
     if cpu.read8(o + R_FLAGS) & ENDS_IN_BURST == 0 {
-        cpu.call(OTHER_END, &[o]);
+        nested!(cpu, 0x0606_4494, ribbon_flash(cpu, o));
         return;
     }
     for k in 0..3 {
@@ -228,6 +227,51 @@ pub fn ribbon_end(cpu: &mut Cpu, o: u32) {
     cpu.write32(f + 0x30, 0);
     cpu.write32(f + 0x34, 0);
     nested!(cpu, BURST, super::bullets::burst_set(cpu, f));
+}
+
+/// The flash at the ribbon's head as it ends: an effect (kind 0, frame 1, in its colours, for 32
+/// frames) growing from nothing by 1/16 a frame. The struct's fields past those set are what the
+/// stack held.
+const FL_FLAGS: u32 = 0x14;
+const FL_ANGLE: u32 = 0x18;
+const FL_KIND: u32 = 0x1c;
+const FL_FRAME: u32 = 0x1d;
+const FL_PLAYER: u32 = 0x1e;
+const FL_COLOUR: u32 = 0x20;
+const FL_FRAMES: u32 = 0x24;
+const FL_LIFT: u32 = 0x26;
+const FLASH_FRAMES: u16 = 32;
+const FLASH_LIFT: u8 = 16;
+const FX_SCALES: u32 = 0x20;
+const FX_SCALE_SPEED: u32 = 0x54;
+const FX_LIFT: u32 = 0x33;
+const FLASH_GROWTH: u32 = 0x1000;
+const FLASH_SINK: u8 = 0xf8;
+
+pub fn ribbon_flash(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    for k in 0..3 {
+        let v = cpu.read32(o + POSITION + 4 * k);
+        cpu.write32(f + 4 * k, v);
+    }
+    cpu.write32(f + FL_FLAGS, 0);
+    cpu.write16(f + FL_ANGLE, 0);
+    cpu.write16(f + FL_FRAMES, FLASH_FRAMES);
+    cpu.write8(f + FL_LIFT, FLASH_LIFT);
+    cpu.write8(f + FL_KIND, 0);
+    cpu.write8(f + FL_FRAME, 1);
+    let colour = cpu.read16(o + COLOUR_BASE);
+    cpu.write16(f + FL_COLOUR, colour);
+    let n = cpu.read8(o + NUMBER);
+    cpu.write8(f + FL_PLAYER, n);
+    let e = nested!(cpu, 0x0604_e1cc, super::effects::effect_set(cpu, f));
+    if e != 0 {
+        cpu.write32(e + FX_SCALES, 0);
+        cpu.write32(e + FX_SCALES + 4, 0);
+        cpu.write32(e + FX_SCALE_SPEED, FLASH_GROWTH);
+        cpu.write32(e + FX_SCALE_SPEED + 4, FLASH_GROWTH);
+        cpu.write8(e + FX_LIFT, FLASH_SINK);
+    }
 }
 
 /// The trail's place `k` (16.16).

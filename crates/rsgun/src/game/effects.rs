@@ -834,3 +834,80 @@ pub fn digit_exec(cpu: &mut Cpu, obj: u32) {
         }
     }
 }
+
+/// A flare: a sprite of kind 0 that follows a place (if it has one), growing for 16 frames and
+/// shrinking for 16 more (0x600 a frame), its frame flickering between 0xd3 and 0xd5 with the
+/// game frames; it ends then, or once its player's actor ends.
+const FL_FOLLOWS: u32 = 0x3c;
+const FL_AGE: u32 = 0x40;
+const FL_LAST_AGE: i8 = 32;
+const FL_GROWING: i8 = 15;
+const FL_GROWTH: u32 = 0x600;
+const FL_FRAMES: [u8; 2] = [0xd5, 0xd3];
+const PLAYER_ACTORS: u32 = 0x0607_40f0;
+const PLAYER_LIVES: i8 = 0x6f;
+
+pub fn flare_exec(cpu: &mut Cpu, o: u32) {
+    let age = cpu.read8(o + FL_AGE);
+    cpu.write8(o + FL_AGE, age.wrapping_add(1));
+    if age as i8 == FL_LAST_AGE {
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    let n = cpu.read8(o + A_PLAYER) as i8 as i32;
+    let player = cpu.read32(PLAYER_ACTORS.wrapping_add((4 * n) as u32));
+    if cpu.read8(player + OBJ_MODE) as i8 > PLAYER_LIVES {
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    let at = cpu.read32(o + FL_FOLLOWS);
+    if at != 0 {
+        for k in 0..3 {
+            let v = cpu.read32(at + 4 * k);
+            cpu.write32(o + A_POSITION + 4 * k, v);
+        }
+    }
+    let d = if cpu.read8(o + FL_AGE) as i8 > FL_GROWING { FL_GROWTH.wrapping_neg() } else { FL_GROWTH };
+    for k in 0..2 {
+        let v = cpu.read32(o + A_SCALES + 4 * k).wrapping_add(d);
+        cpu.write32(o + A_SCALES + 4 * k, v);
+    }
+    let frame = FL_FRAMES[(cpu.read32(super::globals::GAME_FRAMES) & 1) as usize];
+    cpu.write8(o + A_FRAME, frame);
+}
+
+/// Makes a flare from the struct at `d`: its place (x, y, z), its player (a byte, +0x1e), its
+/// colour (a word, +0x20) and the place it follows (+0x3c). It, or 0.
+const FLARE_SIZE: u32 = 0x44;
+const FLARE_LIST: u32 = 2;
+const FLARE_EXEC: u32 = 0x0606_4358;
+const FLARE_LIFT: u8 = 8;
+const FLARE_SCALE: u32 = 0x2000;
+
+pub fn flare_set(cpu: &mut Cpu, d: u32) -> u32 {
+    let blocks = nested!(cpu, OBJ_SIZE, objects::obj_size(cpu, FLARE_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, OBJ_SET, objects::obj_set(cpu, FLARE_LIST, blocks, PLAIN_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, SPRITE_INIT, sprites::sprite_init(cpu, o + 0x10));
+    cpu.write32(o + A_BEHAVIOUR, FLARE_EXEC);
+    let n = cpu.read8(d + PLAYER);
+    cpu.write8(o + A_PLAYER, n);
+    cpu.write8(o + A_33, FLARE_LIFT);
+    let colour = cpu.read16(d + COLOUR);
+    cpu.write16(o + A_OWN_COLOUR, colour);
+    cpu.write16(o + A_COLOUR, colour);
+    cpu.write8(o + A_FRAME, FL_FRAMES[0]);
+    cpu.write8(o + A_KIND, 0);
+    let at = cpu.read32(d + RELATIVE_3C);
+    cpu.write32(o + FL_FOLLOWS, at);
+    for k in 0..3 {
+        let v = cpu.read32(d + X + 4 * k);
+        cpu.write32(o + A_POSITION + 4 * k, v);
+    }
+    cpu.write32(o + A_SCALES, FLARE_SCALE);
+    cpu.write32(o + A_SCALES + 4, FLARE_SCALE);
+    cpu.write8(o + FL_AGE, 0);
+    o
+}

@@ -2992,3 +2992,118 @@ fn blade(cpu: &mut Cpu, s: u32, f: u32, i: i32, base: u32, tip: u32, fading: boo
         cpu.write16(at + 2, py);
     }
 }
+
+/// The hyper sword's pieces (its behaviour makes them): a shot that drifts to a stop (its speed
+/// losing 1/32 a frame), spins and shimmers, its power settling at 100, for 60-79 frames; it ends
+/// in a spark on what it hits or (after its first frame) on the ground. A sprite (kind 3, frame 25
+/// or 26) or, with the polygon flag, a quad of random corners. Its fields: its velocity (x, y), its
+/// started flag and phase (bytes), its frames left, its spin, its corners (four, x and y words).
+const PIECE_VELOCITY: u32 = 0x5c;
+const PIECE_STARTED: u32 = 0x6c;
+const PIECE_LEFT: u32 = 0x6e;
+const PIECE_SPIN: u32 = 0x76;
+const PIECE_CORNERS: u32 = 0x78;
+const S_CORNERS: u32 = 0x34;
+const PIECE_POLYGON: u32 = 2;
+const PIECE_BOXES: u32 = 0x0607_28a4;
+const PIECE_SHIMMER: u32 = 16;
+const PIECE_POWER: u32 = 100;
+const PIECE_POWER_STEP: u32 = 10;
+
+fn random(cpu: &mut Cpu, n: u32) -> u32 {
+    nested!(cpu, 0x0604_5d90, math::random(cpu, n))
+}
+
+pub fn hyper_piece_exec(cpu: &mut Cpu, o: u32) {
+    match cpu.read8(o + PHASE_LOW) as i8 {
+        0 => hyper_piece_start(cpu, o),
+        1 => {}
+        2 => {
+            end(cpu, o);
+            cpu.write16(o + PHASE, 3);
+            return;
+        }
+        _ => return,
+    }
+    let hit = cpu.read16(o + HIT_FLAGS) & HIT_SOMETHING != 0;
+    let gone = if cpu.read8(o + PIECE_STARTED) == 0 {
+        if !hit {
+            cpu.write8(o + PIECE_STARTED, 1);
+        }
+        hit
+    } else {
+        hit || {
+            let (x, y) = (cpu.read32(o + POSITION), cpu.read32(o + POSITION + 4));
+            nested!(cpu, 0x0605_ef90, bg::map_hit(cpu, x, y)) != 0
+        }
+    };
+    if gone {
+        nested!(cpu, 0x0604_8278, shot_spark(cpu, o));
+        end(cpu, o);
+        return;
+    }
+    for k in 0..2 {
+        let v = cpu.read32(o + PIECE_VELOCITY + 4 * k) as i32;
+        cpu.write32(o + PIECE_VELOCITY + 4 * k, v.wrapping_add(v.wrapping_neg() / 32) as u32);
+    }
+    let r = (random(cpu, PIECE_SHIMMER) as i32).wrapping_abs() as u16;
+    let colour = cpu.read16(o + OWN_COLOUR).wrapping_add(r);
+    cpu.write16(o + COLOUR, colour);
+    for k in 0..2 {
+        let v = cpu.read32(o + POSITION + 4 * k).wrapping_add(cpu.read32(o + PIECE_VELOCITY + 4 * k));
+        cpu.write32(o + POSITION + 4 * k, v);
+    }
+    let a = cpu.read16(o + ANGLE).wrapping_add(cpu.read16(o + PIECE_SPIN));
+    cpu.write16(o + ANGLE, a);
+    let power = cpu.read16(o + POWER) as i16 as i32 as u32;
+    let power = nested!(cpu, 0x0604_6168, actors::approach(cpu, power, PIECE_POWER, PIECE_POWER_STEP));
+    cpu.write16(o + POWER, power as u16);
+    let left = cpu.read16(o + PIECE_LEFT).wrapping_sub(1);
+    cpu.write16(o + PIECE_LEFT, left);
+    if left == 0 {
+        cpu.write16(o + PHASE, 2);
+        end(cpu, o);
+        cpu.write16(o + PHASE, 3);
+    }
+}
+
+fn hyper_piece_start(cpu: &mut Cpu, o: u32) {
+    cpu.write8(o + LIFT, 0);
+    let colour = cpu.read16(KIND_COLOURS).wrapping_add(0x20);
+    cpu.write16(o + OWN_COLOUR, colour);
+    cpu.write16(o + COLOUR, colour);
+    cpu.write8(o + SIDE, 0);
+    cpu.write8(o + TYPE, 16);
+    cpu.write32(o + BOXES, PIECE_BOXES);
+    if cpu.read32(o + FLAGS) & PIECE_POLYGON != 0 {
+        let c = o + PIECE_CORNERS;
+        cpu.write32(o + S_CORNERS, c);
+        for (k, d) in [-8i32, -8, 8, -8, 8, 8].into_iter().enumerate() {
+            let v = (random(cpu, 8) as i32).wrapping_add(d);
+            cpu.write16(c + 2 * k as u32, v as u16);
+        }
+        if (random(cpu, 0) as i32) < 0 {
+            for (k, d) in [-8i32, 8].into_iter().enumerate() {
+                let v = (random(cpu, 8) as i32).wrapping_add(d);
+                cpu.write16(c + 12 + 2 * k as u32, v as u16);
+            }
+        } else {
+            for k in 0..2 {
+                let v = cpu.read16(c + 8 + 2 * k);
+                cpu.write16(c + 12 + 2 * k, v);
+            }
+        }
+    } else {
+        cpu.write8(o + KIND, 3);
+        let frame = if (random(cpu, 0) as i32) < 0 { 26 } else { 25 };
+        cpu.write8(o + FRAME, frame);
+    }
+    let scale = random(cpu, 0x4000).wrapping_add(0x1_2000);
+    cpu.write32(o + SCALES + 4, scale);
+    cpu.write32(o + SCALES, scale);
+    let spin = random(cpu, 0x800);
+    cpu.write16(o + PIECE_SPIN, spin as u16);
+    let left = random(cpu, 20).wrapping_add(60);
+    cpu.write16(o + PIECE_LEFT, left as u16);
+    cpu.write16(o + PHASE, 1);
+}

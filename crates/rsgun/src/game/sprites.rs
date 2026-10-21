@@ -160,6 +160,124 @@ pub fn draw_sprite(cpu: &mut Cpu, s: u32) {
     cpu.write32(s + FLAGS, flags & !OFF_SCREEN);
 }
 
+/// A distorted sprite: its character drawn as a quad whose corners are turned and scaled with the
+/// sprite (about the frame's offset, itself turned) and brought into view one by one; culled
+/// unless a corner is on screen. The draw's frame: the corners (x, y words, from the centre), SGL's
+/// command (as the polygon's; its attributes or'd with what the frame held there), the turn
+/// struct, the view, the frame's offset (x, y: the pixels and the turned offset added), whether a
+/// corner is on screen.
+const D_CORNERS: u32 = 0;
+const D_COMMAND: u32 = 0x10;
+const D_TURN: u32 = 0x30;
+const D_VIEW: u32 = 0x70;
+const D_OFFSET: u32 = 0x78;
+const D_SEEN: u32 = 0x80;
+
+pub fn draw_distorted(cpu: &mut Cpu, s: u32) {
+    let f = cpu.stack();
+    let kind = KINDS.wrapping_add((cpu.read8(s + KIND) as i8 as i32 * 16) as u32);
+    let frames = cpu.read32(kind + KIND_FRAMES);
+    let n = cpu.read8(s + FRAME) as u32;
+    let frame = cpu.read32(frames + 8 * n);
+    let c = f + D_COMMAND;
+    let attrs = cpu.read16(s + ATTRS) & ATTR_KEPT | cpu.read16(kind + KIND_ATTRS) | cpu.read16(c + C_ATTRS);
+    cpu.write16(c + C_ATTRS, attrs);
+    let colour = cpu.read16(s + COLOUR);
+    cpu.write16(c + C_COLOUR, colour);
+    cpu.write16(c + C_1C, 0);
+    cpu.write16(c + C_1C + 2, 0);
+    let dx = cpu.read8(frame + 1) as i8 as i32;
+    cpu.write32(f + D_OFFSET, dx as u32);
+    let dy = cpu.read8(frame + 2) as i8 as i32;
+    cpu.write32(f + D_OFFSET + 4, dy as u32);
+    let t = f + D_TURN;
+    let z = cpu.read32(s + POS + 8);
+    cpu.write32(t + T_Z, z);
+    let angle = if cpu.read32(s + FLAGS) & UNTURNED != 0 { 0 } else { cpu.read16(s + ANGLE) };
+    cpu.write16(t + O_ANGLE, angle);
+    let sx = cpu.read32(s + SCALE_X);
+    cpu.write32(t + O_SCALES, sx);
+    let sy = cpu.read32(s + SCALE_Y);
+    cpu.write32(t + O_SCALES + 4, sy);
+    let flip = cpu.read32(s + FLAGS) & FLIP as u32;
+    cpu.write32(t + O_FLIP, flip);
+    if dx != 0 || dy != 0 {
+        cpu.write32(t, (dx << 16) as u32);
+        cpu.write32(t + 4, (dy << 16) as u32);
+        cpu.call(SL_TURN, &[t]);
+        for k in 0..2 {
+            let v = cpu.read32(f + D_OFFSET + 4 * k).wrapping_add(cpu.read32(t + 4 * k));
+            cpu.write32(f + D_OFFSET + 4 * k, v);
+        }
+    }
+    let first = cpu.read16(kind + KIND_CHAR) as i16 as i32;
+    let ch = first + cpu.read8(frame) as i32;
+    let size = CHAR_SIZES.wrapping_add((8 * ch) as u32);
+    let flip = cpu.read8(frame + 3) as i8 as i16 as u16;
+    let dir = (cpu.read16(s + ATTRS) & FLIP) ^ flip | DIR_2;
+    cpu.write16(c + C_TYPE, dir);
+    let w = cpu.read16(size + 4);
+    cpu.write16(c + C_SIZE, w);
+    let h = cpu.read16(size + 6);
+    cpu.write16(c + C_SIZE + 2, h);
+    let (w, h) = (cpu.read16(size) >> 1, cpu.read16(size + 2) >> 1);
+    let (mw, mh) = (w.wrapping_neg(), h.wrapping_neg());
+    for (i, (x, y)) in [(mw, mh), (w, mh), (w, h), (mw, h)].into_iter().enumerate() {
+        cpu.write16(f + D_CORNERS + 4 * i as u32, x);
+        cpu.write16(f + D_CORNERS + 4 * i as u32 + 2, y);
+    }
+    cpu.write32(t + O_FLIP, 0);
+    let seen = cpu.read32(s + FLAGS) & UNCULLED;
+    cpu.write32(f + D_SEEN, seen);
+    let mut depth = 0;
+    for i in 0..4 {
+        let cx = cpu.read16(f + D_CORNERS + 4 * i) as i16 as i32;
+        cpu.write32(t, (cx << 16) as u32);
+        let cy = cpu.read16(f + D_CORNERS + 4 * i + 2) as i16 as i32;
+        cpu.write32(t + 4, (cy << 16) as u32);
+        cpu.call(SL_TURN, &[t]);
+        let x = cpu.read32(t).wrapping_add(cpu.read32(s + POS).wrapping_add(cpu.read32(f + D_OFFSET)));
+        cpu.write32(t, x);
+        let y = cpu.read32(t + 4).wrapping_add(cpu.read32(s + POS + 4).wrapping_add(cpu.read32(f + D_OFFSET + 4)));
+        cpu.write32(t + 4, y);
+        let corner = c + C_CORNERS + 4 * i;
+        if cpu.read32(t + T_Z) == 0 {
+            cpu.write16(corner, ((x as i32) / 0x1_0000) as u16);
+            let y = cpu.read32(t + 4);
+            cpu.write16(corner + 2, ((y as i32) / 0x1_0000) as u16);
+            depth = FLAT_Z;
+        } else {
+            depth = cpu.call(SL_CONVERT_2D, &[t, f + D_VIEW]);
+            let vx = cpu.read16(f + D_VIEW + 2);
+            cpu.write16(corner, vx);
+            let vy = cpu.read16(f + D_VIEW + 6);
+            cpu.write16(corner + 2, vy);
+        }
+        if cpu.read32(f + D_SEEN) == 0 {
+            let x = (cpu.read16(corner) as i16 as i32).abs();
+            if x <= CORNER_X {
+                let y = (cpu.read16(corner + 2) as i16 as i32).abs();
+                if y <= CORNER_Y {
+                    cpu.write32(f + D_SEEN, 1);
+                }
+            }
+        }
+    }
+    if cpu.read32(f + D_SEEN) == 0 {
+        let flags = cpu.read32(s + FLAGS);
+        cpu.write32(s + FLAGS, flags | OFF_SCREEN);
+        return;
+    }
+    for at in [4, 8, 10, 14] {
+        let v = cpu.read16(c + C_CORNERS + at).wrapping_sub(1);
+        cpu.write16(c + C_CORNERS + at, v);
+    }
+    let lift = (cpu.read8(s + LIFT) as i8 as i32) << 16;
+    cpu.call(SL_POLYGON, &[c, depth.wrapping_sub(lift as u32)]);
+    let flags = cpu.read32(s + FLAGS);
+    cpu.write32(s + FLAGS, flags & !OFF_SCREEN);
+}
+
 /// A model (the same struct, for 3D): drawn by its own function (OWN_DRAW: the function at
 /// MODEL), else its polygons (at MODEL) placed, turned (z, x, y: words), scaled (x, y, z; flipped
 /// by the FLIP bits) inside SGL's matrix stack.
@@ -251,8 +369,8 @@ const TEXTURED_CLEARS: u16 = 0x40;
 /// A corner on screen: within these of the centre (pixels).
 const CORNER_X: i32 = 0xaf;
 const CORNER_Y: i32 = 0x6f;
-/// Not rewritten yet: the distorted sprite's draw. SGL's (as far as can be told): a point brought
-/// into view (its screen place at VIEW +2, +6; its depth back), and the polygon command drawn.
+/// The distorted sprite's draw. SGL's (as far as can be told): a point brought into view (its
+/// screen place at VIEW +2, +6; its depth back), and the polygon command drawn.
 const DRAW_DISTORTED: u32 = 0x0604_0604;
 const SL_CONVERT_2D: u32 = 0x0606_76fc;
 const SL_POLYGON: u32 = 0x0606_778c;
@@ -271,7 +389,7 @@ pub fn draw(cpu: &mut Cpu, s: u32) {
         if flags & DISTORTED == 0 {
             nested!(cpu, DRAW_SPRITE, draw_sprite(cpu, s));
         } else {
-            cpu.call(DRAW_DISTORTED, &[s]);
+            nested!(cpu, DRAW_DISTORTED, draw_distorted(cpu, s));
         }
         return;
     }

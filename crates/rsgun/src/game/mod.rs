@@ -11,6 +11,7 @@
 mod actors;
 mod aim;
 mod backup;
+mod banner;
 mod bg;
 mod bullets;
 mod camera;
@@ -35,6 +36,7 @@ mod play;
 mod palette;
 mod parts;
 mod ribbons;
+mod results;
 mod rings;
 mod screen;
 mod shots;
@@ -536,6 +538,7 @@ pub fn register(n: &mut Natives) {
         0x0604_be74 => shots::sword_draw[sp] -> (),
         0x0604_c2e8 => shots::sword_exec[s] -> (),
         0x0604_c9a4 => shots::shot_sword_set[p] -> u32,
+        0x0604_caa8 => shots::hyper_piece_exec[o] -> (),
         0x0604_7f60 => player::player_exec[p] -> (),
         0x0604_7b0c => player::control[p] -> (),
         0x0604_77ec => player::weapons_frame[p] -> (),
@@ -567,6 +570,23 @@ pub fn register(n: &mut Natives) {
         0x0606_25fc => rings::ring_step[o] -> (),
         0x0606_26bc => rings::ring_exec[o] -> (),
         0x0606_2738 => rings::ring_set[d] -> u32,
+        0x0605_1604 => results::piece_sink[o] -> (),
+        0x0605_1634 => results::piece_fly[o] -> (),
+        0x0605_17b0 => results::piece_slide[o] -> (),
+        0x0605_1928 => results::percent_draw[s] -> (),
+        0x0605_1a98 => results::percent_exec[o] -> (),
+        0x0605_1cf0 => results::score_draw[s] -> (),
+        0x0605_1de0 => results::score_exec[o] -> (),
+        0x0605_1f94 => results::results_exec[o] -> (),
+        0x0605_284c => results::results_set[delay] -> u32,
+        0x0605_1250 => banner::banner_idle[] -> (),
+        0x0605_125c => banner::banner_sprites[] -> (),
+        0x0605_1394 => banner::banner_plane_4[] -> (),
+        0x0605_13ac => banner::banner_plane_3[] -> (),
+        0x0605_13c4 => banner::banner_idle[] -> (),
+        0x0605_13d0 => banner::banner_plane_4[] -> (),
+        0x0605_13e8 => banner::banner_exec[o] -> (),
+        0x0605_1598 => banner::banner_set[] -> u32,
         0x0605_72ec => timeline::timeline_exec[t] -> (),
         0x0605_7210 => timeline::timeline_run[t] -> (),
         0x0605_6b14 => parts::body_exec[body] -> (),
@@ -648,6 +668,13 @@ pub fn register(n: &mut Natives) {
         0x0606_4194 => ribbons::ribbon_edge[o, x0, y0, x1; y1, width, quad] -> (),
         0x0606_4244 => ribbons::ribbon_boxes[o, i] -> (),
         0x0606_42e0 => ribbons::ribbon_set[kind, d, flags] -> (),
+        0x0606_4494 => ribbons::ribbon_flash[o] -> (),
+        0x0606_4358 => effects::flare_exec[o] -> (),
+        0x0606_43ec => effects::flare_set[d] -> u32,
+        0x0606_4a28 => models::pod_draw[s] -> (),
+        0x0606_46c4 => models::pod_model[o] -> (),
+        0x0606_48e4 => models::pod_sprite[o] -> (),
+        0x0606_4520 => models::pod_glow[o] -> (),
         0x0606_3900 => aim::point_area[p] -> u32,
         0x0605_3bfc => bullets::bullet_frame[b] -> (),
         0x0605_3ccc => bullets::bullet_move[b] -> (),
@@ -774,6 +801,7 @@ pub fn register(n: &mut Natives) {
         0x0604_03c4 => sprites::draw_sprite[s] -> (),
         0x0604_030c => sprites::draw_model[s] -> (),
         0x0604_0960 => sprites::draw[s] -> (),
+        0x0604_0604 => sprites::draw_distorted[s] -> (),
         0x0604_6138 => actors::end_by_flags[actor] -> u32,
         0x0604_6168 => actors::approach[from, to, step] -> u32,
         0x0604_dcb4 => actors::plain_exec[actor] -> (),

@@ -494,3 +494,173 @@ pub fn model_flip_bits(cpu: &mut Cpu, kind: u32, frame: u32, bits: u32) {
         k += 1;
     }
 }
+
+/// The pods (made by the stages' code): an actor drawn by its own draw, by its byte +0x3d: 1 a
+/// model of seven parts (a body, four legs and the four struts that share one part; XPDATA
+/// structs in the actor, its light at +0x78), 3 a sprite of kind 2 (its frame by its turn about
+/// y, 32 a turn), each turned by the actor's turns and with a glow under it.
+const POD_DRAW_KIND: u32 = 0x2d;
+const POD_X: u32 = 0x14;
+const POD_TURNS: u32 = 0x2c;
+const POD_SPRITE_COLOUR: u32 = 0x3e;
+const POD_GLOW: u32 = 0x54;
+const POD_LIGHT: u32 = 0x78;
+const POD_BODY: u32 = 0x84;
+const POD_LEGS: [(u32, [i32; 3]); 4] = [(0x9c, [-3, 8, -3]), (0xb4, [-3, 8, 3]), (0xcc, [3, 8, 3]), (0xe4, [3, 8, -3])];
+const POD_STRUT: u32 = 0xfc;
+const POD_STRUTS: [([i32; 3], i16, i16); 4] = [
+    ([-3, 1, -3], 0x0e38, 0xe0b7u16 as i16),
+    ([-3, 1, 3], 0xf1c8u16 as i16, 0xe0b7u16 as i16),
+    ([3, 1, 3], 0xf1c8u16 as i16, 0x1f49),
+    ([3, 1, -3], 0x0e38, 0x1f49),
+];
+const POD_DROP: u32 = 0xfffd_0000;
+const SL_PUT_SPRITE: u32 = 0x0607_0e22;
+const SL_PUT_POLYGON_X: u32 = 0x0607_10b0;
+
+pub fn pod_draw(cpu: &mut Cpu, s: u32) {
+    let o = s - 0x10;
+    match cpu.read8(s + POD_DRAW_KIND) {
+        1 => nested!(cpu, 0x0606_46c4, pod_model(cpu, o)),
+        2 => {
+            cpu.call(0x0606_4620, &[o]);
+        }
+        3 => nested!(cpu, 0x0606_48e4, pod_sprite(cpu, o)),
+        _ => {}
+    }
+}
+
+/// Under the screen's light at the actor's place, turned by its turns.
+fn pod_place(cpu: &mut Cpu, o: u32) {
+    let screen = cpu.read32(super::screen::SCREEN);
+    cpu.call(SL_LOAD_MATRIX, &[screen + SCREEN_LIGHT]);
+    let p = [0, 1, 2].map(|k| cpu.read32(o + POD_X + 4 * k));
+    cpu.call(SL_TRANSLATE, &p);
+    pod_turn(cpu, o);
+}
+
+fn pod_turn(cpu: &mut Cpu, o: u32) {
+    for (k, rot) in [SL_ROT_X, SL_ROT_Y, SL_ROT_Z].into_iter().enumerate() {
+        let a = cpu.read16(o + POD_TURNS + 2 * k as u32) as i16 as i32 as u32;
+        cpu.call(rot, &[a]);
+    }
+}
+
+fn units(p: [i32; 3]) -> [u32; 3] {
+    p.map(|v| (v << 16) as u32)
+}
+
+pub fn pod_model(cpu: &mut Cpu, o: u32) {
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    pod_place(cpu, o);
+    cpu.call(SL_TRANSLATE, &[0, POD_DROP, 0]);
+    let light = o + POD_LIGHT;
+    cpu.call(SL_PUT_POLYGON_X, &[o + POD_BODY, light]);
+    for (part, at) in POD_LEGS {
+        cpu.call(SL_PUSH_MATRIX, &[]);
+        cpu.call(SL_TRANSLATE, &units(at));
+        cpu.call(SL_PUT_POLYGON_X, &[o + part, light]);
+        cpu.call(SL_POP_MATRIX, &[]);
+    }
+    for (at, x, z) in POD_STRUTS {
+        cpu.call(SL_PUSH_MATRIX, &[]);
+        cpu.call(SL_TRANSLATE, &units(at));
+        cpu.call(SL_ROT_X, &[x as i32 as u32]);
+        cpu.call(SL_ROT_Z, &[z as i32 as u32]);
+        cpu.call(SL_PUT_POLYGON_X, &[o + POD_STRUT, light]);
+        cpu.call(SL_POP_MATRIX, &[]);
+    }
+    nested!(cpu, 0x0606_4520, pod_glow(cpu, o));
+    cpu.call(SL_POP_MATRIX, &[]);
+}
+
+/// The sprite's frames by its turn about y (from a table of bytes, 32 a turn; the second half
+/// flipped), kind 2's; its colour bank by its byte +0x3e.
+const POD_FRAMES: u32 = 0x0607_3c44;
+const KIND_2: u32 = MODEL_KINDS + 2 * 16;
+const SPRITE_KIND_FRAMES: u32 = 4;
+const SPRITE_KIND_CHAR: u32 = 8;
+const SPRITE_KIND_COLOUR: u32 = 0xc;
+const SA_TEXTURE: u32 = 0;
+const SA_ATTRS: u32 = 2;
+const SA_COLOUR: u32 = 4;
+const SA_GOURAUD: u32 = 6;
+const SA_DIR: u32 = 8;
+const POD_SPRITE_ATTRS: u16 = 0x80;
+const POD_SPRITE_DIR: u16 = 2;
+const POD_SPRITE_FLIPPED: u16 = 0x12;
+const POD_SPRITE_SCALE: u32 = 0xffff;
+
+pub fn pod_sprite(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    for k in 0..3 {
+        let v = cpu.read32(o + POD_X + 4 * k);
+        cpu.write32(f + 4 * k, v);
+    }
+    cpu.write32(f + 12, POD_SPRITE_SCALE);
+    let a = f + 16;
+    let turn = cpu.read16(o + POD_TURNS + 2) as i16 as i32;
+    let n = ((turn + 0x8400) as u32 & 0xffff) >> 11;
+    let frame = cpu.read8(POD_FRAMES + n) as u32;
+    let frames = cpu.read32(KIND_2 + SPRITE_KIND_FRAMES);
+    let at = cpu.read32(frames + 8 * frame);
+    let texture = cpu.read16(KIND_2 + SPRITE_KIND_CHAR).wrapping_add(cpu.read8(at) as u16);
+    cpu.write16(a + SA_TEXTURE, texture);
+    let bank = (cpu.read8(o + POD_SPRITE_COLOUR) as i8 as i32 * 16) as u16;
+    let colour = cpu.read16(KIND_2 + SPRITE_KIND_COLOUR).wrapping_add(bank);
+    cpu.write16(a + SA_COLOUR, colour);
+    cpu.write16(a + SA_GOURAUD, 0);
+    cpu.write16(a + SA_ATTRS, POD_SPRITE_ATTRS);
+    cpu.write16(a + SA_DIR, if n > 15 { POD_SPRITE_FLIPPED } else { POD_SPRITE_DIR });
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    let screen = cpu.read32(super::screen::SCREEN);
+    cpu.call(SL_LOAD_MATRIX, &[screen + SCREEN_LIGHT]);
+    let z = 0x8000u16.wrapping_sub(cpu.read16(o + POD_TURNS + 4)) as i16 as i32 as u32;
+    cpu.call(SL_PUT_SPRITE, &[f, a, z]);
+    let p = [0, 1, 2].map(|k| cpu.read32(o + POD_X + 4 * k));
+    cpu.call(SL_TRANSLATE, &p);
+    pod_turn(cpu, o);
+    nested!(cpu, 0x0606_4520, pod_glow(cpu, o));
+    cpu.call(SL_POP_MATRIX, &[]);
+}
+
+/// The glow under a pod (unless its size, +0x54, is none): a sprite of kind 0 flickering a little
+/// in size; on even loops frame 213 in colours 0x30 on, 12 below; on odd ones frame 1 in colours
+/// 0x70 on (meshed) and 1.5 times as large, 16 below.
+const GLOW_EVEN: (u32, u16, u16, u32) = (0x6a8, 0x30, 0, 0xfff4_0000);
+const GLOW_ODD: (u32, u16, u16, u32) = (8, 0x70, 0x100, 0xfff0_0000);
+const GLOW_FLICKER: u32 = 0x800;
+const GLOW_ODD_SCALE: u32 = 0x1_8000;
+const KIND_0: u32 = MODEL_KINDS;
+
+pub fn pod_glow(cpu: &mut Cpu, o: u32) {
+    let size = cpu.read32(o + POD_GLOW);
+    if size == 0 {
+        return;
+    }
+    let f = cpu.stack();
+    cpu.write32(f, 0);
+    cpu.write32(f + 8, 0);
+    let r = nested!(cpu, 0x0604_5d90, super::math::random(cpu, 0)) & 0xffff;
+    let r = nested!(cpu, 0x0606_e26c, super::math::sl_mul_fx(cpu, r, GLOW_FLICKER));
+    let scale = cpu.read32(o + POD_GLOW).wrapping_add(r);
+    cpu.write32(f + 12, scale);
+    let odd = cpu.read32(super::globals::LOOPS) & 1 != 0;
+    let (frame, colours, attrs, y) = if odd { GLOW_ODD } else { GLOW_EVEN };
+    let a = f + 16;
+    let colour = cpu.read16(KIND_0 + SPRITE_KIND_COLOUR).wrapping_add(colours);
+    cpu.write16(a + SA_COLOUR, colour);
+    cpu.write16(a + SA_ATTRS, attrs);
+    let frames = cpu.read32(KIND_0 + SPRITE_KIND_FRAMES);
+    let at = cpu.read32(frames + frame);
+    let texture = cpu.read16(KIND_0 + SPRITE_KIND_CHAR).wrapping_add(cpu.read8(at) as u16);
+    cpu.write16(a + SA_TEXTURE, texture);
+    cpu.write32(f + 4, y);
+    if odd {
+        let s = nested!(cpu, 0x0606_e26c, super::math::sl_mul_fx(cpu, GLOW_ODD_SCALE, scale));
+        cpu.write32(f + 12, s);
+    }
+    cpu.write16(a + SA_GOURAUD, 0);
+    cpu.write16(a + SA_DIR, POD_SPRITE_DIR);
+    cpu.call(SL_PUT_SPRITE, &[f, a, 0]);
+}
