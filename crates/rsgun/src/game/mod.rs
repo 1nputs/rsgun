@@ -281,7 +281,7 @@ const SR_PUSH: u8 = 20;
 /// the others, and takes its frame by a subtraction; SGL's interrupt handlers save what they use,
 /// GBR, MACH, MACL and SR among it; SGL's routines run block by block (asm2sm.py) make their own
 /// pushes.
-const PROLOGUES: [(u32, &[u8], u32); 14] = [
+const PROLOGUES: [(u32, &[u8], u32); 13] = [
     (0x0606_e9fc, &[6, 7], 0),
     (0x0607_10b0, &[PR_PUSH, 9, 8], 0),
     (0x0606_e50c, &[8, PR_PUSH, 14, 13, 12, 11, 10, 9], 0),
@@ -292,7 +292,6 @@ const PROLOGUES: [(u32, &[u8], u32); 14] = [
     (0x0603_4c1a, &[0, 4, 3, 2, 1, PR_PUSH, MACH_PUSH, MACL_PUSH], 0),
     (0x0603_32d6, &[0, 7, 6, 5, 4, 3, 2, PR_PUSH, 1, GBR_PUSH, MACH_PUSH, MACL_PUSH, SR_PUSH], 0),
     (0x0603_3430, &[0, 1, GBR_PUSH, PR_PUSH, 7, 6, 5, 4, 3, 2, MACH_PUSH, MACL_PUSH, SR_PUSH], 0),
-    (0x0603_6dd8, &[], 0),
     (0x0603_3658, &[], 0),
     (0x0603_3884, &[], 0),
     (0x0603_4cb0, &[PR_PUSH], 0),
@@ -419,10 +418,19 @@ macro_rules! rewrites {
         )*
     };
     (@result $sh2:ident, $v:ident, ()) => { let () = $v; };
+    (@result $sh2:ident, $v:ident, slave) => { let () = $v; };
     (@result $sh2:ident, $v:ident, $t:tt) => { $sh2.r[0] = $v; };
     (@contract ()) => { Contract::AbiVoid };
+    (@contract slave) => { Contract::Keeps(SLAVE_KEEPS) };
     (@contract $t:tt) => { Contract::Abi };
 }
+
+/// What SGL's slave command handlers (`-> slave`) keep: the place in the commands (r4, past the
+/// words they took) and the stack. The slave's command loop sets r0-r2 and r4 for each handler,
+/// and no handler reads what another left in the rest: a native run with them filled with
+/// garbage before each handler ended play1 and the attract mode on the interpreter's pictures
+/// (HANDOFF section 6, the readable pass).
+const SLAVE_KEEPS: u16 = 1 << 4 | 1 << 15;
 
 /// Registers the rewritten functions (over the translations registered before).
 pub fn register(n: &mut Natives) {
@@ -1130,8 +1138,8 @@ pub fn register(n: &mut Natives) {
         0x0603_6412 => sgl::slave_frame_end[] -> (),
         0x0603_8330 => sgl::slave_quads[] -> (),
         0x0603_7f0e => sgl::slave_sprite[] -> (),
-        0x0603_7f74 => sgl::slave_turned_sprite[] -> (),
-        0x0603_6dd8 => sgl::slave_polygons[] -> (),
+        0x0603_7f74 => sgl::slave_turned_sprite[] -> slave,
+        0x0603_6dd8 => sgl::slave_polygons[] -> slave,
         0x0603_6ab0 => sgl::slave_frame_draw[] -> (),
         0x0603_6292 => sgl::slave_screen[] -> (),
         0x0603_61ec => sgl::slave_clear_pairs[] -> (),

@@ -40,6 +40,22 @@ pub enum Contract {
     Abi,
     /// The same for a function with no result (r0 is whatever it was left as).
     AbiVoid,
+    /// A rewrite of code with a convention of its own: the accesses as for `Abi`, and at its end
+    /// only the registers in the mask (bit n: rn) its caller relies on, GBR, VBR and SR's
+    /// interrupt mask.
+    Keeps(u16),
+}
+
+impl Contract {
+    /// The registers kept for the caller (bit n: rn), for a rewrite.
+    pub fn kept(self) -> u16 {
+        match self {
+            Contract::Exact => 0xffff,
+            Contract::Abi => 0xff01,
+            Contract::AbiVoid => 0xff00,
+            Contract::Keeps(mask) => mask,
+        }
+    }
 }
 
 /// The registered functions.

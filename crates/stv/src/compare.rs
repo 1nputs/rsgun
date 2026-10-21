@@ -48,10 +48,10 @@ struct Call {
     depth: u8,
     /// The deepest the stack went during the call.
     min_sp: u32,
-    /// Checked by the calling convention (a rewrite is in it), and whether r0 is its result then
-    /// (a translation's is not known).
+    /// Checked by the calling convention (a rewrite is in it), and the registers it keeps then
+    /// (a translation's are taken as GCC's with no result).
     relaxed: bool,
-    result: bool,
+    kept: u16,
 }
 
 /// What compare mode found for one function.
@@ -112,8 +112,8 @@ impl Compare {
                 k.relaxed = true;
             }
         }
-        let result = contract == Contract::Abi;
-        let call = Call { entry, start: log.len(), state: cpu.clone(), ret, sp, depth: self.depth(c), min_sp: cpu.r[15], relaxed, result };
+        let kept = if contract == Contract::Exact { Contract::AbiVoid.kept() } else { contract.kept() };
+        let call = Call { entry, start: log.len(), state: cpu.clone(), ret, sp, depth: self.depth(c), min_sp: cpu.r[15], relaxed, kept };
         self.calls[c].push(call);
     }
 
@@ -146,7 +146,7 @@ impl Compare {
             v.calls += 1;
             let accesses = &log[call.start..];
             let stack = call.relaxed.then_some(call.min_sp..call.sp);
-            let outcome = run(call.entry, &call.state, accesses, call.depth, stack).and_then(|end| differences(&end, cpu, call.relaxed.then_some(call.result)));
+            let outcome = run(call.entry, &call.state, accesses, call.depth, stack).and_then(|end| differences(&end, cpu, call.relaxed.then_some(call.kept)));
             match outcome {
                 Ok(()) => v.equal += 1,
                 Err(what) => {
@@ -211,15 +211,12 @@ impl Compare {
     }
 }
 
-/// How the native run's end differs from the interpreter's, if it does (`relaxed`: in what the
-/// calling convention keeps, with r0 if it is the result).
-fn differences(native: &Sh2, sh2: &Sh2, relaxed: Option<bool>) -> Result<(), String> {
+/// How the native run's end differs from the interpreter's, if it does (`relaxed`: in the
+/// registers the calling convention keeps, bit n rn).
+fn differences(native: &Sh2, sh2: &Sh2, relaxed: Option<u16>) -> Result<(), String> {
     let mut d = Vec::new();
     for i in 0..16 {
-        let kept = match relaxed {
-            None => true,
-            Some(result) => i >= 8 || (i == 0 && result),
-        };
+        let kept = relaxed.is_none_or(|mask| mask >> i & 1 != 0);
         if native.r[i] != sh2.r[i] && kept {
             d.push(format!("r{i} {:08x} (SH-2 {:08x})", native.r[i], sh2.r[i]));
         }
