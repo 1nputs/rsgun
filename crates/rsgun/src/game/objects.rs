@@ -192,7 +192,9 @@ pub fn obj_exec(cpu: &mut Cpu) {
         while obj != 0 {
             cpu.write8(obj + POST, 0);
             let exec = cpu.read32(obj + EXEC);
-            cpu.call(exec, &[obj]);
+            // the SH-2 loop's registers (the list, the object, the next list's entry), which the
+            // execs' callees push: the game reads such slots later as fields it never set
+            cpu.holding(&[(8, area), (9, obj), (10, head(area + 1))], |cpu| cpu.call(exec, &[obj]));
             obj = cpu.read32(obj + NEXT);
         }
     }

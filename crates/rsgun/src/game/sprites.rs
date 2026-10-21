@@ -450,32 +450,38 @@ pub fn draw(cpu: &mut Cpu, s: u32) {
     let mut depth = 0;
     for i in 0..count {
         let corners = cpu.read32(f + CORNERS_AT);
-        let cx = cpu.read16(corners + 4 * i) as i16 as i32;
-        cpu.write32(t, cx as u32);
-        let cy = cpu.read16(corners + 4 * i + 2) as i16 as i32;
-        cpu.write32(t + 4, cy as u32);
-        if cx != 0 || cy != 0 {
-            cpu.write32(t, (cx << 16) as u32);
-            cpu.write32(t + 4, (cy << 16) as u32);
-            nested!(cpu, TURN_POINT, super::math::turn_point(cpu, t));
-        }
-        let x = cpu.read32(t).wrapping_add(cpu.read32(s + POS));
-        cpu.write32(t, x);
-        let y = cpu.read32(t + 4).wrapping_add(cpu.read32(s + POS + 4));
-        cpu.write32(t + 4, y);
+        // the SH-2 loop's registers (the turn, the sprite, the corner's offset and its places),
+        // which its callees push: the game reads one of those slots later as a field it never set
+        let regs = [(8, t), (9, s), (10, 4 * i), (11, f + C_CORNERS + 4 * i), (12, corners + 4 * i), (13, f + C_CORNERS)];
+        cpu.holding(&regs, |cpu| {
+            let cx = cpu.read16(corners + 4 * i) as i16 as i32;
+            cpu.write32(t, cx as u32);
+            let cy = cpu.read16(corners + 4 * i + 2) as i16 as i32;
+            cpu.write32(t + 4, cy as u32);
+            if cx != 0 || cy != 0 {
+                cpu.write32(t, (cx << 16) as u32);
+                cpu.write32(t + 4, (cy << 16) as u32);
+                nested!(cpu, TURN_POINT, super::math::turn_point(cpu, t));
+            }
+            let x = cpu.read32(t).wrapping_add(cpu.read32(s + POS));
+            cpu.write32(t, x);
+            let y = cpu.read32(t + 4).wrapping_add(cpu.read32(s + POS + 4));
+            cpu.write32(t + 4, y);
+            let corner = f + C_CORNERS + 4 * i;
+            if cpu.read32(t + T_Z) == 0 {
+                cpu.write16(corner, ((x as i32) / 0x1_0000) as u16);
+                let y = cpu.read32(t + 4);
+                cpu.write16(corner + 2, ((y as i32) / 0x1_0000) as u16);
+                depth = FLAT_Z;
+            } else {
+                depth = cpu.call(SL_CONVERT_2D, &[t, f + VIEW]);
+                let vx = cpu.read16(f + VIEW + 2);
+                cpu.write16(corner, vx);
+                let vy = cpu.read16(f + VIEW + 6);
+                cpu.write16(corner + 2, vy);
+            }
+        });
         let corner = f + C_CORNERS + 4 * i;
-        if cpu.read32(t + T_Z) == 0 {
-            cpu.write16(corner, ((x as i32) / 0x1_0000) as u16);
-            let y = cpu.read32(t + 4);
-            cpu.write16(corner + 2, ((y as i32) / 0x1_0000) as u16);
-            depth = FLAT_Z;
-        } else {
-            depth = cpu.call(SL_CONVERT_2D, &[t, f + VIEW]);
-            let vx = cpu.read16(f + VIEW + 2);
-            cpu.write16(corner, vx);
-            let vy = cpu.read16(f + VIEW + 6);
-            cpu.write16(corner + 2, vy);
-        }
         if cpu.read32(f + SEEN) == 0 {
             let x = (cpu.read16(corner) as i16 as i32).abs();
             if x <= CORNER_X {
