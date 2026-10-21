@@ -736,3 +736,121 @@ pub fn launcher_exec(cpu: &mut Cpu, o: u32) {
     cpu.write32(f + 8, 0);
     nested!(cpu, 0x0605_5b5c, super::bullets::rocket_set(cpu, f));
 }
+
+/// A turret on a vehicle (at +0x6c): while the vehicle fires and the player (as 12 frames ago) is
+/// within 0x4800 of the vehicle's facing it turns toward the player (0x80 a frame) and fires a
+/// plain bullet every so often (by its rate, less each step of difficulty), recoiling a pixel in
+/// turn; else it swings 0x800 either side of the vehicle's facing (32 frames each way). It keeps
+/// within a quarter turn of that facing, sits on the vehicle, is hittable as it is, flashes with
+/// it, and gives it its damage (scoring the kill by its kind's points if that ends it).
+const T_FACING: u32 = 0x8a;
+const T_WAIT: u32 = 0x8c;
+const T_RATE: u32 = 0x8e;
+const HIT_OTHER: u32 = 0x40;
+const HIT_FLAGS: u32 = 0x56;
+const WAS_HIT: u16 = 0x200;
+const KIND: u32 = 0x2e;
+const TYPE: u32 = 0x55;
+const T_DELAY: u32 = 12;
+const T_CONE: u16 = 0x4800;
+const T_CONE_SPAN: u16 = 0x9000;
+const T_SWING: u16 = 0x800;
+const T_TURN: u16 = 0x80;
+const T_LIMIT: i16 = 0x4000;
+const T_MUZZLE: i32 = 10;
+const ONE: u32 = 0x1_0000;
+/// The kinds' points (the kinds' table, sprites.rs's: a word at +0xe).
+const KIND_POINTS: u32 = 0x0607_41fe;
+
+pub fn turret_exec(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let v = cpu.read32(o + RIDES_ON);
+    if cpu.read8(v + OBJ_MODE) as i8 >= ENDING as i8 {
+        cpu.write8(o + OBJ_MODE, ENDING);
+        return;
+    }
+    let facing = cpu.read16(v + ANGLE);
+    cpu.write16(o + T_FACING, facing);
+    let aim = nested!(cpu, 0x0605_6ad4, aim::angle_to_target(cpu, o, T_DELAY)) & 0xffff;
+    let facing = cpu.read16(o + T_FACING) as u32;
+    let d = nested!(cpu, 0x0605_6580, aim::angle_between(cpu, aim, facing)) as u16;
+    let shooting = cpu.read16(v + ROUTE_FLAGS) & FIRING != 0 && d.wrapping_add(T_CONE) <= T_CONE_SPAN;
+    let target = if shooting {
+        aim
+    } else {
+        let swing = ((cpu.read32(GAME_FRAMES) & 0x20) << 7) as u16;
+        (cpu.read16(o + T_FACING).wrapping_add(T_SWING).wrapping_sub(swing)) as u32
+    };
+    let angle = cpu.read16(o + ANGLE) as u32;
+    let d = nested!(cpu, 0x0605_6580, aim::angle_between(cpu, target, angle)) as i16;
+    let a = if d.wrapping_abs() <= 0x7f {
+        target as u16
+    } else if d > 0 {
+        cpu.read16(o + ANGLE).wrapping_sub(T_TURN)
+    } else {
+        cpu.read16(o + ANGLE).wrapping_add(T_TURN)
+    };
+    cpu.write16(o + ANGLE, a);
+    let off = cpu.read16(o + ANGLE).wrapping_sub(cpu.read16(o + T_FACING)) as i16;
+    if off > T_LIMIT {
+        let a = cpu.read16(o + ANGLE).wrapping_add(T_LIMIT as u16).wrapping_sub(off as u16);
+        cpu.write16(o + ANGLE, a);
+    }
+    if off < -T_LIMIT {
+        let a = cpu.read16(o + ANGLE).wrapping_add((-T_LIMIT) as u16).wrapping_sub(off as u16);
+        cpu.write16(o + ANGLE, a);
+    }
+    let recoil = (cpu.read32(GAME_FRAMES) >> 2) & shooting as u32;
+    let a = cpu.read16(o + ANGLE) as i16 as i32 as u32;
+    let s = cpu.call(SL_SIN, &[a]);
+    let x = cpu.read32(v + POSITION).wrapping_add(s.wrapping_mul(recoil));
+    cpu.write32(o + POSITION, x);
+    let a = cpu.read16(o + ANGLE) as i16 as i32 as u32;
+    let c = cpu.call(SL_COS, &[a]);
+    let y = cpu.read32(v + POSITION + 4).wrapping_add(c.wrapping_neg().wrapping_mul(recoil));
+    cpu.write32(o + POSITION + 4, y);
+    let z = cpu.read32(v + POSITION + 8);
+    cpu.write32(o + POSITION + 8, z);
+    let flags = cpu.read32(o + FLAGS) & !NO_HITS;
+    cpu.write32(o + FLAGS, flags);
+    let hits = cpu.read32(v + FLAGS) & NO_HITS;
+    cpu.write32(o + FLAGS, flags | hits);
+    let wait = cpu.read16(o + T_WAIT) as i16 as i32 as u32;
+    let wait = nested!(cpu, 0x0604_6168, actors::approach(cpu, wait, 0, 1));
+    cpu.write16(o + T_WAIT, wait as u16);
+    if shooting && wait as i16 == 0 {
+        let d = cpu.read8(DIFFICULTY) as i8 as i16;
+        let rate = (cpu.read16(o + T_RATE) as i16).wrapping_sub(d);
+        cpu.write16(o + T_WAIT, rate.wrapping_mul(8).wrapping_add(8) as u16);
+        let n = cpu.read8(o + NUMBER);
+        cpu.write8(f + S_NUMBER, n);
+        let a = cpu.read16(o + ANGLE) as i16 as i32 as u32;
+        let s = cpu.call(SL_SIN, &[a]) as i32;
+        let x = cpu.read32(o + POSITION).wrapping_add(s.wrapping_mul(T_MUZZLE) as u32);
+        cpu.write32(f, x);
+        let a = cpu.read16(o + ANGLE) as i16 as i32 as u32;
+        let c = cpu.call(SL_COS, &[a]) as i32;
+        let y = cpu.read32(o + POSITION + 4).wrapping_add(c.wrapping_neg().wrapping_mul(T_MUZZLE) as u32);
+        cpu.write32(f + 4, y);
+        let z = cpu.read32(o + POSITION + 8);
+        cpu.write32(f + 8, z);
+        let a = cpu.read16(o + ANGLE);
+        cpu.write16(f + S_ANGLE, a);
+        nested!(cpu, 0x0605_3f48, super::bullets::bullet_set_plain(cpu, f));
+    }
+    let life = cpu.read32(v + LIFE);
+    if life as i32 > 0 && cpu.read16(o + HIT_FLAGS) & WAS_HIT != 0 {
+        let life = life.wrapping_sub(ONE).wrapping_add(cpu.read32(o + LIFE));
+        cpu.write32(v + LIFE, life);
+        if life as i32 <= 0 {
+            let kind = cpu.read8(o + KIND) as i8 as i32;
+            let points = cpu.read16(KIND_POINTS.wrapping_add((kind * 16) as u32)) as i16 as i32 as u32;
+            let killer = cpu.read32(o + HIT_OTHER);
+            let weapon = cpu.read8(killer + TYPE) as i8 as i32 as u32;
+            let p = cpu.read8(killer + NUMBER) as i8 as i32 as u32;
+            nested!(cpu, 0x0604_3108, super::hits::score_kill(cpu, p, weapon, o, points));
+        }
+    }
+    cpu.write32(o + LIFE, ONE);
+    nested!(cpu, 0x0604_666c, super::parts::flash_with(cpu, o, v));
+}
