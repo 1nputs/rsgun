@@ -12,13 +12,13 @@ const SL_TV_OFF: u32 = 0x0606_7126;
 const SL_TV_ON: u32 = 0x0606_711c;
 const SL_SYNCH: u32 = 0x0603_4cca;
 const SL_INIT_MATRIX: u32 = 0x0603_5110;
-/// SGL's, not yet named: two settings sent to the slave (0x3c, 0x44), the screen's centre and
-/// size, a VDP2 register bit, and the window a frame is drawn through.
-const SL_0606705C: u32 = 0x0606_705c;
-const SL_06067088: u32 = 0x0606_7088;
-const SL_060670AC: u32 = 0x0606_70ac;
-const SL_060670FC: u32 = 0x0606_70fc;
-const SL_0606713C: u32 = 0x0606_713c;
+/// SGL's: two settings sent to the slave (commands 60 and 68, their meanings not known yet), the
+/// screen's size, the sprites' colour mode, and the window a frame is drawn through.
+const SLAVE_SETTING_60: u32 = 0x0606_705c;
+const SLAVE_SETTING_68: u32 = 0x0606_7088;
+const SCREEN_SIZE: u32 = 0x0606_70ac;
+const SPRITE_COLOUR_MODE: u32 = 0x0606_70fc;
+const SL_CUR_WINDOW: u32 = 0x0606_713c;
 /// A word whose bit 31 lasts one game frame.
 const ONE_FRAME: u32 = 0x0607_405c;
 
@@ -34,11 +34,11 @@ fn hold(cpu: &mut Cpu, r: usize, v: u32) {
 /// Runs the game until something sets GAME_END: what it was set to.
 pub fn main_loop(cpu: &mut Cpu) -> u32 {
     let kept: [u32; 6] = cpu.sh2.r[8..14].try_into().unwrap_or([0; 6]);
-    cpu.call(SL_0606705C, &[1]);
+    cpu.call(SLAVE_SETTING_60, &[1]);
     hold(cpu, 8, 0);
-    cpu.call(SL_06067088, &[0x80]);
-    cpu.call(SL_060670AC, &[0x200, 0x200]);
-    cpu.call(SL_060670FC, &[1]);
+    cpu.call(SLAVE_SETTING_68, &[0x80]);
+    cpu.call(SCREEN_SIZE, &[0x200, 0x200]);
+    cpu.call(SPRITE_COLOUR_MODE, &[1]);
     cpu.call(SL_TV_OFF, &[]);
     nested!(cpu, 0x0600_4468, vblank::init_vblank(cpu));
     nested!(cpu, 0x0600_46a0, dma::dma_control_init(cpu));
@@ -51,7 +51,7 @@ pub fn main_loop(cpu: &mut Cpu) -> u32 {
     }
     loop {
         cpu.call(SL_INIT_MATRIX, &[]);
-        cpu.call(SL_0606713C, &[1]);
+        cpu.call(SL_CUR_WINDOW, &[1]);
         // the VBlanks this pass took (a pass that took none counts one)
         let (now, last) = (cpu.read32(VBLANKS), cpu.read32(LAST_VBLANKS));
         cpu.write32(ELAPSED, if now > last { now - last } else { 1 });

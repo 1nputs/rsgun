@@ -35,9 +35,9 @@ const ENDED: u8 = 0x73;
 /// angle_diff's SH-2 entry (for nested!).
 const ANGLE_DIFF: u32 = 0x0604_6194;
 
-/// SGL's (as far as can be told): the view's command (with 7, as the camera starts), and the view
-/// set from an eye, a point looked at and a roll.
-const SL_VIEW: u32 = 0x0606_990c;
+/// SGL's: the near limit's level (7 as the camera starts), and the view set from an eye, a point
+/// looked at and a roll.
+const SL_ZDSP_LEVEL: u32 = 0x0606_990c;
 const SL_LOOK_AT: u32 = 0x0606_993c;
 
 /// `to - from` as angles (16 bits, the turn's shorter way: -0x7fff..=0x8000).
@@ -120,7 +120,7 @@ pub fn camera_exec(cpu: &mut Cpu, cam: u32) {
     match cpu.read8(cam + OBJ_MODE) {
         1 => {}
         0 => {
-            cpu.call(SL_VIEW, &[7]);
+            cpu.call(SL_ZDSP_LEVEL, &[7]);
             cpu.write8(cam + OBJ_MODE, 1);
         }
         ENDING => {

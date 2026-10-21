@@ -315,6 +315,16 @@ pub fn request_music(cpu: &mut Cpu, music: u32) {
     cpu.write16(m + FADE_FRAME, 0);
 }
 
+/// Fades the music to `volume` (16.16) over `frames`.
+pub fn music_fade_to(cpu: &mut Cpu, volume: u32, frames: u32) {
+    let m = manager(cpu);
+    let now = cpu.read32(m + VOLUME);
+    cpu.write32(m + FADE_FROM, now);
+    cpu.write32(m + FADE_TO, volume);
+    cpu.write16(m + FADE_FRAME, 0);
+    cpu.write16(m + FADE_LEN, frames as u16);
+}
+
 /// Fades the music out over `frames` (then stops it).
 pub fn music_fade_out(cpu: &mut Cpu, frames: u32) {
     let m = manager(cpu);

@@ -190,21 +190,21 @@ pub fn fade_exec(cpu: &mut Cpu, fade: u32) {
     }
 }
 
-/// SGL's VDP2 settings for the text plane (its calls, some not rewritten yet; as far as can be
-/// told NBG2, its cells at 0x25e78000 and its map at 0x25e7e000), its priority 7 (on top), its
-/// colour calculation ratio 12 and special mode 3, the plane cleared.
-const SL_E_E2A0: u32 = 0x0606_e2a0;
-const SL_E_E2EC: u32 = 0x0606_e2ec;
-const SL_E_E39C: u32 = 0x0606_e39c;
-const SL_E_E3AC: u32 = 0x0606_e3ac;
+/// The text plane, NBG2: 16 colours in 1x1 cells at 0x25e78000 (palette bank 3, 1-word pattern
+/// names), planes of one page, all four on the map at 0x25e7e000; its priority 7 (on top), its
+/// colour calculation ratio 12 and special mode 3; the plane cleared.
+const SL_CHAR_NBG2: u32 = 0x0606_e2a0;
+const SL_PAGE_NBG2: u32 = 0x0606_e2ec;
+const SL_PLANE_NBG2: u32 = 0x0606_e39c;
+const SL_MAP_NBG2: u32 = 0x0606_e3ac;
 const SL_SPECIAL_MODE_NBG2: u32 = 0x0606_e1a6;
 const SL_COL_RATE: u32 = 0x0606_e45c;
 
 pub fn text_plane_set(cpu: &mut Cpu) {
-    cpu.call(SL_E_E2A0, &[0, 0]);
-    cpu.call(SL_E_E2EC, &[TEXT_CELLS, 0x600, 0x8000]);
-    cpu.call(SL_E_E39C, &[0]);
-    cpu.call(SL_E_E3AC, &[TEXT_MAP; 4]);
+    cpu.call(SL_CHAR_NBG2, &[0, 0]);
+    cpu.call(SL_PAGE_NBG2, &[TEXT_CELLS, 0x600, 0x8000]);
+    cpu.call(SL_PLANE_NBG2, &[0]);
+    cpu.call(SL_MAP_NBG2, &[TEXT_MAP; 4]);
     cpu.call(SL_PRIORITY, &[3, 7]);
     cpu.call(SL_SPECIAL_MODE_NBG2, &[3]);
     cpu.call(SL_COL_RATE, &[3, 0xc]);
@@ -781,43 +781,46 @@ pub fn screen_alt(cpu: &mut Cpu) {
     nested!(cpu, 0x0605_e24c, screen_off(cpu));
 }
 
-/// SGL's VDP2 settings for play (its calls, not rewritten yet: their meanings not known yet), a
-/// flag of SGL's set, the fades stopped and the colour offsets cleared.
-const SL_E_DC8A: u32 = 0x0606_dc8a;
-const SL_E_DCEC: u32 = 0x0606_dcec;
-const SL_E_DD4C: u32 = 0x0606_dd4c;
-const SL_E_DD5C: u32 = 0x0606_dd5c;
-const SL_E_DD6C: u32 = 0x0606_dd6c;
+/// SGL's VDP2 settings for play: TV mode 4, the frame mode's bit (slDynamicFrame, as far as can
+/// be told), VRAM A and B each split in two banks, no screen's transparent dots drawn, NBG2
+/// shown (its access cycles worked out); a flag of SGL's set, the fades stopped and the colour
+/// offsets cleared.
+const TV_MODE: u32 = 0x0606_dc8a;
+const FRAME_MODE: u32 = 0x0606_dcec;
+const VRAM_SPLIT: u32 = 0x0606_dd4c;
+const SL_SCR_TRANSPARENT: u32 = 0x0606_dd5c;
+const SL_SCR_AUTO_DISP: u32 = 0x0606_dd6c;
 const SL_FLAG_FC12: u32 = 0x060f_fc12;
 
 pub fn play_screen_set(cpu: &mut Cpu) {
-    cpu.call(SL_E_DC8A, &[4]);
-    cpu.call(SL_E_DCEC, &[1]);
+    cpu.call(TV_MODE, &[4]);
+    cpu.call(FRAME_MODE, &[1]);
     cpu.write8(SL_FLAG_FC12, 1);
-    cpu.call(SL_E_DD4C, &[3]);
+    cpu.call(VRAM_SPLIT, &[3]);
     nested!(cpu, 0x0605_e9d8, stop_fades(cpu));
     nested!(cpu, 0x0605_e6c0, offsets_clear(cpu));
-    cpu.call(SL_E_DD5C, &[0]);
-    cpu.call(SL_E_DD6C, &[4]);
+    cpu.call(SL_SCR_TRANSPARENT, &[0]);
+    cpu.call(SL_SCR_AUTO_DISP, &[4]);
 }
 
-/// The screen set for the pictures (picture_load's): SGL's VDP2 settings (its calls, not
-/// rewritten yet; as far as can be told NBG0 the text plane, its cells at 0x25e78000 and its map
-/// at 0x25e7e000, zoomed by a half (twice the size) and cleared, and NBG1 the picture, its cells
-/// at VRAM's start and its map's pages from 0x25e40000, unzoomed; both at 0, 0), a flag of SGL's
-/// set, the settings to their start, the screen's fields, the pictures' scroll table, the fades
-/// stopped, the screen on.
-const SL_E_E288: u32 = 0x0606_e288;
-const SL_E_E294: u32 = 0x0606_e294;
-const SL_E_E2E4: u32 = 0x0606_e2e4;
-const SL_E_E300: u32 = 0x0606_e300;
-const SL_0_0C3C: u32 = 0x0607_0c3c;
-const SL_0_0C4C: u32 = 0x0607_0c4c;
-const SL_0_0CFC: u32 = 0x0607_0cfc;
-const SL_0_0D0C: u32 = 0x0607_0d0c;
-const SL_0_0D1C: u32 = 0x0607_0d1c;
+/// The screen set for the pictures (picture_load's): SGL's VDP2 settings (TV mode 0x1c, the
+/// frame mode's bit, NBG0 and NBG1 shown at the end): VRAM B split in two banks; NBG0 the text
+/// plane (as text_plane_set's NBG2), zoomed by a half (twice the size) and cleared; NBG1 the
+/// picture, 256 colours in 1x1 cells at VRAM's start (2-word pattern names), its planes on the
+/// pages from 0x25e40000 (its second on the next), unzoomed, its transparent dots drawn; both at
+/// 0, 0, NBG0 over NBG1; the back screen black. A flag of SGL's set, the settings to their start,
+/// the screen's fields, the pictures' scroll table, the fades stopped, the screen on.
+const SL_CHAR_NBG0: u32 = 0x0606_e288;
+const SL_CHAR_NBG1: u32 = 0x0606_e294;
+const SL_PAGE_NBG1: u32 = 0x0606_e2e4;
+const SL_PAGE_NBG0: u32 = 0x0606_e300;
+const SL_PLANE_NBG0: u32 = 0x0607_0c3c;
+const SL_MAP_NBG0: u32 = 0x0607_0c4c;
+const SL_ZOOM_MODE: u32 = 0x0607_0cfc;
+const SL_PLANE_NBG1: u32 = 0x0607_0d0c;
+const SL_MAP_NBG1: u32 = 0x0607_0d1c;
 const SL_COLOR_CALC: u32 = 0x0607_0ddc;
-const SL_0_0DEC: u32 = 0x0607_0dec;
+const SL_BACK1_COL_SET: u32 = 0x0607_0dec;
 const SL_SCR_POS_NBG0: u32 = 0x0606_e47c;
 const SL_ZOOM_NBG0: u32 = 0x0606_e46c;
 const SL_SCR_POS_NBG1: u32 = 0x0606_e4cc;
@@ -829,31 +832,31 @@ const HALF: u32 = 0x8000;
 const PICTURES_SCROLL: u32 = 0x0607_35a8;
 
 pub fn picture_screen_set(cpu: &mut Cpu) {
-    cpu.call(SL_E_DC8A, &[0x1c]);
-    cpu.call(SL_E_DCEC, &[1]);
+    cpu.call(TV_MODE, &[0x1c]);
+    cpu.call(FRAME_MODE, &[1]);
     cpu.write8(SL_FLAG_FC12, 1);
-    cpu.call(SL_E_DD4C, &[2]);
-    cpu.call(SL_E_E288, &[0, 0]);
-    cpu.call(SL_E_E300, &[TEXT_CELLS, 0x600, 0x8000]);
-    cpu.call(SL_0_0C3C, &[0]);
-    cpu.call(SL_0_0C4C, &[TEXT_MAP; 4]);
-    cpu.call(SL_0_0CFC, &[1, 0]);
+    cpu.call(VRAM_SPLIT, &[2]);
+    cpu.call(SL_CHAR_NBG0, &[0, 0]);
+    cpu.call(SL_PAGE_NBG0, &[TEXT_CELLS, 0x600, 0x8000]);
+    cpu.call(SL_PLANE_NBG0, &[0]);
+    cpu.call(SL_MAP_NBG0, &[TEXT_MAP; 4]);
+    cpu.call(SL_ZOOM_MODE, &[1, 0]);
     cpu.call(SL_SCR_POS_NBG0, &[0, 0]);
     cpu.call(SL_ZOOM_NBG0, &[HALF, HALF]);
     nested!(cpu, 0x0605_fdfc, clear_text_plane(cpu));
-    cpu.call(SL_E_E294, &[0x10, 0]);
-    cpu.call(SL_E_E2E4, &[PICTURE_CELLS, 0, 0x4000]);
-    cpu.call(SL_0_0D0C, &[0]);
+    cpu.call(SL_CHAR_NBG1, &[0x10, 0]);
+    cpu.call(SL_PAGE_NBG1, &[PICTURE_CELLS, 0, 0x4000]);
+    cpu.call(SL_PLANE_NBG1, &[0]);
     let [a, b] = PICTURE_PAGES;
-    cpu.call(SL_0_0D1C, &[a, b, a, a]);
+    cpu.call(SL_MAP_NBG1, &[a, b, a, a]);
     cpu.call(SL_SCR_POS_NBG1, &[0, 0]);
     cpu.call(SL_ZOOM_NBG1, &[ONE as u32, ONE as u32]);
-    cpu.call(SL_E_DD5C, &[2]);
+    cpu.call(SL_SCR_TRANSPARENT, &[2]);
     cpu.call(SL_COLOR_CALC, &[0]);
     cpu.call(SL_PRIORITY, &[1, 7]);
     cpu.call(SL_PRIORITY, &[0, 4]);
-    cpu.call(SL_0_0DEC, &[BACK_COLOUR_AT, 0]);
-    cpu.call(SL_E_DD6C, &[3]);
+    cpu.call(SL_BACK1_COL_SET, &[BACK_COLOUR_AT, 0]);
+    cpu.call(SL_SCR_AUTO_DISP, &[3]);
     cpu.call(SL_COL_OFFSET_ON, &[0x42, 0]);
     nested!(cpu, 0x0605_e34c, screen_reset(cpu));
     nested!(cpu, 0x0605_e2dc, screen_fields(cpu));
@@ -903,13 +906,13 @@ pub fn picture_load(cpu: &mut Cpu, p: u32, bytes: u32, count: u32) {
 
 /// SGL's VDP2 settings back to their start: the eight screens' window controls, three of the
 /// special colour calculation modes, NBG1's and NBG0's line scroll controls, with window 0's
-/// setting between the window switches.
+/// perspective (a quarter turn) between the window switches.
 const SL_WINDOW_CONTROL: u32 = 0x0606_e17c;
 const SL_SPECIAL_MODE_HIGH: u32 = 0x0606_e19e;
 const SL_SPECIAL_MODE_NBG0: u32 = 0x0606_e18c;
 const SL_SPECIAL_MODE_NBG1: u32 = 0x0606_e190;
 const SL_LINE_SCROLL_CONTROL: u32 = 0x0606_e1bc;
-const SL_E_E1CC: u32 = 0x0606_e1cc;
+const SL_PERSPECTIVE: u32 = 0x0606_e1cc;
 
 pub fn screen_reset(cpu: &mut Cpu) {
     for plane in [1, 0, 3, 2, 5, 4, 7, 6] {
@@ -922,7 +925,7 @@ pub fn screen_reset(cpu: &mut Cpu) {
         cpu.call(SL_LINE_SCROLL_CONTROL, &[plane, 0]);
     }
     nested!(cpu, 0x0606_713c, super::sgl::sl_cur_window(cpu, 0));
-    cpu.call(SL_E_E1CC, &[0x4000]);
+    cpu.call(SL_PERSPECTIVE, &[0x4000]);
     nested!(cpu, 0x0606_713c, super::sgl::sl_cur_window(cpu, 1));
 }
 

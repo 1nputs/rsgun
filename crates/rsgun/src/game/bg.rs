@@ -26,9 +26,9 @@ const SL_SCALE: u32 = 0x0606_73ec;
 const SL_PUT_POLYGON: u32 = 0x0606_745c;
 /// SGL's on-screen check (sgl.rs): negative when a point (and a size around it) is off screen.
 const SL_CHECK_ON_SCREEN: u32 = 0x0606_e9fc;
-/// The rotation scroll's parameters from the current matrix (two steps, not known yet).
-const SL_0606E4DC: u32 = 0x0606_e4dc;
-const SL_0606E50C: u32 = 0x0606_e50c;
+/// The rotation scroll's parameters from the current matrix's inverse.
+const SL_INVERS_MATRIX: u32 = 0x0606_e4dc;
+const ROTATION_PARAMETERS: u32 = 0x0606_e50c;
 /// Called with 0 before the view's models are drawn and 1 after (not known yet).
 const SL_0606713C: u32 = 0x0606_713c;
 
@@ -367,8 +367,8 @@ pub fn rotation_matrix(cpu: &mut Cpu, o: u32) {
     cpu.call(SL_ROT_Z, &[z]);
     let s = [0, 1, 2].map(|i| cpu.read32(o + 0x24 + 4 * i));
     cpu.call(SL_SCALE, &s);
-    cpu.call(SL_0606E4DC, &[]);
-    cpu.call(SL_0606E50C, &[]);
+    cpu.call(SL_INVERS_MATRIX, &[]);
+    cpu.call(ROTATION_PARAMETERS, &[]);
     cpu.call(SL_POP_MATRIX, &[]);
 }
 

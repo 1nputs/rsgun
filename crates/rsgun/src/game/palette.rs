@@ -90,6 +90,42 @@ pub fn colours_blend(cpu: &mut Cpu, b: u32) {
     cpu.write32(CHANGED, changed | CRAM_CHANGED | VDP1_CHANGED);
 }
 
+/// Colours shifted (the struct at `s`: red, green and blue offsets, words whose bits 3-8 are an
+/// offset of 6 bits; the count, a word; the colours from and the result's place): each channel
+/// moved by its offset, one that passes its top or bottom held there (the top for an offset not
+/// below 0, else 0; bit 15 the colour's); colour RAM and VDP1's table both changed.
+const S_COUNT: u32 = 6;
+const S_FROM: u32 = 8;
+const S_OUT: u32 = 0xc;
+const OFFSET_BITS: u16 = 0x1f8;
+
+pub fn colours_shift(cpu: &mut Cpu, s: u32) {
+    let f = cpu.stack();
+    let [red, green, blue] = [0, 1, 2].map(|k| cpu.read16(s + 2 * k) as i16);
+    let held = |o: i16, top: u16| if o >= 0 { top } else { 0 } as u32;
+    let (red_held, green_held, blue_held) = (held(red, 0x1f), held(green, 0x3e0), held(blue, 0x7c00));
+    cpu.write32(f, red_held);
+    cpu.write32(f + 4, blue_held);
+    let red = (red as u16 & OFFSET_BITS) as u32 >> 3;
+    let green = ((green as u16 & OFFSET_BITS) as u32) << 2;
+    let blue = ((blue as u16 & OFFSET_BITS) << 7) as i16 as i32 as u32;
+    let count = cpu.read16(s + S_COUNT) as i16 as i32;
+    let (from, out) = (cpu.read32(s + S_FROM), cpu.read32(s + S_OUT));
+    for i in 0..count.max(0) as u32 {
+        let c = cpu.read16(from + 2 * i) as u32;
+        let mut v = c & RGB_BIT as u32;
+        let r = (c & 0x1f) + red;
+        v += if r & 0x20 != 0 { red_held } else { r & 0x1f };
+        let g = (c & 0x3e0) + green;
+        v += if g >> 10 & 1 != 0 { green_held } else { g & 0x3e0 };
+        let b = (c & 0x7c00).wrapping_add(blue) & 0xffff;
+        v += if b & 0x8000 != 0 { blue_held } else { b & 0x7c00 };
+        cpu.write16(out + 2 * i, v as u16);
+    }
+    let changed = cpu.read32(CHANGED);
+    cpu.write32(CHANGED, changed | CRAM_CHANGED | VDP1_CHANGED);
+}
+
 /// At the frame's end: what was staged goes to the video chips at this VBlank, and what changed is
 /// staged for the next.
 pub fn send_colours(cpu: &mut Cpu) {

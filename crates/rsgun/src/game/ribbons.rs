@@ -105,7 +105,8 @@ const SL_MUL_FX: u32 = 0x0606_e26c;
 const SL_ATAN: u32 = 0x0606_780c;
 const SL_PUSH_MATRIX: u32 = 0x0606_71cc;
 const SL_POP_MATRIX: u32 = 0x0606_7200;
-/// SGL's polygon draw (as far as can be told: the data at its first argument, flagged 1).
+/// SGL's polygon put done on the master (sgl::put_polygons): the data at its first argument, an
+/// attribute for each polygon (1).
 const SL_POLYGONS: u32 = 0x0607_14dc;
 
 /// Sets up the ribbon `o` from the description at `d`, to move by `mover`; its edges placed. It.

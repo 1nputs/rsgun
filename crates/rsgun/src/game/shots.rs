@@ -2432,23 +2432,26 @@ pub fn strike_draw(cpu: &mut Cpu, sp: u32) {
         }
         let px = (cpu.read16(t + actors::TRAIL_X + 2 * next as u32) as u32) << 16;
         let py = (cpu.read16(t + actors::TRAIL_Y + 2 * next as u32) as u32) << 16;
+        // the SH-2 loop's registers, which its callees push (an overlay's struct reads a slot
+        // draw's prologue leaves): the piece, the place, the trail's index, the strike, the kept
+        let held = |i: i32| [(8, i as u32), (9, px), (10, py), (11, next as u32), (12, t), (13, kept as u32)];
         let (dx, dy) = (cpu.read32(f + 4).wrapping_sub(px), cpu.read32(f + 8).wrapping_sub(py));
-        let len = nested!(cpu, 0x0604_5e60, super::aim::length(cpu, dx, dy));
+        let len = cpu.holding(&held(i), |cpu| nested!(cpu, 0x0604_5e60, super::aim::length(cpu, dx, dy)));
         let len = (len as i32 / 0x1_0000) as u16;
         cpu.write16(c + 0xe, len);
         cpu.write16(c + 0xa, len);
         let (dx, dy) = (cpu.read32(f + 4).wrapping_sub(px), cpu.read32(f + 8).wrapping_sub(py));
-        let a = cpu.call(SL_ATAN, &[dx, dy]).wrapping_add(0x4000);
+        let a = cpu.holding(&held(i), |cpu| cpu.call(SL_ATAN, &[dx, dy])).wrapping_add(0x4000);
         cpu.write16(f + 0x20, a as u16);
         let frame = if kept > 0 && i + 1 < pieces(cpu) { 0xaf } else { 0xb3 };
         cpu.write8(f + 0x1f, frame);
-        nested!(cpu, 0x0604_0960, sprites::draw(cpu, f));
+        cpu.holding(&held(i), |cpu| nested!(cpu, 0x0604_0960, sprites::draw(cpu, f)));
         cpu.write32(f + 4, px);
         cpu.write32(f + 8, py);
         i += 1;
         let n = pieces(cpu) as u32;
-        let along = nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, i as u32, n));
-        let shade = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, 15, along));
+        let along = cpu.holding(&held(i), |cpu| nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, i as u32, n)));
+        let shade = cpu.holding(&held(i), |cpu| nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, 15, along)));
         let colour = (shade as u16).wrapping_add(cpu.read16(f + 0x1a));
         cpu.write16(f + 0x18, colour);
     }

@@ -250,18 +250,39 @@ pub struct Prologue {
 }
 
 const PR_PUSH: u8 = 16;
+/// The control and MAC registers a prologue pushes (interrupt handlers' `stc.l GBR` and
+/// `sts.l MACH`/`MACL`, `stc.l SR`): only in PROLOGUES.
+const GBR_PUSH: u8 = 17;
+const MACH_PUSH: u8 = 18;
+const MACL_PUSH: u8 = 19;
+const SR_PUSH: u8 = 20;
 
 /// Prologues the reader cannot take from the code: SGL's on-screen check pushes r0 for a while
-/// after its two pushes, before its first branch (it is popped again: not part of its frame).
-const PROLOGUES: [(u32, &[u8]); 1] = [(0x0606_e9fc, &[6, 7])];
+/// after its two pushes, before its first branch (it is popped again: not part of its frame);
+/// slPutPolygonX pushes PR first, then r9 and r8; the rotation parameters' push r8 first, then PR
+/// and the others (and GBR, which the rewrite writes itself); slScrAutoDisp pushes PR first, then
+/// the others, and takes its frame by a subtraction; SGL's interrupt handlers save what they use,
+/// GBR, MACH, MACL and SR among it.
+const PROLOGUES: [(u32, &[u8], u32); 10] = [
+    (0x0606_e9fc, &[6, 7], 0),
+    (0x0607_10b0, &[PR_PUSH, 9, 8], 0),
+    (0x0606_e50c, &[8, PR_PUSH, 14, 13, 12, 11, 10, 9], 0),
+    (0x0606_dd6c, &[PR_PUSH, 13, 12, 11, 10, 9, 8], 0xa4),
+    (0x0603_32a0, &[0, GBR_PUSH], 0),
+    (0x0603_32b2, &[0, GBR_PUSH], 0),
+    (0x0603_32c4, &[0, GBR_PUSH], 0),
+    (0x0603_4c1a, &[0, 4, 3, 2, 1, PR_PUSH, MACH_PUSH, MACL_PUSH], 0),
+    (0x0603_32d6, &[0, 7, 6, 5, 4, 3, 2, PR_PUSH, 1, GBR_PUSH, MACH_PUSH, MACL_PUSH, SR_PUSH], 0),
+    (0x0603_3430, &[0, 1, GBR_PUSH, PR_PUSH, 7, 6, 5, 4, 3, 2, MACH_PUSH, MACL_PUSH, SR_PUSH], 0),
+];
 
 impl Prologue {
     /// Read from the code at `entry` (but PROLOGUES), up to its first branch: the pushes (`mov.l Rm,@-R15`, then
     /// `sts.l PR,@-R15`, after which a push is an argument's), and the locals (`add #imm,R15`, or
     /// `mov.w @(disp,PC),Rn` then `add Rn,R15`). Other instructions may be scheduled among them.
     pub fn read(bus: &mut dyn Bus, entry: u32) -> Prologue {
-        if let Some((_, pushes)) = PROLOGUES.iter().find(|(e, _)| *e == entry) {
-            return Prologue { pushes: pushes.to_vec(), locals: 0 };
+        if let Some(&(_, pushes, locals)) = PROLOGUES.iter().find(|(e, ..)| *e == entry) {
+            return Prologue { pushes: pushes.to_vec(), locals };
         }
         let mut p = Prologue { pushes: Vec::new(), locals: 0 };
         let mut words = [None; 16];
@@ -307,7 +328,14 @@ impl Prologue {
         let mut sp = sh2.r[15];
         for &r in &self.pushes {
             sp = sp.wrapping_sub(4);
-            let v = if r == PR_PUSH { sh2.pr } else { sh2.r[r as usize] };
+            let v = match r {
+                PR_PUSH => sh2.pr,
+                GBR_PUSH => sh2.gbr,
+                MACH_PUSH => sh2.mach,
+                MACL_PUSH => sh2.macl,
+                SR_PUSH => sh2.sr,
+                _ => sh2.r[r as usize],
+            };
             bus.write32(sp, v);
         }
         sp.wrapping_sub(self.locals)
@@ -399,6 +427,7 @@ pub fn register(n: &mut Natives) {
         0x0600_5b18 => palette::set_colours[colours, index, count] -> (),
         0x0600_5b5c => palette::set_vdp1_colours[colours, index, count] -> (),
         0x0600_5ba4 => palette::colours_blend[b] -> (),
+        0x0600_5c90 => palette::colours_shift[s] -> (),
         0x0600_5a70 => palette::send_colours[] -> (),
         0x0600_5da0 => files::file_no[name] -> u32,
         0x0600_5e40 => files::load_file[name] -> u32,
@@ -435,6 +464,7 @@ pub fn register(n: &mut Natives) {
         0x0600_4ddc => sound::stop_effects[] -> (),
         0x0600_4e98 => sound::request_music[music] -> (),
         0x0600_4f0c => sound::music_fade_out[frames] -> (),
+        0x0600_4edc => sound::music_fade_to[volume, frames] -> (),
         0x0600_4f3c => sound::se_control[se] -> u32,
         0x0600_50d4 => sound::se_set[se] -> u32,
         0x0600_52e0 => sound::se_stop[se, control] -> u32,
@@ -961,6 +991,121 @@ pub fn register(n: &mut Natives) {
         0x0606_7276 => sgl::sl_rot_z_sc[s, c] -> (),
         0x0606_e23c => sgl::sl_bg_on[bits] -> (),
         0x0603_511a => sgl::sl_push_unit_matrix[] -> u32,
+        0x0607_10b0 => sgl::sl_put_polygon_x[pd, light] -> u32,
+        0x0607_20fc => sgl::turn_undone[] -> (),
+        0x0607_212c => sgl::turn_vector[v, out] -> (),
+        0x0607_0ff0 => sgl::gouraud_make[pd] -> (),
+        0x0607_0fbc => sgl::sl_init_gouraud[tables, count, first, shades] -> (),
+        0x0607_0f8c => sgl::sl_light[v] -> (),
+        0x0606_e288 => sgl::sl_char_nbg0[kind, size] -> (),
+        0x0606_e294 => sgl::sl_char_nbg1[kind, size] -> (),
+        0x0606_e2a0 => sgl::sl_char_nbg2[kind, size] -> (),
+        0x0606_e2b6 => sgl::sl_char_nbg3[kind, size] -> (),
+        0x0606_e27c => sgl::sl_char_rbg0[kind, size] -> (),
+        0x0606_e300 => sgl::sl_page_nbg0[cells, palette, kind] -> (),
+        0x0606_e2e4 => sgl::sl_page_nbg1[cells, palette, kind] -> (),
+        0x0606_e2ec => sgl::sl_page_nbg2[cells, palette, kind] -> (),
+        0x0606_e2f4 => sgl::sl_page_nbg3[cells, palette, kind] -> (),
+        0x0606_e2ce => sgl::sl_page_rbg0[cells, palette, kind] -> (),
+        0x0607_1cde => sgl::rotation_bank[at, use_] -> (),
+        0x0607_0c4c => sgl::sl_map_nbg0[a, b, c, d] -> (),
+        0x0607_0d1c => sgl::sl_map_nbg1[a, b, c, d] -> (),
+        0x0606_e3ac => sgl::sl_map_nbg2[a, b, c, d] -> (),
+        0x0607_1c4c => sgl::sl_map_rbg0[a] -> (),
+        0x0607_0c3c => sgl::sl_plane_nbg0[size] -> (),
+        0x0607_0d0c => sgl::sl_plane_nbg1[size] -> (),
+        0x0606_e39c => sgl::sl_plane_nbg2[size] -> (),
+        0x0607_0cfc => sgl::sl_zoom_mode[screen, mode] -> (),
+        0x0607_0dec => sgl::sl_back1_col_set[at, colour] -> (),
+        0x0606_dd4c => sgl::vram_split[split] -> (),
+        0x0606_dd5c => sgl::sl_scr_transparent[bits] -> (),
+        0x0606_990c => sgl::sl_zdsp_level[level] -> u32,
+        0x0606_98cc => sgl::dma0_busy[] -> u32,
+        0x0607_1154 => sgl::sl_set_gouraud_color[rgb] -> (),
+        0x0606_e1cc => sgl::sl_perspective[angle] -> (),
+        0x0606_e50c => sgl::rotation_parameters[] -> u32,
+        0x0606_dc8a => sgl::tv_mode[mode] -> u32,
+        0x0606_705c => sgl::slave_setting_60[v] -> (),
+        0x0606_7088 => sgl::slave_setting_68[v] -> (),
+        0x0606_70ac => sgl::screen_size[width, height] -> (),
+        0x0606_70fc => sgl::sprite_colour_mode[mode] -> (),
+        0x0606_711c => sgl::sl_tv_on[] -> (),
+        0x0606_7126 => sgl::sl_tv_off[] -> (),
+        0x0607_215c => sgl::scu_copy[dst, src, bytes] -> u32,
+        0x0607_10f6 => sgl::sl_gouraud_tbl_copy[] -> (),
+        0x0606_dd6c => sgl::sl_scr_auto_disp[screens] -> u32,
+        0x0606_dcec => sgl::frame_mode[on] -> u32,
+        0x0607_14dc => sgl::put_polygons[pd, each] -> u32,
+        0x0603_4dd4 => sgl::sl_random[] -> u32,
+        0x0603_512e => sgl::sl_unit_matrix[m] -> u32,
+        0x0603_5110 => sgl::sl_init_matrix[] -> u32,
+        0x0603_3a00 => sgl::sl_int_function[f] -> (),
+        0x0603_4a50 => sgl::sl_transfer_entry[src, dst, size] -> u32,
+        0x0603_3a10 => sgl::sl_dma_copy[src, dst, size] -> (),
+        0x0603_3aa0 => sgl::sl_dmax_copy[src, dst, size, mode] -> u32,
+        0x0603_4cca => sgl::sl_synch[] -> u32,
+        0x0603_4e4a => sgl::sound_flush[] -> (),
+        0x0603_4df2 => sgl::pcm_step[] -> (),
+        0x0603_32a0 => sgl::dma_level0_end[] -> (),
+        0x0603_32b2 => sgl::dma_level1_end[] -> (),
+        0x0603_32c4 => sgl::dma_level2_end[] -> (),
+        0x0603_4c1a => sgl::smpc_interrupt[] -> (),
+        0x0603_3b40 => sgl::smpc_lock[] -> u32,
+        0x0603_3b4a => sgl::smpc_unlock[v] -> u32,
+        0x0603_3ef6 => sgl::smpc_wanted[] -> u32,
+        0x0603_3f02 => sgl::smpc_going[] -> u32,
+        0x0603_3f2e => sgl::smpc_mark_going[] -> (),
+        0x0603_3f68 => sgl::smpc_busy_count[] -> u32,
+        0x0603_3b68 => sgl::smpc_port_setting_a[v] -> u32,
+        0x0603_3b8e => sgl::smpc_port_setting_b[v] -> u32,
+        0x0603_3c04 => sgl::smpc_port_bit_c0[v] -> u32,
+        0x0603_3c34 => sgl::smpc_port_bit_c1[v] -> u32,
+        0x0603_3c80 => sgl::smpc_port_bit_d0[v] -> u32,
+        0x0603_3cb0 => sgl::smpc_port_bit_d1[v] -> u32,
+        0x0603_3ce8 => sgl::smpc_command_entry[c] -> u32,
+        0x0603_3dbc => sgl::peripherals_clear[] -> (),
+        0x0603_3b58 => sgl::smpc_setting_a[] -> u32,
+        0x0603_3b60 => sgl::smpc_setting_b[] -> u32,
+        0x0603_3bf0 => sgl::smpc_setting_c0_clear[] -> u32,
+        0x0603_3bfa => sgl::smpc_setting_c1_clear[] -> u32,
+        0x0603_3c6c => sgl::smpc_setting_d0_clear[] -> u32,
+        0x0603_3c76 => sgl::smpc_setting_d1_clear[] -> u32,
+        0x0603_3d3c => sgl::smpc_ports_readable[] -> u32,
+        0x0603_3d7e => sgl::smpc_any_port[] -> u32,
+        0x0603_3d9c => sgl::smpc_port_modes[v] -> u32,
+        0x0603_42ba => sgl::smpc_mode_bit[v] -> u32,
+        0x0603_42fa => sgl::smpc_port1_mode[v] -> u32,
+        0x0603_4338 => sgl::smpc_port2_mode[v] -> u32,
+        0x0603_6a50 => sgl::intback_parameters[] -> (),
+        0x0603_4258 => sgl::smpc_issue[entry, wait] -> u32,
+        0x0603_44c4 => sgl::sl_request_command[c] -> u32,
+        0x0603_4378 => sgl::smpc_request_plain[entry] -> u32,
+        0x0603_43e8 => sgl::smpc_request_intback_status[entry] -> u32,
+        0x0603_4420 => sgl::smpc_request_intback_pads[entry] -> u32,
+        0x0603_6620 => sgl::pad_clear[data, record] -> (),
+        0x0603_662a => sgl::pad_buttons[now, record] -> u32,
+        0x0603_6950 => sgl::device_none[data, record] -> u32,
+        0x0603_669c => sgl::device_pad[data, record] -> u32,
+        0x0603_3f90 => sgl::parse_port[data_at, records_at] -> u32,
+        0x0603_4048 => sgl::parse_ports[] -> (),
+        0x0603_4120 => sgl::smpc_frame_in[] -> (),
+        0x0603_41d4 => sgl::smpc_frame_out[] -> (),
+        0x0603_3404 => sgl::dma1_copy[src, dst, words] -> (),
+        0x0603_32d6 => sgl::vblank_in[] -> (),
+        0x0603_3430 => sgl::vblank_out[] -> (),
+        0x0603_3590 => sgl::synch_init[mode, frames] -> (),
+        0x0603_3dd4 => sgl::smpc_init[] -> (),
+        0x0603_61c0 => sgl::slave_call[] -> (),
+        0x0603_6254 => sgl::slave_zdsp_level[] -> (),
+        0x0603_6268 => sgl::slave_perspective[] -> (),
+        0x0603_627a => sgl::slave_light[] -> (),
+        0x0603_6286 => sgl::slave_keep_60[] -> (),
+        0x0603_628a => sgl::slave_keep_64[] -> (),
+        0x0603_628e => sgl::slave_keep_68[] -> (),
+        0x0603_6430 => sgl::slave_window[] -> (),
+        0x0603_6412 => sgl::slave_frame_end[] -> (),
+        0x0603_8330 => sgl::slave_quads[] -> (),
+        0x0603_7f0e => sgl::slave_sprite[] -> (),
         0x0606_9a0c => math::sl_sin[a] -> u32,
         0x0606_9a30 => math::sl_cos[a] -> u32,
         0x0606_e26c => math::sl_mul_fx[a, b] -> u32,
