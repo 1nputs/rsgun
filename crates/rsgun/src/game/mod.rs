@@ -1311,8 +1311,30 @@ pub fn register(n: &mut Natives) {
         0x0608_0054 => logos::logos_exec[obj] -> (),
         0x0608_04a0 => logos::logos_set[] -> (),
     }
-    // RANK.BIN's code (the ranking mode's): its `rewrites! { n; overlay "RANK"; ... }` block
-    // goes here (an empty block does not compile; the first batch makes it with its first entry).
+    // RANK.BIN's code (the ranking mode's)
+    rewrites! { n; overlay "RANK";
+        0x0608_0000 => rank::rank_mode[game] -> u32,
+        0x0608_04c4 => rank::entry_name_text[name] -> (),
+        0x0608_0514 => rank::entry_name_copy[name] -> (),
+        0x0608_0538 => rank::entry_change_sign[v] -> (),
+        0x0608_057c => rank::entry_rank_text[n] -> (),
+        0x0608_0608 => rank::entry_score_text[score] -> (),
+        0x0608_07f0 => rank::name_entry_exec[o] -> (),
+        0x0608_3840 => rank::name_entry_set[] -> u32,
+        0x0608_3908 => rank::name_text[name] -> (),
+        0x0608_3958 => rank::rank_text[n] -> (),
+        0x0608_39e4 => rank::change_sign[v] -> (),
+        0x0608_3a28 => rank::score_text[score] -> (),
+        0x0608_3b1c => rank::result_exec[o] -> (),
+        0x0608_45a8 => rank::result_set[] -> u32,
+        0x0608_4600 => rank::rank_screen_load[base] -> (),
+        0x0608_4684 => rank::rank_screen[base] -> (),
+        0x0608_4858 => rank::plane_a_scale[x, y] -> (),
+        0x0608_48a4 => rank::plane_a_place[x, y] -> (),
+        0x0608_48c4 => rank::map_address[x, y] -> u32,
+        0x0608_4904 => rank::text_plane_clear[] -> (),
+        0x0608_4924 => sgl::sl_sprite_type[t] -> (),
+    }
     // OPENING.BIN's code (the opening mode's), with its copies of SGL's NBG3 and sprite setters
     rewrites! { n; overlay "OPENING";
         0x0608_0000 => opening::opening_mode[game] -> u32,
