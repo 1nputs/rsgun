@@ -1,7 +1,7 @@
 //! STG02.BIN's code, which the stage 2 mode runs in the overlay window (its screen data is
 //! SCRDAT21 and SCRDAT22): its mode's code, its enemies and scenery, its scrolls.
 
-use super::globals::{BIOS_SETTING, GAME_MODE, LOOPS, PLAY_DATA, PLAY_DATA_SIZE};
+use super::globals::{BIOS_SETTING, GAME_FLAGS, GAME_MODE, LOOPS, PLAY_DATA, PLAY_DATA_SIZE};
 use super::bullets::{AS_ANGLE, AS_FLAGS, AS_POSITION, AS_SHOOTER, AS_SPEED, S_ANGLE, S_NUMBER, S_POSITION};
 use super::{actors, aim, bg, bullets, camera, clib, dma, effects, explosions, files, gouraud, ground, hits, kinds, hud, math, models, nested, objects, orbits, palette, parts, results, ribbons, rings, screen, sgl, sound, sprites, states, text, timeline, Cpu};
 
@@ -16312,4 +16312,1115 @@ pub fn last_boss_make(cpu: &mut Cpu) -> u32 {
     }
     cpu.write8(o + LB_STEP, 0);
     cpu.read8(o + NUMBER) as i8 as i32 as u32
+}
+
+/// The director's record (states.rs's) and its flags (+0x3e); the 3D view (bg.rs's: its place on
+/// its path in the first long, its x at +4, its y angle's low half at +0x16, its sine scale at
+/// +0x14), the scenery's frame of reference (bg.rs's MOVER: its place up at +0x10), the rotation
+/// scroll's second plane (+0x0c, +0x10 its place), the stage's screen record and the hook it
+/// keeps (+0x58: called each frame to draw).
+const DIRECTOR: u32 = 0x0607_46e0;
+const DIRECTOR_FLAGS: u32 = 0x3e;
+const SCENE_VIEW: u32 = 0x0607_4750;
+const SCENE_VIEW_X: u32 = 4;
+const SCENE_VIEW_TURN_X: u32 = 16;
+const SCENE_VIEW_SCALE: u32 = 20;
+const SCENE_VIEW_TURN_Y: u32 = 22;
+const SCENE_MOVER: u32 = 0x0607_4810;
+const SCENE_MOVER_TILT: u32 = 0;
+const SCENE_MOVER_Y: u32 = 16;
+const SCENE_PLANE: u32 = 0x0607_4770;
+const SCENE_PLANE_X: u32 = 12;
+const SCENE_PLANE_Y: u32 = 16;
+const SCREEN_HOOK: u32 = 0x58;
+/// The view's paths and the messages of the stages' scenery scenes (past the image: read at run
+/// time), the models' kind (its file's list of pieces at +0x1c), the pieces' check size.
+const TUNNEL_PATH: u32 = 0x060a_7788;
+const TUNNEL_MESSAGE: u32 = 0x060a_7a8c;
+const RAIL_PATH: u32 = 0x060a_7e70;
+const RAIL_MESSAGE: u32 = 0x060a_7aec;
+const PIECES_KIND: u32 = 0x31;
+const PIECES_MODELS_AT: u32 = 0x1c;
+const PIECES_CHECK: u32 = 0x28_0000;
+const PIECES_REACH: u32 = 0x18_0000;
+/// The scenery scenes' per-frame sets of SGL calls in this overlay (their own copies of SGL's
+/// setters, not rewritten yet): the screen's blocks and windows by place.
+const SL_WINDOW_RANGE: u32 = 0x060a_2804;
+const SL_SPRITES_COPY: u32 = 0x060a_2824;
+const SL_SCENE_MODE: u32 = 0x060a_26b4;
+const SL_SCENE_SIZE: u32 = 0x060a_27c4;
+const SL_SCENE_ON: u32 = 0x060a_26c4;
+const SL_SCENE_MESSAGE: u32 = 0x060a_26fc;
+const SL_SCENE_PLACE: u32 = 0x060a_2844;
+const SL_SCENE_TURN: u32 = 0x060a_2864;
+
+fn scene_scroll_next(cpu: &mut Cpu) {
+    nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+}
+
+/// Moves on to the next scroll if the director's flags have bit 0.
+pub fn scroll_if_flagged(cpu: &mut Cpu) {
+    let game = cpu.read32(DIRECTOR);
+    if cpu.read8(game + DIRECTOR_FLAGS) & 1 != 0 {
+        scene_scroll_next(cpu);
+    }
+}
+
+/// The pillars' scene's start (`game`'s word +0x20 given 8.0): BG layers on, kind 49's first four
+/// models set, the view at the path's start and the mover's frame cleared (its words and angles
+/// zero, its scales 1.0), the draw hook set, the message made.
+pub fn tunnel_start(cpu: &mut Cpu, game: u32) {
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x3_0014));
+    nested!(cpu, 0x0606_2f74, gouraud::models_hss(cpu, PIECES_KIND, 4));
+    cpu.write32(SCENE_VIEW, 0);
+    nested!(cpu, 0x0605_f5b0, bg::view_along(cpu, TUNNEL_PATH));
+    for at in [20, 16, 12, 32, 28, 24] {
+        cpu.write32(SCENE_MOVER + at, 0);
+    }
+    for at in [4, 2, 0, 10, 8, 6] {
+        cpu.write16(SCENE_MOVER + at, 0);
+    }
+    for at in [44, 40, 36] {
+        cpu.write32(SCENE_MOVER + at, 0x1_0000);
+    }
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x3_0014));
+    let screen = cpu.read32(screen::SCREEN);
+    cpu.write32(screen + SCREEN_HOOK, 0x0609_d68c);
+    nested!(cpu, 0x0606_1620, text::message_set(cpu, TUNNEL_MESSAGE));
+    cpu.write32(game + 0x20, 0x8_0000);
+}
+
+/// Two of the pieces (the first and second of `pair`'s) at (x, y, z): each checked on screen as
+/// a box (size 2.5, 1.5 either side of the place in x and y), the matrix moved to the place if
+/// either is, and each seen one drawn.
+fn pieces_at(cpu: &mut Cpu, x: u32, y: u32, z: u32, pair: [u32; 2]) {
+    let p = cpu.stack();
+    let mut seen = [false; 2];
+    for (k, reach) in [PIECES_REACH.wrapping_neg(), PIECES_REACH].into_iter().enumerate() {
+        cpu.write32(p, x.wrapping_add(reach));
+        cpu.write32(p + 4, y.wrapping_add(reach));
+        cpu.write32(p + 8, z);
+        let on = nested!(cpu, 0x0606_e9fc, sgl::sl_check_on_screen(cpu, p, PIECES_CHECK));
+        seen[k] = on & 0x8000_0000 == 0;
+    }
+    if seen[0] || seen[1] {
+        nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+        nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, z));
+        for k in [0, 1] {
+            if seen[k] {
+                let file = cpu.read32(kind(PIECES_KIND));
+                let models = cpu.read32(file + PIECES_MODELS_AT);
+                let piece = cpu.read32(models + 4 * pair[k]);
+                let model = cpu.read32(piece);
+                nested!(cpu, 0x0606_745c, sgl::sl_put_polygon(cpu, model));
+            }
+        }
+        nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    }
+}
+
+/// Pieces 3 and 1 at (x, y, z).
+pub fn pieces_high(cpu: &mut Cpu, x: u32, y: u32, z: u32) {
+    pieces_at(cpu, x, y, z, [3, 1]);
+}
+
+/// Pieces 2 and 0 at (x, y, z).
+pub fn pieces_low(cpu: &mut Cpu, x: u32, y: u32, z: u32) {
+    pieces_at(cpu, x, y, z, [2, 0]);
+}
+
+/// The scenes' pieces: the high and low pairs of a row, laid out at x and y.
+const PILLAR_ROWS: [(bool, u32, u32); 18] = [
+    (false, 0, 0x0080_0000),
+    (false, 0x0100_0000, 0x0080_0000),
+    (true, 0xff40_0000, 0x0040_0000),
+    (true, 0x0040_0000, 0x0040_0000),
+    (true, 0x0140_0000, 0x0040_0000),
+    (false, 0x01c0_0000, 0xffc0_0000),
+    (false, 0x00c0_0000, 0xffc0_0000),
+    (false, 0xffc0_0000, 0xffc0_0000),
+    (false, 0, 0xff80_0000),
+    (false, 0x0100_0000, 0xff80_0000),
+    (true, 0xff40_0000, 0xff40_0000),
+    (true, 0x0040_0000, 0xff40_0000),
+    (true, 0x0140_0000, 0xff40_0000),
+    (false, 0x01c0_0000, 0xfec0_0000),
+    (false, 0x00c0_0000, 0xfec0_0000),
+    (false, 0xffc0_0000, 0xfec0_0000),
+    (false, 0, 0xfe80_0000),
+    (false, 0x0100_0000, 0xfe80_0000),
+];
+
+/// The rail scene's rows: the same, further on.
+const RAIL_ROWS: [(bool, u32, u32); 19] = [
+    (false, 0x0100_0000, 0x0080_0000),
+    (true, 0xff40_0000, 0x0040_0000),
+    (true, 0x0040_0000, 0x0040_0000),
+    (true, 0x0140_0000, 0x0040_0000),
+    (false, 0x01c0_0000, 0xffc0_0000),
+    (false, 0x00c0_0000, 0xffc0_0000),
+    (false, 0x0100_0000, 0xff80_0000),
+    (true, 0x0040_0000, 0xff40_0000),
+    (true, 0x0140_0000, 0xff40_0000),
+    (false, 0x01c0_0000, 0xfec0_0000),
+    (false, 0x00c0_0000, 0xfec0_0000),
+    (false, 0x0100_0000, 0xfe80_0000),
+    (true, 0x0040_0000, 0xfe40_0000),
+    (true, 0x0140_0000, 0xfe40_0000),
+    (false, 0x01c0_0000, 0xfdc0_0000),
+    (false, 0x00c0_0000, 0xfdc0_0000),
+    (false, 0x0100_0000, 0xfd80_0000),
+    (true, 0x0140_0000, 0xfd40_0000),
+    (false, 0x01c0_0000, 0xfcc0_0000),
+];
+
+/// The rows drawn with the matrix about the view: the high pieces' function for a true row, the
+/// low's for a false.
+fn draw_rows(cpu: &mut Cpu, rows: &[(bool, u32, u32)]) {
+    for &(high, x, y) in rows {
+        if high {
+            nested!(cpu, 0x0609_d4dc, pieces_high(cpu, x, y, 0));
+        } else {
+            nested!(cpu, 0x0609_d5b4, pieces_low(cpu, x, y, 0));
+        }
+    }
+}
+
+/// The pillars' draw (the screen's hook): window 0, the view's matrix, moved by the view's x
+/// (its top byte) and the mover's y (below its top byte), the rows drawn, then the mover's
+/// rotation; window 1.
+pub fn tunnel_draw(cpu: &mut Cpu) {
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 0));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let x = cpu.read32(SCENE_VIEW + SCENE_VIEW_X) & 0xff00_0000;
+    let y = cpu.read32(SCENE_MOVER + SCENE_MOVER_Y) & 0x00ff_ffff;
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, 0));
+    draw_rows(cpu, &PILLAR_ROWS);
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCENE_MOVER));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 1));
+}
+
+/// The pillars' move (`o`'s word +0x20 its speed along): the mover moved along by it, the view
+/// on its path (eased), the draw.
+pub fn tunnel_move(cpu: &mut Cpu, o: u32) {
+    let speed = cpu.read32(o + 32);
+    nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, 0, speed, 0));
+    nested!(cpu, 0x0605_f648, bg::view_along_eased(cpu, TUNNEL_PATH));
+    nested!(cpu, 0x0609_d68c, tunnel_draw(cpu));
+}
+
+/// The pillars' step: the view's place on by 0x100, moved; once past 3.0 the speed (above 0.25)
+/// slowed by 0x800 a frame; the next scroll once past 4.0.
+pub fn tunnel_step(cpu: &mut Cpu, o: u32) {
+    let at = cpu.read32(SCENE_VIEW).wrapping_add(0x100);
+    cpu.write32(SCENE_VIEW, at);
+    nested!(cpu, 0x0609_d7f4, tunnel_move(cpu, o));
+    if (cpu.read32(SCENE_VIEW) as i32) > 0x2_ffff && (cpu.read32(o + 32) as i32) > 0x4000 {
+        let speed = cpu.read32(o + 32).wrapping_sub(0x800);
+        cpu.write32(o + 32, speed);
+    }
+    if (cpu.read32(SCENE_VIEW) as i32) > 0x3_ffff {
+        scene_scroll_next(cpu);
+    }
+}
+
+/// The wave's lines: 224 pairs of longs (a scroll in x, a zoom in 16.16) for the line scroll
+/// table, sent to VDP2's RAM each frame.
+const WAVE_LINES: u32 = 0x060a_89e0;
+const WAVE_COUNT: u32 = 224;
+const WAVE_VRAM: u32 = 0x25e7_2000;
+const WAVE_SIZE: u32 = 0x700;
+
+/// The wave's lines cleared: no scroll, zoom 1.0.
+pub fn wave_clear(cpu: &mut Cpu) {
+    for k in 0..WAVE_COUNT {
+        cpu.write32(WAVE_LINES + 8 * k, 0);
+        cpu.write32(WAVE_LINES + 8 * k + 4, 0x1_0000);
+    }
+}
+
+/// The wave's lines with no scroll and a zoom at random about 1.0 (0xff80 to 0x1007f).
+pub fn wave_random(cpu: &mut Cpu) {
+    for k in 0..WAVE_COUNT {
+        cpu.write32(WAVE_LINES + 8 * k, 0);
+        let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+        cpu.write32(WAVE_LINES + 8 * k + 4, 0xff80 + (r & 0xff));
+    }
+}
+
+/// The wave's lines for a sway of `amount`: each line's angle 0x124 on from the last, its sine
+/// (by `amount`) scrolling the line by 11.0 times that less, its zoom about 1.0 by the same
+/// and a random 0 to 255 less 128.
+pub fn wave_set(cpu: &mut Cpu, amount: u32) {
+    let mut angle: i32 = 0;
+    for k in 0..WAVE_COUNT {
+        let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, angle as u32));
+        let sway = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, s, amount));
+        let zoom = sway.wrapping_add(0x1_0000);
+        let scroll = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0xb0_0000, 0x1_0000u32.wrapping_sub(zoom)));
+        cpu.write32(WAVE_LINES + 8 * k, scroll);
+        let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+        cpu.write32(WAVE_LINES + 8 * k + 4, zoom.wrapping_sub(128).wrapping_add(r & 0xff));
+        angle = (angle + 0x124) as i16 as i32;
+    }
+}
+
+/// A ripple's object: its centre line (+0x10), its sway (+0x20), its half height in lines
+/// (+0x18), its phase (a long at +0x14, the angle its low half), the phase's step per line (+0x1c,
+/// the angle its low half), the sway's step down (+0x24), its frames (+0x28); its state in +3.
+const RIPPLE_SIZE: u32 = 0x2c;
+const RIPPLE_STATE: u32 = 3;
+const RIPPLE_CENTRE: u32 = 0x10;
+const RIPPLE_PHASE: u32 = 0x14;
+const RIPPLE_PHASE_ANGLE: u32 = 0x16;
+const RIPPLE_HALF: u32 = 0x18;
+const RIPPLE_STEP: u32 = 0x1c;
+const RIPPLE_STEP_ANGLE: u32 = 0x1e;
+const RIPPLE_SWAY: u32 = 0x20;
+const RIPPLE_SWAY_DOWN: u32 = 0x24;
+const RIPPLE_FRAMES: u32 = 0x28;
+/// Its states: started (1), over (0x70), then gone (0x73).
+const RIPPLE_RUNNING: u8 = 1;
+const RIPPLE_OVER: u8 = 0x70;
+const RIPPLE_GONE: u8 = 0x73;
+const RIPPLE_LIFE: u32 = 16;
+const RIPPLE_EXEC: u32 = 0x0609_d9ac;
+
+/// A ripple's step: not while the game is paused; the first frame sets its sway's step (a
+/// sixteenth of the sway), its phase's step (0x8000 over its half height) and halves its
+/// half height; each frame the lines in its range (on the table) are nudged by the sway times
+/// the sine of an angle stepping on by the phase's step, half of them at random; the phase on by
+/// 0x1000, the sway down by its step; after 16 frames it is over, then gone.
+pub fn ripple_behaviour(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(GAME_FLAGS) & 0x8000_0000 != 0 {
+        return;
+    }
+    let state = cpu.read8(o + RIPPLE_STATE) as i8;
+    if state == 0 {
+        cpu.write32(o + RIPPLE_PHASE, 0);
+        cpu.write8(o + RIPPLE_STATE, RIPPLE_RUNNING);
+        let sway = cpu.read32(o + RIPPLE_SWAY) as i32;
+        let down = (if sway < 0 { sway.wrapping_add(15) } else { sway }) >> 4;
+        cpu.write32(o + RIPPLE_SWAY_DOWN, down as u32);
+        cpu.write32(o + RIPPLE_FRAMES, 0);
+        let half = cpu.read32(o + RIPPLE_HALF);
+        let step = nested!(cpu, 0x0606_62d8, clib::divide(cpu, 0x8000, half));
+        cpu.write32(o + RIPPLE_STEP, step);
+        let half = cpu.read32(o + RIPPLE_HALF) as i32;
+        cpu.write32(o + RIPPLE_HALF, (half >> 1) as u32);
+    } else if state != 1 {
+        if state > 1 {
+            if state == RIPPLE_OVER as i8 {
+                cpu.write8(o + RIPPLE_STATE, RIPPLE_GONE);
+            } else if state == RIPPLE_GONE as i8 {
+                nested!(cpu, 0x0600_579c, objects::obj_free(cpu, o));
+            }
+        }
+        return;
+    }
+    let phase = cpu.read16(o + RIPPLE_PHASE_ANGLE) as i16 as i32 as u32;
+    let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, phase));
+    let sway = cpu.read32(o + RIPPLE_SWAY);
+    let amount = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, sway, s));
+    let first = cpu.read32(o + RIPPLE_CENTRE).wrapping_sub(cpu.read32(o + RIPPLE_HALF)) as i32;
+    let mut angle: i32 = 0;
+    let mut line = first;
+    while line < (cpu.read32(o + RIPPLE_CENTRE).wrapping_add(cpu.read32(o + RIPPLE_HALF)) as i32) {
+        if line >= 0 && line <= (WAVE_COUNT - 1) as i32 {
+            let step = cpu.read16(o + RIPPLE_STEP_ANGLE) as i16 as i32;
+            angle = (angle + step) as i16 as i32;
+            let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+            if r & 1 == 0 {
+                let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, angle as u32));
+                let nudge = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, amount, s));
+                let at = WAVE_LINES + 8 * line as u32;
+                let v = cpu.read32(at).wrapping_sub(nudge);
+                cpu.write32(at, v);
+            }
+        }
+        line += 1;
+    }
+    let phase = cpu.read32(o + RIPPLE_PHASE).wrapping_add(0x1000);
+    cpu.write32(o + RIPPLE_PHASE, phase);
+    let frames = cpu.read32(o + RIPPLE_FRAMES).wrapping_add(1);
+    cpu.write32(o + RIPPLE_FRAMES, frames);
+    let sway = cpu.read32(o + RIPPLE_SWAY).wrapping_sub(cpu.read32(o + RIPPLE_SWAY_DOWN));
+    cpu.write32(o + RIPPLE_SWAY, sway);
+    if frames == RIPPLE_LIFE {
+        cpu.write8(o + RIPPLE_STATE, RIPPLE_OVER);
+    }
+}
+
+/// A ripple made at line `centre`, `sway` wide, `half` lines high (0 if no room).
+pub fn ripple_make(cpu: &mut Cpu, centre: u32, sway: u32, half: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, RIPPLE_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks, RIPPLE_EXEC));
+    if o != 0 {
+        cpu.write32(o + RIPPLE_CENTRE, centre);
+        cpu.write32(o + RIPPLE_SWAY, sway);
+        cpu.write32(o + RIPPLE_HALF, half);
+    }
+}
+
+/// A ripple now and then (1 frame in 64, at random): from the left (side 0) or right (side 1) or
+/// one of two middle sways, at a line 48 to 175, 56 lines high.
+pub fn ripples_spawn(cpu: &mut Cpu) {
+    let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+    if r & 0x3f != 0 {
+        return;
+    }
+    let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu)) & 7;
+    let sway = match r {
+        0 => 0x0160_0000,
+        1 => 0xfea0_0000,
+        r if r & 1 == 0 => 0xff50_0000,
+        _ => 0x00b0_0000,
+    };
+    let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+    let centre = (r & 127) + 48;
+    nested!(cpu, 0x0609_dafc, ripple_make(cpu, centre, sway, 56));
+}
+
+/// The wave scene's object: its state (+8), a sway angle (a word at +0x10), the window's edge (a
+/// word at +0x12), the sway's size (+0x24).
+const SCENE_STATE: u32 = 8;
+const SCENE_ANGLE: u32 = 0x10;
+const SCENE_EDGE: u32 = 0x12;
+const SCENE_SWAY: u32 = 0x24;
+
+/// The wave scene's record (VDP2's rotation-style set-up: a block of words at 0x060a8990) and
+/// the first scroll plane's (bg.rs's PLANE_A) place and zooms.
+const WAVE_MAP: u32 = 0x060a_8990;
+const WAVE_MAP_TABLE: u32 = 0x060a_7860;
+const WAVE_MAP_VRAM: u32 = 0x25e7_6000;
+
+/// The wave scene's start (`o` its object): its map's record set, the first plane put at its
+/// place at 1.0, a layer on, and the line scroll set up (`wave_lines_set`).
+pub fn wave_start(cpu: &mut Cpu, o: u32) {
+    cpu.write8(WAVE_MAP, 4);
+    cpu.write8(WAVE_MAP + 1, 0);
+    cpu.write32(WAVE_MAP + 20, WAVE_MAP_TABLE);
+    cpu.write32(WAVE_MAP + 16, WAVE_MAP_VRAM);
+    cpu.write32(WAVE_MAP + 8, 0x00e0_0000);
+    cpu.write32(WAVE_MAP + 12, 0x0200_0000);
+    cpu.write16(WAVE_MAP + 4, 0);
+    cpu.write16(WAVE_MAP + 6, 0x1fff);
+    cpu.write16(WAVE_MAP + 2, 0x0090);
+    cpu.write32(WAVE_MAP + 28, 0);
+    cpu.write32(WAVE_MAP + 24, 0);
+    cpu.write32(bg::PLANE_A + bg::X, 0x00b0_0000);
+    cpu.write32(bg::PLANE_A + bg::Y, 0x0190_0000);
+    cpu.write32(bg::PLANE_A + bg::SPEED_Y, 0);
+    cpu.write32(bg::PLANE_A + bg::SPEED_X, 0);
+    cpu.write32(bg::PLANE_A + bg::ZOOM_X, 0x1_0000);
+    cpu.write32(bg::PLANE_A + bg::ZOOM_Y, 0x1_0000);
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x2_0015));
+    nested!(cpu, 0x0609_dc60, wave_lines_set(cpu, o));
+}
+
+/// The wave scene's line scroll set up: its object's state (+8) 0, window blocks put (the whole
+/// width, no lines), NBG1's window control 3 and line scroll control 10, the sprites copied, the
+/// lines cleared.
+pub fn wave_lines_set(cpu: &mut Cpu, o: u32) {
+    cpu.write8(o + 8, 0);
+    cpu.call(SL_WINDOW_RANGE, &[0, 0, 0x15f, 0xffff]);
+    nested!(cpu, 0x0606_e17c, sgl::sl_window_control(cpu, 1, 3));
+    nested!(cpu, 0x0606_e1bc, sgl::sl_line_scroll_control(cpu, 1, 10));
+    cpu.call(SL_SPRITES_COPY, &[WAVE_VRAM]);
+    nested!(cpu, 0x0609_d894, wave_clear(cpu));
+}
+
+/// The wave's colours: 16 words from the game's table to the stack, then 240 of its colours from
+/// the table after to the colour RAM's 0x100 and the 16 to 0x1f0.
+pub fn wave_colours(cpu: &mut Cpu) {
+    let s = cpu.stack();
+    for k in 0..16 {
+        let v = cpu.read16(0x0603_1040 + 2 * k);
+        cpu.write16(s + 2 * k, v);
+    }
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, 0x0603_1060, 0x100, 0xf0));
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, s, 0x1f0, 0x10));
+}
+
+/// The wave scene's frame for `o` (states in +8: 0 begins, 1 the lines swaying in and the window
+/// closing in from the top, 2 the lines random, 3 the window opening out, 4 over), the plane's
+/// speed set to (dx, dy), the map streamed in if `stream`, the plane drawn and the lines sent.
+pub fn wave_scene(cpu: &mut Cpu, o: u32, dx: u32, dy: u32, stream: u32) {
+    nested!(cpu, 0x0609_dcbc, wave_colours(cpu));
+    let state = cpu.read8(o + SCENE_STATE);
+    let mut dy = dy;
+    let mut tail = true;
+    match state {
+        0 => {
+            cpu.write32(o + SCENE_SWAY, 0x2000);
+            cpu.write16(o + SCENE_ANGLE, 0);
+            cpu.write16(o + SCENE_EDGE, 0);
+            cpu.write8(o + SCENE_STATE, 1);
+            dy = 0;
+        }
+        1 => {
+            let v = cpu.read16(o + SCENE_EDGE) as i16 as i32 + 8;
+            let mut top = (112 - v) as i16 as i32;
+            cpu.write16(o + SCENE_EDGE, v as u16);
+            if top < 0 {
+                top = 0;
+            }
+            let bottom = ((v + 112) as i16 as i32).min(0xdf);
+            cpu.call(SL_WINDOW_RANGE, &[0, top as u16 as u32, 0x15f, bottom as u16 as u32]);
+            let angle = cpu.read16(o + SCENE_ANGLE) as i16 as i32 as u32;
+            let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, angle));
+            let sway = cpu.read32(o + SCENE_SWAY);
+            let amount = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, sway, s));
+            nested!(cpu, 0x0609_d918, wave_set(cpu, amount));
+            let angle = cpu.read16(o + SCENE_ANGLE).wrapping_add(0x200);
+            cpu.write16(o + SCENE_ANGLE, angle);
+            let sway = cpu.read32(o + SCENE_SWAY).wrapping_sub(32);
+            cpu.write32(o + SCENE_SWAY, sway);
+            if (sway as i32) < 0 {
+                cpu.write16(o + SCENE_EDGE, 0);
+                cpu.write32(o + SCENE_SWAY, 0);
+                let s = cpu.read8(o + SCENE_STATE).wrapping_add(1);
+                cpu.write8(o + SCENE_STATE, s);
+            }
+            nested!(cpu, 0x0609_db48, ripples_spawn(cpu));
+        }
+        2 => {
+            nested!(cpu, 0x0609_d8c4, wave_random(cpu));
+            nested!(cpu, 0x0609_db48, ripples_spawn(cpu));
+        }
+        3 => {
+            let v = (cpu.read16(o + SCENE_EDGE) as i16 as i32 + 4) as i16;
+            cpu.write16(o + SCENE_EDGE, v as u16);
+            if v as i32 > 112 {
+                cpu.write16(o + SCENE_EDGE, 112);
+                nested!(cpu, 0x0606_e17c, sgl::sl_window_control(cpu, 1, 0));
+                nested!(cpu, 0x0606_e1bc, sgl::sl_line_scroll_control(cpu, 1, 0));
+                nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x3_0014));
+                let s = cpu.read8(o + SCENE_STATE).wrapping_add(1);
+                cpu.write8(o + SCENE_STATE, s);
+            }
+            let top = cpu.read16(o + SCENE_EDGE) as i16 as i32;
+            cpu.call(SL_WINDOW_RANGE, &[0, top as u16 as u32, 0x15f, (0xe0 - top) as u16 as u32]);
+            nested!(cpu, 0x0609_db48, ripples_spawn(cpu));
+        }
+        4 => tail = false,
+        _ => {}
+    }
+    if tail {
+        nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, dx, dy));
+        if stream != 0 {
+            nested!(cpu, 0x0605_f170, bg::map_stream(cpu, bg::PLANE_A, WAVE_MAP));
+        }
+        nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+        nested!(cpu, 0x0603_4a50, sgl::sl_transfer_entry(cpu, WAVE_LINES, WAVE_VRAM, WAVE_SIZE));
+    }
+}
+
+/// The wave scene's step: the view's place on by 0x100 and moved (the pillars' move); the plane
+/// slid by four times the view's x gone back; the wave frame; the next scroll once past 8.0.
+pub fn wave_step(cpu: &mut Cpu, o: u32) {
+    let view = SCENE_VIEW;
+    let place = cpu.read32(view).wrapping_add(0x100);
+    let x = cpu.read32(view + SCENE_VIEW_X);
+    cpu.write32(view, place);
+    nested!(cpu, 0x0609_d7f4, tunnel_move(cpu, o));
+    let back = x.wrapping_sub(cpu.read32(view + SCENE_VIEW_X)) << 2;
+    nested!(cpu, 0x0609_dd08, wave_scene(cpu, o, back.wrapping_neg(), 0xffff_0000, 1));
+    if (cpu.read32(view) as i32) > 0x7_ffff {
+        scene_scroll_next(cpu);
+    }
+}
+
+/// The rail scene's draw: the pillars' draw with the mover's y alone (and its own rows).
+pub fn rail_draw(cpu: &mut Cpu) {
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 0));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let y = cpu.read32(SCENE_MOVER + SCENE_MOVER_Y);
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, 0, y, 0));
+    draw_rows(cpu, &RAIL_ROWS);
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCENE_MOVER));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 1));
+}
+
+/// The rail scene's start (`o` its object): the view at its path's start, the mover's y kept
+/// below 2.0 (its top bits), the object's word +0x30 -2.0, its bytes +9 0 and +8 on, the draw hook set.
+pub fn rail_start(cpu: &mut Cpu, o: u32) {
+    cpu.write32(SCENE_VIEW, 0);
+    nested!(cpu, 0x0605_f5b0, bg::view_along(cpu, RAIL_PATH));
+    let y = cpu.read32(SCENE_MOVER + SCENE_MOVER_Y) & 0x01ff_0000;
+    cpu.write32(SCENE_MOVER + SCENE_MOVER_Y, y);
+    cpu.write32(o + 0x30, 0xfe00_0000);
+    cpu.write8(o + 9, 0);
+    let s = cpu.read8(o + 8).wrapping_add(1);
+    cpu.write8(o + 8, s);
+    let screen = cpu.read32(screen::SCREEN);
+    cpu.write32(screen + SCREEN_HOOK, 0x0609_df34);
+}
+
+/// The rail scene's step: its message sent the first frame (a byte at +9), the mover moved by
+/// the object's speed (+0x20, up by 0x1000 a frame), the draw, the wave frame (plane speed
+/// (0, -1.0)); the next scroll once the mover's y is past 4.5.
+pub fn rail_step(cpu: &mut Cpu, o: u32) {
+    if cpu.read8(o + 9) == 0 {
+        cpu.call(SL_SCENE_MESSAGE, &[RAIL_MESSAGE]);
+        let b = cpu.read8(o + 9).wrapping_add(1);
+        cpu.write8(o + 9, b);
+    }
+    let speed = cpu.read32(o + 32).wrapping_add(0x1000);
+    cpu.write32(o + 32, speed);
+    nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, 0, speed, 0));
+    nested!(cpu, 0x0609_df34, rail_draw(cpu));
+    nested!(cpu, 0x0609_dd08, wave_scene(cpu, o, 0, 0xffff_0000, 1));
+    if (cpu.read32(SCENE_MOVER + SCENE_MOVER_Y) as i32) > 0x047f_ffff {
+        scene_scroll_next(cpu);
+    }
+}
+
+/// The dome scene's start: RBG0's map put at 0x25e44000, its mode 2, the draw hook set, its size
+/// 2, the colour calculation 0x40 and the colour rates of the screens -2 to -8 and -7 set.
+pub fn dome_start(cpu: &mut Cpu) {
+    nested!(cpu, 0x0607_1c4c, sgl::sl_map_rbg0(cpu, 0x25e4_4000));
+    cpu.call(SL_SCENE_MODE, &[2]);
+    let screen = cpu.read32(screen::SCREEN);
+    cpu.write32(screen + SCREEN_HOOK, 0x0609_e21c);
+    cpu.call(SL_SCENE_SIZE, &[2]);
+    nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 0x40));
+    for (screen, rate) in [(-2i32, 31), (-1, 28), (-4, 24), (-3, 20), (-6, 16), (-5, 12), (-8, 8), (-7, 4)] {
+        nested!(cpu, 0x0606_e45c, sgl::sl_col_rate(cpu, screen as u32, rate));
+    }
+}
+
+/// The dome scene's draw: window 0, turned about z by the view's y angle backwards, moved down
+/// by the second plane's y from 2.0, the dome's polygons (list 0x060a7e5c) put; window 1.
+pub fn dome_draw(cpu: &mut Cpu) {
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 0));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let turn = cpu.read16(SCENE_VIEW + SCENE_VIEW_TURN_Y) as i16 as i32;
+    nested!(cpu, 0x0606_726c, sgl::sl_rot_z(cpu, (-turn) as i16 as i32 as u32));
+    let y = 0x0200_0000u32.wrapping_sub(cpu.read32(SCENE_PLANE + SCENE_PLANE_Y));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, 0, y, 0));
+    nested!(cpu, 0x0607_14dc, sgl::put_polygons(cpu, 0x060a_7e5c, 1));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 1));
+}
+
+/// The dome scene's object: its speed (+0x20) and place (+0x30).
+const DOME_SPEED: u32 = 0x20;
+const DOME_AT: u32 = 0x30;
+
+/// The dome scene's step (`o`: its speed +0x20, its place +0x30): its speed up by 0x1000; the
+/// view's place on (by 0x180 below 1.0, by 0x1000 below 2.0); the dome's place on by the view's
+/// scale times -0.09375; the view on its path; the mover moved; the view's matrix; the second
+/// plane's place from the dome's and the view's turn; the draw; the next scroll past 2.0.
+pub fn dome_step(cpu: &mut Cpu, o: u32) {
+    let speed = cpu.read32(o + DOME_SPEED).wrapping_add(0x1000);
+    cpu.write32(o + DOME_SPEED, speed);
+    let place = cpu.read32(SCENE_VIEW) as i32;
+    if place <= 0xffff {
+        cpu.write32(SCENE_VIEW, (place + 0x180) as u32);
+    } else if place <= 0x1_ffff {
+        cpu.write32(SCENE_VIEW, (place + 0x1000) as u32);
+    }
+    let scale = cpu.read32(SCENE_VIEW + SCENE_VIEW_SCALE);
+    let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0xffe8_0000, scale));
+    let at = cpu.read32(o + DOME_AT).wrapping_add(m);
+    cpu.write32(o + DOME_AT, at);
+    nested!(cpu, 0x0605_f648, bg::view_along_eased(cpu, RAIL_PATH));
+    cpu.call(SL_SCENE_ON, &[0]);
+    let speed = cpu.read32(o + DOME_SPEED);
+    let scale = cpu.read32(SCENE_VIEW + SCENE_VIEW_SCALE);
+    let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x20_0000, scale));
+    nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, m, speed, 0));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCENE_MOVER));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    cpu.call(SL_SCENE_ON, &[1]);
+    let height = cpu.read32(SCENE_VIEW + SCENE_VIEW_TURN_X).wrapping_add(0xffff_4000).wrapping_mul(11);
+    let x = cpu.read32(o + DOME_AT).wrapping_add(0x02b0_0000);
+    cpu.write32(SCENE_PLANE + SCENE_PLANE_X, x);
+    let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x70_0000, height));
+    let y = m.wrapping_add(0x06d4_0000);
+    cpu.write32(SCENE_PLANE + SCENE_PLANE_Y, y);
+    cpu.call(SL_SCENE_PLACE, &[x, y]);
+    let turn = cpu.read16(SCENE_VIEW + SCENE_VIEW_TURN_Y) as i16 as i32 as u32;
+    cpu.call(SL_SCENE_TURN, &[turn]);
+    nested!(cpu, 0x0609_e21c, dome_draw(cpu));
+    if (cpu.read32(SCENE_VIEW) as i32) > 0x1_ffff {
+        scene_scroll_next(cpu);
+    }
+}
+
+/// The grid scene's object: its fade (+0x38), its drop speed (+0x24), its angle (a word at +0x14),
+/// its place (+0x30), its speed (+0x20), its state (+8).
+const GRID_FADE: u32 = 0x38;
+const GRID_DROP: u32 = 0x24;
+const GRID_ANGLE: u32 = 0x14;
+const GRID_AT: u32 = 0x30;
+const GRID_SPEED: u32 = 0x20;
+
+/// The grid scene's start (`o` its object): its fade 0x1f8000 and drop 0, the second plane
+/// (bg.rs's PLANE_B) put at (1.0, 2.0) with its zooms 1.0, a frame, the colour calculation 0x40,
+/// the rate of screen 0 31, layers on, its state and angle cleared.
+pub fn grid_start(cpu: &mut Cpu, o: u32) {
+    cpu.write32(o + GRID_FADE, 0x001f_8000);
+    cpu.write32(o + GRID_DROP, 0);
+    cpu.write32(bg::PLANE_B + bg::X, 0x0100_0000);
+    cpu.write32(bg::PLANE_B + bg::Y, 0x0200_0000);
+    cpu.write32(bg::PLANE_B + bg::SPEED_Y, 0);
+    cpu.write32(bg::PLANE_B + bg::SPEED_X, 0);
+    cpu.write32(bg::PLANE_B + bg::ZOOM_X, 0x1_0000);
+    cpu.write32(bg::PLANE_B + bg::ZOOM_Y, 0x1_0000);
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 0x40));
+    nested!(cpu, 0x0606_e45c, sgl::sl_col_rate(cpu, 0, 31));
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x3_0014));
+    cpu.write8(o + 8, 0);
+    cpu.write16(o + GRID_ANGLE, 0);
+}
+
+/// The grid scene's step: the view's place on by 0x200 (to 3.0, on its path) before 3.0; the
+/// plane's frame; the mover moved by 2.0 times the view's scale along; the angle (a word, up by 4
+/// to 48) taken off the mover's tilt; the second plane's place and drop; state 0 draws the dome
+/// until the plane's y passes 5.0, then clears the draw hook; state 1 fades the colour rate out
+/// and moves to the next scroll.
+pub fn grid_step(cpu: &mut Cpu, o: u32) {
+    let place = cpu.read32(SCENE_VIEW);
+    if place as i32 <= 0x2_ffff {
+        let place = place.wrapping_add(0x200);
+        cpu.write32(SCENE_VIEW, place);
+        nested!(cpu, 0x0605_f648, bg::view_along_eased(cpu, RAIL_PATH));
+    }
+    cpu.call(SL_SCENE_ON, &[0]);
+    let speed = cpu.read32(o + GRID_SPEED);
+    let scale = cpu.read32(SCENE_VIEW + SCENE_VIEW_SCALE);
+    let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x20_0000, scale));
+    nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, m, speed, 0));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    let angle = cpu.read16(o + GRID_ANGLE) as i16 as i32;
+    if angle <= 47 {
+        cpu.write16(o + GRID_ANGLE, (angle + 4) as u16);
+    }
+    let tilt = cpu.read16(SCENE_MOVER + SCENE_MOVER_TILT).wrapping_sub(cpu.read16(o + GRID_ANGLE));
+    cpu.write16(SCENE_MOVER + SCENE_MOVER_TILT, tilt);
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCENE_MOVER));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    cpu.call(SL_SCENE_ON, &[1]);
+    let scale = cpu.read32(SCENE_VIEW + SCENE_VIEW_SCALE);
+    let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0xffe8_0000, scale));
+    let at = cpu.read32(o + GRID_AT).wrapping_add(m);
+    cpu.write32(o + GRID_AT, at);
+    cpu.write32(SCENE_PLANE + SCENE_PLANE_X, at.wrapping_add(0x02b0_0000));
+    let drop = cpu.read32(o + GRID_DROP);
+    let y = cpu.read32(SCENE_PLANE + SCENE_PLANE_Y).wrapping_sub(drop);
+    cpu.write32(SCENE_PLANE + SCENE_PLANE_Y, y);
+    nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, 0, drop.wrapping_neg()));
+    let drop = cpu.read32(o + GRID_DROP).wrapping_add(0x1000);
+    cpu.write32(o + GRID_DROP, drop);
+    let x = cpu.read32(SCENE_PLANE + SCENE_PLANE_X);
+    let y = cpu.read32(SCENE_PLANE + SCENE_PLANE_Y);
+    cpu.call(SL_SCENE_PLACE, &[x, y]);
+    let turn = cpu.read16(SCENE_VIEW + SCENE_VIEW_TURN_Y) as i16 as i32 as u32;
+    cpu.call(SL_SCENE_TURN, &[turn]);
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    let state = cpu.read8(o + SCENE_STATE) as i8;
+    if state == 0 {
+        nested!(cpu, 0x0609_e21c, dome_draw(cpu));
+        if (cpu.read32(SCENE_PLANE + SCENE_PLANE_Y) as i32) <= 0x013f_ffff {
+            nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x1_0016));
+            nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 2));
+            let screen = cpu.read32(screen::SCREEN);
+            cpu.write32(screen + SCREEN_HOOK, 0);
+            let s = cpu.read8(o + SCENE_STATE).wrapping_add(1);
+            cpu.write8(o + SCENE_STATE, s);
+        }
+    } else if state == 1 {
+        let fade = cpu.read32(o + GRID_FADE).wrapping_sub(0x8000);
+        cpu.write32(o + GRID_FADE, fade);
+        if (fade as i32) >= 0 {
+            nested!(cpu, 0x0606_e45c, sgl::sl_col_rate(cpu, 0, fade >> 16));
+        } else {
+            scene_scroll_next(cpu);
+        }
+    }
+}
+
+/// Where a piece of the stage's screens goes: the screen room's offset, or a VRAM address.
+#[derive(Clone, Copy)]
+enum ScreenAt {
+    Room(u32),
+    At(u32),
+}
+use ScreenAt::{At, Room};
+
+/// A step of the stage's screens' set-up: a map put (the stage data's map, where, its width and
+/// height in cells, its character offset and pattern name add: put_cells's two pushed arguments,
+/// which stay pushed until a Pop), a plane filled with cell 0 (where, its width and height),
+/// cells copied (the stage data's cells, where, how many bytes), colours set (the stage data's
+/// colours, from which colour, how many), or the pushed arguments let go.
+#[derive(Clone, Copy)]
+enum ScreenStep {
+    Put(u32, ScreenAt, u32, u32, u32, u32),
+    Fill(ScreenAt, u32, u32),
+    Cells(u32, ScreenAt, u32),
+    Palette(u32, u32, u32),
+    Pop,
+}
+use ScreenStep::{Cells, Fill, Palette, Pop, Put};
+
+const STAGE_SCREENS: [ScreenStep; 245] = [
+    Cells(0, At(0x25e00000), 0x172a0),
+    Put(0, At(0x25e40000), 32, 32, 0x0, 0x0),
+    Put(0, At(0x25e40040), 32, 32, 0x0, 0x0),
+    Put(0, At(0x25e41000), 32, 32, 0x0, 0x0),
+    Put(0, At(0x25e41040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(2, At(0x25e42000), 32, 32, 0x0, 0x0),
+    Put(1, At(0x25e42040), 32, 32, 0x0, 0x0),
+    Put(1, At(0x25e43000), 32, 32, 0x0, 0x0),
+    Put(0, At(0x25e43040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(4, At(0x25e44000), 32, 32, 0x0, 0x0),
+    Put(3, At(0x25e44040), 32, 32, 0x0, 0x0),
+    Put(3, At(0x25e45000), 32, 32, 0x0, 0x0),
+    Put(4, At(0x25e45040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(7, At(0x25e46000), 32, 32, 0x0, 0x0),
+    Put(8, At(0x25e46040), 32, 32, 0x0, 0x0),
+    Put(5, At(0x25e47000), 32, 32, 0x0, 0x0),
+    Put(6, At(0x25e47040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(13, At(0x25e48000), 32, 32, 0x0, 0x0),
+    Put(14, At(0x25e48040), 32, 32, 0x0, 0x0),
+    Put(15, At(0x25e49000), 32, 32, 0x0, 0x0),
+    Put(16, At(0x25e49040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(16, At(0x25e4a000), 32, 32, 0x0, 0x0),
+    Put(14, At(0x25e4a040), 32, 32, 0x0, 0x0),
+    Put(14, At(0x25e4b000), 32, 32, 0x0, 0x0),
+    Put(16, At(0x25e4b040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(8, At(0x25e4c000), 32, 32, 0x0, 0x0),
+    Put(7, At(0x25e4c040), 32, 32, 0x0, 0x0),
+    Put(8, At(0x25e4d000), 32, 32, 0x0, 0x0),
+    Put(7, At(0x25e4d040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(19, At(0x25e4e000), 32, 32, 0x0, 0x0),
+    Put(19, At(0x25e4e040), 32, 32, 0x0, 0x0),
+    Put(20, At(0x25e4f000), 32, 32, 0x0, 0x0),
+    Put(20, At(0x25e4f040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(21, At(0x25e50000), 32, 32, 0x0, 0x0),
+    Put(19, At(0x25e50040), 32, 32, 0x0, 0x0),
+    Put(22, At(0x25e51000), 32, 32, 0x0, 0x0),
+    Put(20, At(0x25e51040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(23, At(0x25e52000), 32, 32, 0x6, 0x5c1),
+    Put(23, At(0x25e52040), 32, 32, 0x6, 0x5c1),
+    Put(24, At(0x25e53000), 32, 32, 0x6, 0x5c1),
+    Put(24, At(0x25e53040), 32, 32, 0x6, 0x5c1),
+    Pop,
+    Put(71, At(0x25e54000), 32, 32, 0x6, 0x5c1),
+    Put(71, At(0x25e54040), 32, 32, 0x6, 0x5c1),
+    Put(70, At(0x25e55000), 32, 32, 0x6, 0x5c1),
+    Put(70, At(0x25e55040), 32, 32, 0x6, 0x5c1),
+    Pop,
+    Put(76, At(0x25e56000), 32, 32, 0x6, 0x5c1),
+    Put(77, At(0x25e56040), 32, 32, 0x6, 0x5c1),
+    Put(72, At(0x25e57000), 32, 32, 0x6, 0x5c1),
+    Put(73, At(0x25e57040), 32, 32, 0x6, 0x5c1),
+    Pop,
+    Put(76, At(0x25e58000), 32, 32, 0x6, 0x5c1),
+    Put(77, At(0x25e58040), 32, 32, 0x6, 0x5c1),
+    Put(74, At(0x25e59000), 32, 32, 0x6, 0x5c1),
+    Put(75, At(0x25e59040), 32, 32, 0x6, 0x5c1),
+    Pop,
+    Put(78, At(0x25e5a000), 32, 32, 0x6, 0x5c1),
+    Put(63, At(0x25e5a040), 32, 32, 0x6, 0x5c1),
+    Put(74, At(0x25e5b000), 32, 32, 0x6, 0x5c1),
+    Put(75, At(0x25e5b040), 32, 32, 0x6, 0x5c1),
+    Pop,
+    Put(74, At(0x25e5c000), 32, 32, 0x6, 0x5c1),
+    Put(75, At(0x25e5c040), 32, 32, 0x6, 0x5c1),
+    Put(72, At(0x25e5d000), 32, 32, 0x6, 0x5c1),
+    Put(73, At(0x25e5d040), 32, 32, 0x6, 0x5c1),
+    Pop,
+    Put(74, At(0x25e5e000), 32, 32, 0x6, 0x5c1),
+    Put(75, At(0x25e5e040), 32, 32, 0x6, 0x5c1),
+    Put(64, At(0x25e5f000), 32, 32, 0x6, 0x5c1),
+    Put(65, At(0x25e5f040), 32, 32, 0x6, 0x5c1),
+    Pop,
+    Put(68, Room(0x28000), 32, 32, 0x6, 0x5c1),
+    Put(68, Room(0x28040), 32, 32, 0x6, 0x5c1),
+    Put(66, Room(0x29000), 32, 32, 0x6, 0x5c1),
+    Put(67, Room(0x29040), 32, 32, 0x6, 0x5c1),
+    Pop,
+    Put(68, Room(0x2a000), 32, 32, 0x6, 0x5c1),
+    Put(68, Room(0x2a040), 32, 32, 0x6, 0x5c1),
+    Put(69, Room(0x2b000), 32, 32, 0x6, 0x5c1),
+    Put(69, Room(0x2b040), 32, 32, 0x6, 0x5c1),
+    Pop,
+    Put(62, Room(0x3c000), 32, 32, 0x6, 0x5c1),
+    Put(62, Room(0x3c040), 32, 32, 0x6, 0x5c1),
+    Put(90, Room(0x36000), 32, 32, 0x0, 0x0),
+    Put(89, Room(0x36040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(88, Room(0x37000), 32, 32, 0x0, 0x0),
+    Put(89, Room(0x37040), 32, 32, 0x0, 0x0),
+    Put(92, Room(0x34000), 32, 32, 0x0, 0x0),
+    Put(92, Room(0x34040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(91, Room(0x35000), 32, 32, 0x0, 0x0),
+    Put(91, Room(0x35040), 32, 32, 0x0, 0x0),
+    Palette(0, 0x0, 0x1e0),
+    Cells(1, At(0x25e60000), 0x2a40),
+    Put(10, At(0x25e76000), 32, 32, 0x0, 0x0),
+    Put(10, At(0x25e76040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(9, At(0x25e77000), 32, 32, 0x0, 0x0),
+    Put(9, At(0x25e77040), 32, 32, 0x0, 0x0),
+    Put(10, Room(0), 32, 32, 0x0, 0x0),
+    Put(10, Room(0x40), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(11, Room(0x1000), 32, 32, 0x0, 0x0),
+    Put(11, Room(0x1040), 32, 32, 0x0, 0x0),
+    Put(12, Room(0x2000), 32, 32, 0x0, 0x0),
+    Put(12, Room(0x2040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(11, Room(0x3000), 32, 32, 0x0, 0x0),
+    Put(11, Room(0x3040), 32, 32, 0x0, 0x0),
+    Put(28, Room(0x4000), 32, 32, 0x0, 0x0),
+    Put(29, Room(0x4040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(54, Room(0x5000), 32, 32, 0x0, 0x0),
+    Put(55, Room(0x5040), 32, 32, 0x0, 0x0),
+    Put(26, Room(0x6000), 32, 32, 0x0, 0x0),
+    Put(27, Room(0x6040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(54, Room(0x7000), 32, 32, 0x0, 0x0),
+    Put(55, Room(0x7040), 32, 32, 0x0, 0x0),
+    Put(60, Room(0x8000), 32, 32, 0x0, 0x0),
+    Put(61, Room(0x8040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(43, Room(0x9000), 32, 32, 0x0, 0x0),
+    Put(46, Room(0x9040), 32, 32, 0x0, 0x0),
+    Put(42, Room(0xa000), 32, 32, 0x0, 0x0),
+    Put(45, Room(0xa040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(42, Room(0xb000), 32, 32, 0x0, 0x0),
+    Put(45, Room(0xb040), 32, 32, 0x0, 0x0),
+    Put(41, Room(0xc000), 32, 32, 0x0, 0x0),
+    Put(44, Room(0xc040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(52, Room(0xd000), 32, 32, 0x0, 0x0),
+    Put(53, Room(0xd040), 32, 32, 0x0, 0x0),
+    Put(50, Room(0xe000), 32, 32, 0x0, 0x0),
+    Put(51, Room(0xe040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(50, Room(0xf000), 32, 32, 0x0, 0x0),
+    Put(51, Room(0xf040), 32, 32, 0x0, 0x0),
+    Put(48, Room(0x10000), 32, 32, 0x0, 0x0),
+    Put(49, Room(0x10040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(43, Room(0x11000), 32, 32, 0x0, 0x0),
+    Put(46, Room(0x11040), 32, 32, 0x0, 0x0),
+    Put(41, Room(0x12000), 32, 32, 0x0, 0x0),
+    Put(44, Room(0x12040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(39, Room(0x13000), 32, 32, 0x0, 0x0),
+    Put(40, Room(0x13040), 32, 32, 0x0, 0x0),
+    Put(57, Room(0x14000), 32, 32, 0x0, 0x0),
+    Fill(Room(0x14040), 32, 32),  // cell 0
+    Put(39, Room(0x15000), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(40, Room(0x15040), 32, 32, 0x0, 0x0),
+    Put(38, Room(0x16000), 32, 32, 0x0, 0x0),
+    Fill(Room(0x16040), 32, 32),  // cell 0
+    Put(35, Room(0x17000), 32, 32, 0x0, 0x0),
+    Fill(Room(0x17040), 32, 32),  // cell 0
+    Put(37, Room(0x18000), 32, 32, 0x0, 0x0),
+    Pop,
+    Fill(Room(0x18040), 32, 32),  // cell 0
+    Put(35, Room(0x19000), 32, 32, 0x0, 0x0),
+    Fill(Room(0x19040), 32, 32),  // cell 0
+    Put(34, Room(0x1a000), 32, 32, 0x0, 0x0),
+    Fill(Room(0x1a040), 32, 32),  // cell 0
+    Put(32, Room(0x1b000), 32, 32, 0x0, 0x0),
+    Put(33, Room(0x1b040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(31, Room(0x1c000), 32, 32, 0x0, 0x0),
+    Fill(Room(0x1c040), 32, 32),  // cell 0
+    Put(30, Room(0x1d000), 32, 32, 0x0, 0x0),
+    Fill(Room(0x1d040), 32, 32),  // cell 0
+    Put(28, Room(0x1e000), 32, 32, 0x0, 0x0),
+    Put(29, Room(0x1e040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(26, Room(0x1f000), 32, 32, 0x0, 0x0),
+    Put(27, Room(0x1f040), 32, 32, 0x0, 0x0),
+    Put(26, Room(0x20000), 32, 32, 0x0, 0x0),
+    Put(27, Room(0x20040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(60, Room(0x21000), 32, 32, 0x0, 0x0),
+    Put(61, Room(0x21040), 32, 32, 0x0, 0x0),
+    Put(58, Room(0x22000), 32, 32, 0x0, 0x0),
+    Put(59, Room(0x22040), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(57, Room(0x23000), 32, 32, 0x0, 0x0),
+    Fill(Room(0x23040), 32, 32),  // cell 0
+    Fill(Room(0x24000), 32, 32),  // cell 0
+    Fill(Room(0x24040), 32, 32),  // cell 0
+    Put(47, Room(0x25000), 32, 32, 0x0, 0x0),
+    Put(56, Room(0x25040), 32, 32, 0x0, 0x0),
+    Put(25, Room(0x26000), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(36, Room(0x26040), 32, 32, 0x0, 0x0),
+    Put(25, Room(0x27000), 32, 32, 0x0, 0x0),
+    Put(36, Room(0x27040), 32, 32, 0x0, 0x0),
+    Put(86, Room(0x2c000), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(86, Room(0x2c040), 32, 32, 0x0, 0x0),
+    Put(85, Room(0x2d000), 32, 32, 0x0, 0x0),
+    Put(85, Room(0x2d040), 32, 32, 0x0, 0x0),
+    Put(87, Room(0x3b000), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(87, Room(0x3b040), 32, 32, 0x0, 0x0),
+    Put(79, Room(0x2e000), 32, 32, 0xf, 0x400),
+    Put(80, Room(0x2e040), 32, 32, 0xf, 0x400),
+    Put(80, Room(0x2f000), 32, 32, 0xf, 0x400),
+    Pop,
+    Put(79, Room(0x2f040), 32, 32, 0xf, 0x400),
+    Put(93, Room(0x38000), 32, 32, 0x0, 0x4),
+    Put(94, Room(0x38040), 32, 32, 0x0, 0x4),
+    Put(95, Room(0x39000), 32, 32, 0x0, 0x2b),
+    Pop,
+    Put(95, Room(0x39040), 32, 32, 0x0, 0x2b),
+    Put(96, Room(0x3a000), 32, 32, 0x0, 0x2b),
+    Put(96, Room(0x3a040), 32, 32, 0x0, 0x2b),
+    Palette(1, 0x100, 0x100),
+    Cells(2, At(0x25e62a40), 0xb4a0),
+    Put(17, At(0x25e74000), 32, 32, 0x0, 0x152),
+    Pop,
+    Put(18, At(0x25e74040), 32, 32, 0x0, 0x152),
+    Put(18, At(0x25e75000), 32, 32, 0x0, 0x152),
+    Put(17, At(0x25e75040), 32, 32, 0x0, 0x152),
+    Put(81, Room(0x30000), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(82, Room(0x30040), 32, 32, 0x0, 0x0),
+    Put(81, Room(0x31000), 32, 32, 0x0, 0x0),
+    Put(82, Room(0x31040), 32, 32, 0x0, 0x0),
+    Put(83, Room(0x32000), 32, 32, 0x0, 0x0),
+    Pop,
+    Put(84, Room(0x32040), 32, 32, 0x0, 0x0),
+    Put(83, Room(0x33000), 32, 32, 0x0, 0x0),
+    Put(84, Room(0x33040), 32, 32, 0x0, 0x0),
+    Palette(2, 0x200, 0x10),
+];
+
+/// The stage's screens' start (screen.rs's scroll table): the screen room kept; the first time
+/// (its count at 0x060a777c, counted each time) the overlay's two lists of screen addresses
+/// moved into the room; the stage data set; RBG0's rotation parameters and coefficient table (this
+/// overlay's own SGL setters), its cells, the back colour; NBG0 and NBG1's cells and maps; the
+/// screens shown and their priorities, the sprites' colour calculation and windows; then the maps,
+/// cells and colours (STAGE_SCREENS); the scroll marks given.
+const STAGE_ROOM: u32 = 0x0607_47a0;
+const SCREEN_STARTS: u32 = 0x060a_777c;
+const ROOM_LISTS: [(u32, u32); 2] = [(0x060a_7860, 4), (0x060a_7870, 38)];
+const RPARA_TABLES: u32 = 0x25e3_fe00;
+const KTABLE: u32 = 0x25e2_0000;
+const PRIORITIES: [(u32, u32); 5] = [(1, 6), (0, 4), (5, 3), (-7i32 as u32, 5), (-8i32 as u32, 4)];
+const SL_RPARA_INIT: u32 = 0x060a_2524;
+const SL_KTABLE_MAKE: u32 = 0x060a_2594;
+const SL_RPARA_A: [(u32, &[u32]); 3] = [(0x060a_2614, &[0]), (0x060a_2624, &[0]), (0x060a_2634, &[KTABLE, 0x61])];
+const SL_RPARA_B: [(u32, &[u32]); 5] = [(0x060a_26b4, &[0]), (0x060a_26c4, &[0]), (0x060a_26d4, &[0]), (0x060a_26e4, &[0x060a_7adc]), (0x060a_2754, &[0])];
+const SL_KTABLE_B: u32 = 0x060a_2764;
+/// The screen record's scroll marks (+0x54) and the marks it is given.
+const SCROLL_MARKS: u32 = 0x54;
+const MARKS: u32 = 0x060a_7780;
+
+pub fn stg02_start(cpu: &mut Cpu, data: u32, room: u32) {
+    cpu.write32(STAGE_ROOM, room);
+    let starts = cpu.read32(SCREEN_STARTS);
+    cpu.write32(SCREEN_STARTS, starts.wrapping_add(1));
+    if starts == 0 {
+        for (list, n) in ROOM_LISTS {
+            let room = cpu.read32(STAGE_ROOM);
+            nested!(cpu, 0x0605_ef20, screen::offset_list(cpu, room, list, n));
+        }
+    }
+    nested!(cpu, 0x0605_e17c, states::stage_data_set(cpu, data));
+    cpu.call(SL_RPARA_INIT, &[RPARA_TABLES]);
+    cpu.call(SL_KTABLE_MAKE, &[KTABLE]);
+    nested!(cpu, 0x0606_e27c, sgl::sl_char_rbg0(cpu, 0, 0));
+    nested!(cpu, 0x0606_e2ce, sgl::sl_page_rbg0(cpu, 0x25e0_0000, 0, 0xc000));
+    cpu.call(SL_RPARA_A[0].0, SL_RPARA_A[0].1);
+    nested!(cpu, 0x0607_1c4c, sgl::sl_map_rbg0(cpu, 0x25e4_0000));
+    for (f, args) in &SL_RPARA_A[1..] {
+        cpu.call(*f, args);
+    }
+    for (f, args) in SL_RPARA_B {
+        cpu.call(f, args);
+    }
+    cpu.call(SL_KTABLE_B, &[KTABLE, 0x60]);
+    nested!(cpu, 0x0607_0dec, sgl::sl_back1_col_set(cpu, 0x25e3_fffe, 0));
+    nested!(cpu, 0x0606_e288, sgl::sl_char_nbg0(cpu, 0, 0));
+    nested!(cpu, 0x0606_e300, sgl::sl_page_nbg0(cpu, 0x25e6_0000, 0x200, 0x8000));
+    nested!(cpu, 0x0607_0c3c, sgl::sl_plane_nbg0(cpu, 0));
+    nested!(cpu, 0x0607_0c4c, sgl::sl_map_nbg0(cpu, 0x25e7_6000, 0x25e7_6000, 0x25e7_6000, 0x25e7_6000));
+    nested!(cpu, 0x0607_0cfc, sgl::sl_zoom_mode(cpu, 1, 1));
+    nested!(cpu, 0x0606_e294, sgl::sl_char_nbg1(cpu, 0, 0));
+    nested!(cpu, 0x0606_e2e4, sgl::sl_page_nbg1(cpu, 0x25e6_0000, 0x400, 0xc000));
+    nested!(cpu, 0x0607_0d0c, sgl::sl_plane_nbg1(cpu, 0));
+    nested!(cpu, 0x0607_0d1c, sgl::sl_map_nbg1(cpu, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000));
+    nested!(cpu, 0x0607_0cfc, sgl::sl_zoom_mode(cpu, 0, 0));
+    nested!(cpu, 0x0606_dd6c, sgl::sl_scr_auto_disp(cpu, 0x17));
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x13_0004));
+    for (screen, pri) in PRIORITIES {
+        nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, screen, pri));
+    }
+    cpu.call(SL_SCENE_SIZE, &[5]);
+    nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 0x101));
+    cpu.call(0x060a_27d4, &[1]);
+    cpu.call(0x060a_27f4, &[4]);
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 0));
+    nested!(cpu, 0x0606_990c, sgl::sl_zdsp_level(cpu, 7));
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 1));
+    let place = |cpu: &mut Cpu, at: ScreenAt| match at {
+        Room(off) => cpu.read32(STAGE_ROOM).wrapping_add(off),
+        At(a) => a,
+    };
+    for step in STAGE_SCREENS {
+        match step {
+            Put(map, at, w, h, ch, add) => {
+                let src = states::stage_part(cpu, states::MAPS, map);
+                let dst = place(cpu, at);
+                cpu.push(&[ch, add]);
+                nested!(cpu, 0x0605_ee3c, screen::put_cells(cpu, src, dst, w, h, ch, add));
+            }
+            Fill(at, w, h) => {
+                let dst = place(cpu, at);
+                nested!(cpu, 0x0605_eee4, screen::fill_cells(cpu, 0, dst, w, h));
+            }
+            Cells(k, at, bytes) => {
+                let src = states::stage_part(cpu, states::CELLS, k);
+                let dst = place(cpu, at);
+                nested!(cpu, 0x0605_edf8, screen::copy_words(cpu, src, dst, bytes));
+            }
+            Palette(k, index, count) => {
+                let colours = states::stage_part(cpu, states::COLOURS, k);
+                nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, index, count));
+            }
+            Pop => cpu.pop(32),
+        }
+    }
+    let s = cpu.read32(screen::SCREEN);
+    cpu.write32(s + SCROLL_MARKS, MARKS);
 }
