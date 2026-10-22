@@ -33,8 +33,9 @@ sudo apt-get install -y -q build-essential pkg-config curl unzip xz-utils patch 
     python3 python3-venv libsdl2-dev libasound2-dev zlib1g-dev
 
 step "Rust"
+# rustup's (in ~/.cargo/bin), not Debian's packaged cargo: that one is too old for the 2024 edition
 if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
-if ! command -v cargo > /dev/null; then
+if ! command -v rustup > /dev/null; then
     curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
     . "$HOME/.cargo/env"
 fi
@@ -117,5 +118,7 @@ done
 ls build/dis
 
 step "done"
+echo "cargo is in ~/.cargo/bin: new shells have it on PATH; in one opened before this ran (or a Claude"
+echo "Code session started before it), run: . \"\$HOME/.cargo/env\" (or restart it)."
 echo "Play: cargo run --release -p rsgun [-- --native]. Check: tools/port/check.sh (about 11 minutes"
 echo "on 8 cores), tools/port/check_native.sh. The guide: docs/HANDOFF.md."
