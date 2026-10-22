@@ -14,8 +14,9 @@ work is split between agents.
   addresses, constants the code uses) is fine in `crates/rsgun`; none in `crates/stv`.
 - The oracle (Mednafen, GPL) is a development tool: never shipped, never linked, never translated.
 - Agents (the owner's decision, 22 October; docs/AGENTS.md has the whole process): the main
-  session orchestrates (scaffolds overlays, briefs, reviews, merges, keeps the docs) and runs up to
-  three coding subagents (Sonnet, one per overlay), each a fresh agent for one batch of one overlay in its own git
+  session orchestrates (scaffolds overlays, briefs, reviews, merges, keeps the docs) and runs two
+  coding subagents (Sonnet, one per overlay; a third only while another mostly waits on compare
+  runs: mind the owner's usage window), each a fresh agent for one batch of one overlay in its own git
   worktree and branch (`git worktree add ../rsgun-NAME -b wip-NAME`; link `out/` and `build/` from
   the main checkout), compare reports in `out/port/NAME-*`. A change to a shared module (aim.rs,
   actors.rs, ...) is kept small and committed on its own. Merge into main only fast-forward or

@@ -9,8 +9,9 @@ way the work is split, briefed, checked and merged.
 - **One orchestrator** (the main session, the strongest model available). It writes no overlay
   functions itself once batch agents are running. It scaffolds, briefs, reviews, merges, keeps
   the docs, and fixes what a batch could not.
-- **Up to three coding agents** at a time (Sonnet 5.5), one per overlay, each a fresh subagent
-  for **one batch**: about
+- **Two coding agents** at a time (Sonnet 5.5), one per overlay, each a fresh subagent for **one
+  batch** (a third only while another is mostly waiting on its compare runs: three at once spent
+  20% of the owner's usage window in 45 minutes, 22 October): about
   20-25 functions of one overlay in address order, written, checked in compare mode, committed on
   its branch, reported, then the agent ends. The next batch is a new agent with a new brief, so
   no agent's context grows and usage stays even (long-lived agents hit the hourly limit; batch
