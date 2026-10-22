@@ -1774,6 +1774,16 @@ pub fn register(n: &mut Natives) {
         0x060a_0a8c => stg02::layers_by_value[p] -> (),
         0x060a_0ac0 => stg02::tower_turn[o] -> (),
         0x060a_0b70 => stg02::tower_colours[how_far] -> (),
+        0x060a_0bf8 => stg02::tower_scene_run[o] -> (),
+        0x060a_0ff4 => stg02::tower_second_start[o] -> (),
+        0x060a_11a0 => stg02::planes_slide[o] -> (),
+        0x060a_1218 => stg02::scene_state_clear[o] -> (),
+        0x060a_1228 => stg02::planes_slide_run[o] -> (),
+        0x060a_12e4 => stg02::plane_b_slide[o] -> (),
+        0x060a_130c => stg02::stair_scene_draw[] -> (),
+        0x060a_134c => stg02::stair_scene_start[o] -> (),
+        0x060a_14d4 => stg02::stair_scene_move[o] -> (),
+        0x060a_1518 => stg02::stair_scene_run[o] -> (),
     }
     // STG01.BIN's code (stage 3's)
     rewrites! { n; overlay "STG01";
