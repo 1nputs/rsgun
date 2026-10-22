@@ -54,6 +54,7 @@ mod stg00;
 mod stg01;
 mod stg02;
 mod stg04;
+mod stg05;
 mod system;
 mod text;
 mod timeline;
@@ -1986,5 +1987,28 @@ pub fn register(n: &mut Natives) {
         0x0609_f53c => sgl::sl_line_window0[table] -> (),
         0x0609_f54c => sgl::sl_map_rb[a] -> (),
     }
-    // STG04.BIN's code: `rewrites! { n; overlay "STG04"; ... }` here, from its first rewrite
+    // STG04.BIN's code (fingerprint 5c18364ee98aacb1): `rewrites! { n; overlay "STG04"; ... }` here, from its first rewrite
+    // STG05.BIN's code (fingerprint 2adefae5540dd556, the last stage)
+    rewrites! { n; overlay "STG05";
+        0x0608_0000 => stg05::stg05_mode[game] -> u32,
+        0x0608_0290 => stg05::pose_step[anim, figure] -> (),
+        0x0608_09e4 => stg05::falling_piece[o] -> (),
+        0x0608_0a80 => stg05::falling_piece_set[] -> (),
+        0x0608_0b74 => stg05::glint_released[o] -> u32,
+        0x0608_0bc0 => stg05::glint_fade[o] -> u32,
+        0x0608_0c2c => stg05::glint_trail_exec[o] -> (),
+        0x0608_0c9c => stg05::glint_behaviour[o] -> (),
+        0x0608_0d44 => stg05::glint_set[watched, mask, place, spare; number] -> (),
+        0x0608_0e58 => stg05::glow_behaviour[o] -> (),
+        0x0608_0ea8 => stg05::glow_draw[s] -> (),
+        0x0608_0f38 => stg05::glow_set[] -> (),
+        0x0608_0fc0 => stg05::spark_behaviour[o] -> (),
+        0x0608_1054 => stg05::spark_draw[s] -> (),
+        0x0608_10fc => stg05::spark_set[] -> (),
+        0x0608_11c4 => stg05::follower_behaviour[o] -> (),
+        0x0608_1210 => stg05::follower_set[parent] -> u32,
+        0x0608_1290 => stg05::ember_behaviour[o] -> (),
+        0x0608_1374 => stg05::ember_set[side] -> (),
+        0x0608_1490 => stg05::shot_from[o, angle, at, reach] -> (),
+    }
 }
