@@ -65,6 +65,9 @@ into the next brief for that overlay.
    Every segment that runs a new function must be among them: grep the new addresses in all the
    overlay's segments' marathon reports (an STG05 batch ran f170000-f190000 but one function also
    ran in f200000; the orchestrator ran it before merging).
+   `tools/port/check.sh` (play1, the attract mode) also runs after a batch of an overlay those
+   runs load (STG01: a leaver's step compared its turn unshifted; only play1 and the attract
+   mode reached that step, a merged batch later).
 3. No ROM data copied in: small constants the code uses are fine (literal-pool values, a few
    immediates); tables are read where the game keeps them. `grep "^const .*: \["` and look.
 4. Read a function or two for style and sense (docs a reader understands, fields named).
