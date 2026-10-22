@@ -2,7 +2,7 @@
 //! (fingerprint 2adefae5540dd556): its mode's code, its enemies and scenery, its scrolls.
 
 use super::globals::{GAME_FRAMES, LOOPS};
-use super::{actors, aim, bg, bullets, camera, clib, dma, effects, explosions, files, gouraud, hits, hud, kinds, math, models, nested, objects, palette, parts, results, ribbons, rings, screen, sgl, sound, sprites, states, text, timeline, Cpu};
+use super::{actors, aim, bg, player, bullets, camera, clib, dma, effects, explosions, files, gouraud, hits, hud, kinds, math, models, nested, objects, palette, parts, results, ribbons, rings, screen, sgl, sound, sprites, states, text, timeline, Cpu};
 
 /// The director's slots the mode uses (states.rs's, as STG01's mode uses them): its step, the
 /// load (a local written back each time), the settings kept (the buffer +0x6c, the room's top
@@ -5604,3 +5604,640 @@ fn lens_run(cpu: &mut Cpu, o: u32) {
         cpu.write8(o + MODE, 0x70);
     }
 }
+
+// ---- the stage's later scenes ------------------------------------------------------------------------------
+
+/// The view the later scenes keep (0x06074750): a progress in its first long, the place the view
+/// is moved to (+4, +8, +12), two longs `world_step` makes (+16, +20), the ease the colours follow
+/// (+24), and three angle words (+18, +22, +26: the low words of the longs and the one after).
+const WORLD: u32 = 0x0607_4750;
+const WORLD_ANGLE_X: u32 = WORLD + 18;
+const WORLD_ANGLE_Y: u32 = WORLD + 22;
+const WORLD_ANGLE_Z: u32 = WORLD + 26;
+const SL_ROT_Y: u32 = 0x0606_736c;
+const SL_LOAD_MATRIX: u32 = 0x0606_db7c;
+const SL_INVERS_MATRIX: u32 = 0x0606_e4dc;
+const SL_CALC_POINT: u32 = 0x0606_db2c;
+const SL_GET_MATRIX: u32 = 0x0606_db9c;
+const SL_UNIT_MATRIX: u32 = 0x0603_512e;
+/// The helper at 0x0608dce4 (told 0 for the first block, 1 for the second) and the point the drop's
+/// view looks along (its angles +12, +16, +20 from the kept ones).
+const ROTATION_SIDE: u32 = 0x0608_dce4;
+const VIEW_POINT: u32 = 0x0609_1c44;
+const SKIP_ALL: u32 = 0x1ff_ffff;
+
+/// The lens object made (list 0, 28 bytes), its function `lens_behaviour`.
+pub fn lens_set(cpu: &mut Cpu) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 28)) as i8 as i32 as u32;
+    nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks, 0x0608_a8e0))
+}
+
+/// The drop's behaviour (a model dropping in): ends once the screen object's byte +81 is 8. Its
+/// step +60 (a byte): 0, the progress +64 up by 0x100 a frame, its y +0x18 eased from 0x1280000 to
+/// -0x380000 and its z +0x1c from 0x1000000 to 0xe0000 by it, the step 1 once it is 0x10000
+/// (and the progress cleared); 1, once the byte is 6, +61 set and the step 2. Then the model turned.
+pub fn drop_behaviour(cpu: &mut Cpu, o: u32) {
+    let draw = cpu.read32(SCREEN_DRAW_OBJECT);
+    let state = cpu.read8(draw + 81);
+    if state == 8 {
+        cpu.write8(o + MODE, ENDING);
+        return;
+    }
+    let step = cpu.read8(o + 60) as i8 as i32;
+    if step == 1 {
+        if state == 6 {
+            cpu.write8(o + 61, 1);
+            cpu.write8(o + 60, 2);
+        }
+    } else if step == 0 {
+        let progress = cpu.read32(o + 64).wrapping_add(0x100);
+        cpu.write32(o + 64, progress);
+        let y = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x0128_0000, 0xffc8_0000, progress));
+        cpu.write32(o + 0x18, y);
+        let z = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x0100_0000, 0x000e_0000, progress));
+        cpu.write32(o + 0x1c, z);
+        if cpu.read32(o + 64) == 0x1_0000 {
+            let s = cpu.read8(o + 60).wrapping_add(1);
+            cpu.write8(o + 60, s);
+            cpu.write32(o + 64, 0);
+        }
+    }
+    nested!(cpu, 0x0606_2aa0, models::spinner_turn(cpu, o));
+}
+
+/// The drop made (list 2, 72 bytes, plain_exec's): a spinner model high above (y 0x1280000, z
+/// 0x1000000), lit, the model colours' ramp (31) and floor (15) set; the screen object's matrix
+/// (+112) kept. Gives the object.
+pub fn drop_set(cpu: &mut Cpu) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 72)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PLAIN_EXEC));
+    if o != 0 {
+        nested!(cpu, 0x0606_2af8, models::spinner_init(cpu, o));
+        cpu.write32(o + BEHAVIOUR, 0x0608_aa38);
+        cpu.write32(o + POSITION, 0);
+        cpu.write32(o + POSITION + 4, 0x0128_0000);
+        cpu.write32(o + POSITION + 8, 0x0100_0000);
+        cpu.write8(o + 61, 0);
+        nested!(cpu, 0x0606_3380, gouraud::models_lit(cpu, 0x20, 1));
+        nested!(cpu, 0x0606_3168, gouraud::table_ramp(cpu, 31, 31, 31));
+        nested!(cpu, 0x0606_30e0, gouraud::table_floor(cpu, 15, 15, 15));
+    }
+    let draw = cpu.read32(SCREEN_DRAW_OBJECT);
+    cpu.call(SL_GET_MATRIX, &[draw + 112]);
+    o
+}
+
+/// The drop's scene started: the kept matrix inverted and a point (0, 0, 0) put through it, the
+/// point's angles from the kept ones, the progress cleared, the view put along the point, the drop made.
+pub fn drop_start(cpu: &mut Cpu) {
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    cpu.call(SL_LOAD_MATRIX, &[VIEW_MATRIX]);
+    cpu.call(SL_INVERS_MATRIX, &[]);
+    cpu.call(SL_CALC_POINT, &[0, 0, 0, VIEW_POINT]);
+    for k in 0..3 {
+        let w = cpu.read16(VIEW_ANGLES + 2 * k) as i16 as i32 as u32;
+        cpu.write32(VIEW_POINT + 12 + 4 * k, w);
+    }
+    cpu.write32(WORLD, 0);
+    nested!(cpu, 0x0605_f5b0, bg::view_along(cpu, VIEW_POINT));
+    cpu.call(SL_POP_MATRIX, &[]);
+    nested!(cpu, 0x0608_aaf8, drop_set(cpu));
+}
+
+/// The drop's frame (the scroll object `o`): the progress up by 0x100 (to 0x10000 at most), the
+/// view put along the point by it, the angles +0x10, +0x12 and +0x14 taken from the view's, the edge
+/// line of the first (+0x20); the blocks' spins (+0x20000, +0x40000 wrapped to 0x2000000); each
+/// block's rotation made from the kept matrix (as `screen_frame`); the beam drawn, the lines'
+/// table made from the edge line and the second angle and transferred, the angles' zooms set; the
+/// scroll goes on at progress 0x10000.
+pub fn drop_frame(cpu: &mut Cpu, o: u32) {
+    let progress = cpu.read32(WORLD).wrapping_add(0x100);
+    cpu.write32(WORLD, progress);
+    if progress as i32 > 0xffff {
+        cpu.write32(WORLD, 0x1_0000);
+    }
+    nested!(cpu, 0x0605_f648, bg::view_along_eased(cpu, VIEW_POINT));
+    let w = cpu.read16(WORLD_ANGLE_X);
+    cpu.write16(o + 0x10, w);
+    let w = cpu.read16(WORLD_ANGLE_Y);
+    cpu.write16(o + 0x12, w);
+    let w = cpu.read16(WORLD_ANGLE_Z);
+    cpu.write16(o + 0x14, w);
+    let angle = cpu.read16(WORLD_ANGLE_X) as i16 as i32 as u32;
+    let line = nested!(cpu, 0x0605_f860, bg::edge_line(cpu, angle));
+    cpu.write32(o + 0x20, line);
+    let a = cpu.read32(BLOCK_A + 16).wrapping_add(0x2_0000) & SKIP_ALL;
+    cpu.write32(BLOCK_A + 16, a);
+    let b = cpu.read32(BLOCK_B + 16).wrapping_add(0x4_0000) & SKIP_ALL;
+    cpu.write32(BLOCK_B + 16, b);
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    cpu.call(ROTATION_SIDE, &[0]);
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, BLOCK_A));
+    cpu.call(ROTATION_SIDE, &[1]);
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, BLOCK_B));
+    cpu.call(SL_POP_MATRIX, &[]);
+    nested!(cpu, 0x0608_a09c, beam_draw(cpu, o));
+    let line = cpu.read32(o + 0x20);
+    let tilt = cpu.read16(WORLD_ANGLE_Y) as i16 as i32 as u32;
+    nested!(cpu, 0x0605_f8c4, bg::edge_window(cpu, SCREEN_PLACES, line, tilt));
+    cpu.call(0x0603_4a50, &[SCREEN_PLACES, VDP2_LINES, 0x380]);
+    nested!(cpu, 0x0608_a3c0, screen_angles(cpu, o));
+    if cpu.read32(WORLD) == 0x1_0000 {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// A white flash's behaviour: its scales +0x20 and +0x24 growing (0x8000 and 0x4000 a frame), the
+/// screen object's three colour words (+92, +94, +96) up by 40, and after 7 frames (+60) it ends.
+pub fn whiten_behaviour(cpu: &mut Cpu, o: u32) {
+    let v = cpu.read32(o + 0x20).wrapping_add(0x8000);
+    cpu.write32(o + 0x20, v);
+    let v = cpu.read32(o + 0x24).wrapping_add(0x4000);
+    cpu.write32(o + 0x24, v);
+    let draw = cpu.read32(SCREEN_DRAW_OBJECT);
+    for k in [92, 94, 96] {
+        let w = cpu.read16(draw + k).wrapping_add(40);
+        cpu.write16(draw + k, w);
+    }
+    let n = cpu.read32(o + 60).wrapping_add(1);
+    cpu.write32(o + 60, n);
+    if n == 7 {
+        cpu.write8(o + MODE, ENDING);
+    }
+}
+
+/// The flash made (list 0, 64 bytes, plain_exec's): at y -0x380000, scales +0x24 0x4000, sprite
+/// byte +0x2e 0, +0x2f -45, +0x32 0, +0x33 8, the colours (+0x28 and +0x2a) 0x70 on the character base's.
+pub fn whiten_set(cpu: &mut Cpu) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 64)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks, PLAIN_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    cpu.write32(o + POSITION, 0);
+    cpu.write32(o + POSITION + 4, 0xffc8_0000);
+    cpu.write32(o + POSITION + 8, 0);
+    cpu.write32(o + BEHAVIOUR, 0x0608_ad64);
+    cpu.write8(o + 50, 0);
+    cpu.write8(o + 51, 8);
+    cpu.write32(o + SCALE_Y, 0x4000);
+    cpu.write8(o + FRAME, 0xd3);
+    cpu.write8(o + SPRITE_KIND, 0);
+    let colour = cpu.read16(CHAR_BASE).wrapping_add(0x70);
+    cpu.write16(o + COLOUR_B, colour);
+    cpu.write16(o + SPRITE_COLOUR, colour);
+    cpu.write32(o + 60, 0);
+}
+
+/// The next scene's screen set up (its scroll object `s`): the screen's draw (+0x58) the beam's, the
+/// second block cleared, the scroll's step +8, angles +0x10 and +0x12 and longs +0x20-+0x30 cleared,
+/// the helper at 0x0608dd04 told VRAM 0x25e44000, two palettes (0x06091c94: 16 from 0x80; 0x06091c74: 16
+/// from 0x100), the window, NBG1's page, plane B put at (0x440000, 0x700000), the colour calculation
+/// (0x52), the colour rates of screens 0 and 5 16, the flash made, the planes 0x17.
+pub fn world_set(cpu: &mut Cpu, s: u32) {
+    let draw = cpu.read32(SCREEN_DRAW_OBJECT);
+    cpu.write32(draw + SCREEN_DRAW, 0x0608_a09c);
+    block_clear(cpu, BLOCK_B, 0, 0);
+    cpu.write8(s + 8, 0);
+    cpu.write16(s + 0x10, 0);
+    cpu.write16(s + 0x12, 0);
+    for k in [0x20, 0x24, 0x28, 0x2c, 0x30] {
+        cpu.write32(s + k, 0);
+    }
+    cpu.call(0x0608_dd04, &[0x25e4_4000]);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, 0x0609_1c94, 16, 0x80));
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, 0x0609_1c74, 0x100, 16));
+    cpu.call(0x0606_e17c, &[0, 3]);
+    cpu.call(0x0606_e2e4, &[0x25e7_0000, 0x400, 0x8000]);
+    let b = bg::PLANE_B;
+    cpu.write32(b + bg::X, 0x44_0000);
+    cpu.write32(b + bg::Y, 0x70_0000);
+    cpu.write32(b + bg::SPEED_Y, 0);
+    cpu.write32(b + bg::SPEED_X, 0);
+    cpu.write32(b + bg::ZOOM_Y, 0x1_0000);
+    cpu.write32(b + bg::ZOOM_X, 0x1_0000);
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    cpu.call(0x0607_0ddc, &[0x52]);
+    cpu.call(0x0606_e45c, &[0, 16]);
+    cpu.call(0x0606_e45c, &[5, 16]);
+    nested!(cpu, 0x0608_adb8, whiten_set(cpu));
+    cpu.call(0x0606_e23c, &[23]);
+}
+
+/// The view's motion (the scroll object `o`): the angles +0x24 and +0x28 turned on by the words +0x10
+/// and +0x12, the longs +16 and +20 of the view made from the radii +0x2c and +0x30 by the cosine
+/// of the word +0x26 and the sine of +0x2a; the second block's spin +0x10 on by 0x10000.
+pub fn world_step(cpu: &mut Cpu, o: u32) {
+    let v = cpu.read32(o + 36).wrapping_add(cpu.read16(o + 0x10) as i16 as i32 as u32);
+    cpu.write32(o + 36, v);
+    let v = cpu.read32(o + 40).wrapping_add(cpu.read16(o + 0x12) as i16 as i32 as u32);
+    cpu.write32(o + 40, v);
+    let angle = cpu.read16(o + 38) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, angle));
+    let r = cpu.read32(o + 44);
+    let x = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, r, cos));
+    cpu.write32(WORLD + 16, x);
+    let angle = cpu.read16(o + 42) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, angle));
+    let r = cpu.read32(o + 48);
+    let y = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, r, sin));
+    cpu.write32(WORLD + 20, y);
+    let spin = cpu.read32(BLOCK_B + 16).wrapping_add(0x1_0000) & SKIP_ALL;
+    cpu.write32(BLOCK_B + 16, spin);
+}
+
+/// The view's matrix made: the unit matrix turned by the view's angles negated (x, y, z) and moved
+/// by its place negated.
+pub fn world_view(cpu: &mut Cpu) {
+    cpu.call(SL_UNIT_MATRIX, &[0]);
+    for (at, f) in [(WORLD_ANGLE_X, SL_ROT_X), (WORLD_ANGLE_Y, SL_ROT_Y), (WORLD_ANGLE_Z, SL_ROT_Z)] {
+        let a = (cpu.read16(at) as i16 as i32).wrapping_neg() as i16 as i32 as u32;
+        cpu.call(f, &[a]);
+    }
+    let (x, y, z) = (cpu.read32(WORLD + 4), cpu.read32(WORLD + 8), cpu.read32(WORLD + 12));
+    cpu.call(SL_TRANSLATE, &[x.wrapping_neg(), y.wrapping_neg(), z.wrapping_neg()]);
+}
+
+/// The first plane scrolled by 4 dots a frame at the view's third angle: its speed (-4 times the
+/// sine, 4 times the cosine) and its frame.
+pub fn world_scroll(cpu: &mut Cpu) {
+    let a = cpu.read16(WORLD_ANGLE_Z) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let y = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x4_0000, cos));
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let x = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0xfffc_0000, sin));
+    nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, x, y));
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+}
+
+/// The second block's rotation made in the view's matrix (the matrix kept, `world_view` applied).
+fn world_matrix_b(cpu: &mut Cpu) {
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    nested!(cpu, 0x0608_b00c, world_view(cpu));
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, BLOCK_B));
+    cpu.call(SL_POP_MATRIX, &[]);
+}
+
+/// The scene's frame (its scroll object `o`, a step in +8): 0, a count +0x20 (a frame each; the
+/// colour offset white at 7; at 8 the screen's wave made, the colours faded to nothing at speed 0x60,
+/// the count cleared, the step 1); 1, the radii +0x2c and +0x30 growing (8 a frame, 32 once the first is
+/// past 0x7ff) and the angle words +0x10 and +0x12 by 1 (below 0x100), by 2 (below 0x200), then the
+/// step 2; 2, the ease of the view +24 from 0x80 to 0x10080 by the count (+0x100 a frame), the lens made
+/// at 0x8000, the step 3 at 0x10000 (the count cleared); 2 and 3, the radii falling by 16 while
+/// they are positive. Then the motion, the two blocks' rotations and the view's matrix, the scroll.
+pub fn world_frame(cpu: &mut Cpu, o: u32) {
+    let step = cpu.read8(o + 8);
+    if step <= 3 {
+        match step {
+            0 => {
+                let n = cpu.read32(o + 32) as i32;
+                cpu.write32(o + 32, n.wrapping_add(1) as u32);
+                if n == 7 {
+                    nested!(cpu, 0x0605_e6dc, screen::set_fade_offset(cpu, 0xff, 0xff, 0xff));
+                } else if n == 8 {
+                    nested!(cpu, 0x0608_a590, screen_wave_make(cpu));
+                    nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, 0, 0, 0, 96));
+                    cpu.write32(o + 32, 0);
+                    cpu.write8(o + 8, step + 1);
+                }
+            }
+            1 => {
+                let r = cpu.read32(o + 44) as i32;
+                let (r, s) = if r > 0x7ff { (r.wrapping_add(32), 32) } else { (r.wrapping_add(8), 8) };
+                cpu.write32(o + 44, r as u32);
+                let s = (cpu.read32(o + 48) as i32).wrapping_add(s);
+                cpu.write32(o + 48, s as u32);
+                let w = cpu.read16(o + 0x10);
+                let wide = w as i16 as i32;
+                if wide <= 0xff {
+                    cpu.write16(o + 0x10, w.wrapping_add(1));
+                    let v = cpu.read16(o + 0x12).wrapping_add(1);
+                    cpu.write16(o + 0x12, v);
+                } else if wide <= 0x1ff {
+                    cpu.write16(o + 0x10, w.wrapping_add(2));
+                    let v = cpu.read16(o + 0x12).wrapping_add(2);
+                    cpu.write16(o + 0x12, v);
+                } else {
+                    cpu.write32(o + 32, 0);
+                    cpu.write8(o + 8, step + 1);
+                }
+            }
+            2 => {
+                let count = cpu.read32(o + 32).wrapping_add(0x100);
+                cpu.write32(o + 32, count);
+                let e = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x80, 0x1_0080, count));
+                cpu.write32(WORLD + 24, e);
+                let count = cpu.read32(o + 32);
+                if count == 0x8000 {
+                    nested!(cpu, 0x0608_aa08, lens_set(cpu));
+                } else if count == 0x1_0000 {
+                    cpu.write32(o + 32, 0);
+                    cpu.write8(o + 8, step + 1);
+                }
+                world_shrink(cpu, o);
+            }
+            _ => world_shrink(cpu, o),
+        }
+    }
+    nested!(cpu, 0x0608_af84, world_step(cpu, o));
+    let a = cpu.read32(BLOCK_A + 16).wrapping_add(0x2_0000) & SKIP_ALL;
+    cpu.write32(BLOCK_A + 16, a);
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    cpu.call(ROTATION_SIDE, &[0]);
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, BLOCK_A));
+    cpu.call(SL_POP_MATRIX, &[]);
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    nested!(cpu, 0x0608_b00c, world_view(cpu));
+    cpu.call(ROTATION_SIDE, &[1]);
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, BLOCK_B));
+    cpu.call(SL_POP_MATRIX, &[]);
+    nested!(cpu, 0x0608_b078, world_scroll(cpu));
+}
+
+/// The radii +0x2c and +0x30 of the scene's scroll object falling by 16 while the first is positive.
+fn world_shrink(cpu: &mut Cpu, o: u32) {
+    let r = cpu.read32(o + 44) as i32;
+    if r > 0 {
+        cpu.write32(o + 44, r.wrapping_sub(16) as u32);
+        let s = cpu.read32(o + 48).wrapping_sub(16);
+        cpu.write32(o + 48, s);
+    }
+}
+
+/// The two sprites' (0x060740f0, 0x060740f4) colour words +0xa0, +0xa2, +0xa4, +0xa6 set from the
+/// words at 0x0602ee20 and 0x0602ee28 with their low 12 bits cleared.
+const SPRITE_PAIR: u32 = 0x0607_40f0;
+
+pub fn world_colours(cpu: &mut Cpu) {
+    for (k, table) in [(0, 0x0602_ee20u32), (4, 0x0602_ee28)] {
+        let s = cpu.read32(SPRITE_PAIR + k);
+        if s != 0 {
+            for j in 0..4u32 {
+                let w = cpu.read16(table + 2 * j) & 0xf000;
+                cpu.write16(s + 0xa0 + 2 * j, w);
+            }
+        }
+    }
+}
+
+/// The scene's start (its scroll object `o`): its step +8 and count +0x20 cleared, the helpers at
+/// 0x0608dcd4 and 0x0608dce4 told 1, the view's ease 0x80, the message at 0x06091468, the byte at
+/// 0x0600ed90 set, the sprites' colours.
+pub fn world_start(cpu: &mut Cpu, o: u32) {
+    cpu.write8(o + 8, 0);
+    cpu.write32(o + 32, 0);
+    cpu.call(0x0608_dcd4, &[1]);
+    cpu.call(ROTATION_SIDE, &[1]);
+    cpu.write32(WORLD + 24, 0x80);
+    nested!(cpu, 0x0606_1620, text::message_set(cpu, 0x0609_1468));
+    cpu.write8(0x0600_ed90, 1);
+    nested!(cpu, 0x0608_b2b8, world_colours(cpu));
+}
+
+/// The scene's closing frame (its scroll object `o`): the motion; once the step is 0 the angle words
+/// +0x10 and +0x12 fall by 2 while the first is past 0x100, and the radii by 12 down to -0x800,
+/// where the scroll goes on; the second block's rotation, the scroll and the sprites' colours.
+pub fn world_frame_out(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_af84, world_step(cpu, o));
+    if cpu.read8(o + 8) == 0 {
+        let w = cpu.read16(o + 0x10);
+        if w as i16 as i32 > 0x100 {
+            cpu.write16(o + 0x10, w.wrapping_sub(2));
+            let v = cpu.read16(o + 0x12).wrapping_sub(2);
+            cpu.write16(o + 0x12, v);
+        }
+        let r = cpu.read32(o + 44) as i32;
+        if r > -0x800 {
+            cpu.write32(o + 44, r.wrapping_sub(12) as u32);
+            let s = cpu.read32(o + 48).wrapping_sub(12);
+            cpu.write32(o + 48, s);
+        } else {
+            cpu.write32(o + 44, -0x800i32 as u32);
+            nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+        }
+    }
+    world_matrix_b(cpu);
+    nested!(cpu, 0x0608_b078, world_scroll(cpu));
+    nested!(cpu, 0x0608_b2b8, world_colours(cpu));
+}
+
+/// The time left (+52 of the scene's scroll object, frames) shown as in the first stage's count:
+/// the seconds left (rounded up) on the text plane, two large digits, or one, centred, below ten.
+const TIME_TENS_AT: u32 = 0x25e7_e228;
+const TIME_UNITS_AT: u32 = 0x25e7_e22c;
+const TIME_UNIT_AT: u32 = 0x25e7_e22a;
+const TIME_TWO_SPACES: u32 = 0x0608_b448;
+
+pub fn timer_show(cpu: &mut Cpu, o: u32) {
+    let seconds = (cpu.read32(o + 52) as i32).wrapping_add(60) / 60;
+    let (tens, units) = (seconds / 10, seconds % 10);
+    let digit = |d: i32| (d + b'0' as i32) as i8 as i32 as u32;
+    if tens != 0 {
+        nested!(cpu, 0x0606_111c, text::put_large_char(cpu, digit(tens), TIME_TENS_AT, 0));
+        nested!(cpu, 0x0606_111c, text::put_large_char(cpu, digit(units), TIME_UNITS_AT, 0));
+    } else {
+        if units == 9 {
+            nested!(cpu, 0x0606_1204, text::put_large_string(cpu, TIME_TWO_SPACES, TIME_TENS_AT, 0));
+        }
+        nested!(cpu, 0x0606_111c, text::put_large_char(cpu, digit(units), TIME_UNIT_AT, 0));
+    }
+}
+
+/// The timer's start (the scroll object `o`): 3600 frames (+52), its step +8 and count +0x20
+/// cleared, the helper at 0x0608da04.
+pub fn timer_start(cpu: &mut Cpu, o: u32) {
+    cpu.write32(o + 52, 0xe10);
+    cpu.write8(o + 8, 0);
+    cpu.write32(o + 32, 0);
+    cpu.call(0x0608_da04, &[]);
+}
+
+/// The timer's frame (the scroll object `o`): a frame off the time, shown; the motion, the second
+/// block's rotation, the view's ease +24 down by 8, the scroll and the sprites' colours; the
+/// scroll goes on once the time is below 0.
+pub fn timer_frame(cpu: &mut Cpu, o: u32) {
+    let n = cpu.read32(o + 52).wrapping_sub(1);
+    cpu.write32(o + 52, n);
+    nested!(cpu, 0x0608_b44c, timer_show(cpu, o));
+    nested!(cpu, 0x0608_af84, world_step(cpu, o));
+    world_matrix_b(cpu);
+    let e = cpu.read32(WORLD + 24).wrapping_sub(8);
+    cpu.write32(WORLD + 24, e);
+    nested!(cpu, 0x0608_b078, world_scroll(cpu));
+    nested!(cpu, 0x0608_b2b8, world_colours(cpu));
+    if (cpu.read32(o + 52) as i32) < 0 {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// A ring (rings.rs's, described on the stack) at (0, -0x380000), turned 0xf400 about x, 0x900 across,
+/// tilted by 0x4000 and 0xc000 negated, in the colour 0x50 on the character base's; the sound 88.
+pub fn ring_burst(cpu: &mut Cpu) {
+    let d = cpu.stack();
+    cpu.write32(d + 12, 0);
+    cpu.write32(d + 16, 0xffc8_0000);
+    cpu.write32(d + 20, 0);
+    cpu.write16(d + 4, 0xf400);
+    cpu.write16(d + 6, 0);
+    cpu.write16(d + 8, 0);
+    cpu.write32(d + 24, 0);
+    cpu.write32(d + 28, 0);
+    cpu.write32(d + 44, 0x50_0000);
+    cpu.write32(d + 40, 0);
+    let colour = cpu.read16(CHAR_BASE).wrapping_add(0x50);
+    cpu.write16(d + 2, colour);
+    cpu.write32(d + 32, 0x900);
+    cpu.write32(d + 36, 0x900);
+    cpu.write32(d + 48, 0x4000);
+    cpu.write32(d + 52, 0xffff_c000);
+    cpu.write32(d + 56, 0);
+    cpu.write32(d + 60, 0);
+    cpu.write32(d + 64, 0);
+    cpu.write8(d, 1);
+    nested!(cpu, 0x0606_2738, rings::ring_set(cpu, d));
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 88));
+}
+
+/// The last scene's start (the scroll object `o`): 0x100 frames (+52), the colour offset sound 95,
+/// the screen faded to white at speed 0x100, the time's digit place cleared.
+pub fn final_start(cpu: &mut Cpu, o: u32) {
+    cpu.write32(o + 52, 0x100);
+    nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 95, 0));
+    nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, 0xff, 0xff, 0xff, 0x100));
+    nested!(cpu, 0x0606_111c, text::put_large_char(cpu, 0x20, TIME_UNIT_AT, 0));
+}
+
+/// The last scene's frame (the scroll object `o`): the motion; at 0xc0 frames left a ring burst; the
+/// second block's rotation, the scroll and the sprites' colours; a frame off (+52), and the scroll
+/// goes on once it is below 0.
+pub fn final_frame(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_af84, world_step(cpu, o));
+    if cpu.read32(o + 52) == 0xc0 {
+        nested!(cpu, 0x0608_b5b8, ring_burst(cpu));
+    }
+    world_matrix_b(cpu);
+    nested!(cpu, 0x0608_b078, world_scroll(cpu));
+    nested!(cpu, 0x0608_b2b8, world_colours(cpu));
+    let n = cpu.read32(o + 52).wrapping_sub(1);
+    cpu.write32(o + 52, n);
+    if (n as i32) < 0 {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// The scene's second part's set-up (its scroll object `o`): the next mode 3, the colour offset
+/// sound 91, the fades stopped and the colour offset white, NBG0's characters, page, map and
+/// zoom, NBG1's, the windows, NBG3's, the plane between (VRAM split 2), the screens' priorities
+/// (2: 7, 1: 5, 0: 4, 0xfff9...: 4), the planes' places ((0xb00000, 0x780000), zooms one), the
+/// scroll's step +8, +9, +0x20 and +0x28 cleared, the music 9, the view's place and ease, the
+/// kept matrix got from the screen object's, the sprites' pair hidden (+109, +0x90 cleared,
+/// the top flag set).
+pub fn part_set_up(cpu: &mut Cpu, o: u32) {
+    cpu.write8(NEXT_MODE, 3);
+    nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 91, 0));
+    nested!(cpu, 0x0605_e9d8, screen::stop_fades(cpu));
+    nested!(cpu, 0x0605_e6dc, screen::set_fade_offset(cpu, 0xff, 0xff, 0xff));
+    nested!(cpu, 0x0606_e288, sgl::sl_char_nbg0(cpu, 0x10, 0));
+    nested!(cpu, 0x0606_e300, sgl::sl_page_nbg0(cpu, 0x25e4_0000, 0x100, 0x4000));
+    nested!(cpu, 0x0607_0c4c, sgl::sl_map_nbg0(cpu, 0x25e6_0000, 0x25e6_0000, 0x25e6_0000, 0x25e6_0000));
+    nested!(cpu, 0x0607_0cfc, sgl::sl_zoom_mode(cpu, 1, 0));
+    nested!(cpu, 0x0606_e294, sgl::sl_char_nbg1(cpu, 0x10, 0));
+    nested!(cpu, 0x0606_e2e4, sgl::sl_page_nbg1(cpu, 0x25e0_0000, 0x200, 0x4000));
+    nested!(cpu, 0x0607_0d1c, sgl::sl_map_nbg1(cpu, 0x25e6_4000, 0x25e6_4000, 0x25e6_4000, 0x25e6_4000));
+    for (screen, v) in [(1, 0), (0, 0), (3, 3)] {
+        cpu.call(0x0606_e17c, &[screen, v]);
+    }
+    cpu.call(0x0608_de54, &[0, 0x20, 0x15f, 0xdf]);
+    nested!(cpu, 0x0606_e2b6, sgl::sl_char_nbg3(cpu, 0, 0));
+    nested!(cpu, 0x0606_e2f4, sgl::sl_page_nbg3(cpu, 0x25e7_8000, 0x600, 0x8000));
+    cpu.call(0x0608_dea4, &[0]);
+    cpu.call(0x0608_deb4, &[0x25e6_8000, 0x25e6_8000, 0x25e6_8000, 0x25e6_8000]);
+    nested!(cpu, 0x0605_eee4, screen::fill_cells(cpu, 0, 0x25e6_8000, 64, 64));
+    cpu.call(0x0608_df74, &[0, 0]);
+    nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 2, 7));
+    nested!(cpu, 0x0606_dd4c, sgl::vram_split(cpu, 2));
+    nested!(cpu, 0x0606_dd6c, sgl::sl_scr_auto_disp(cpu, 15));
+    cpu.call(0x0606_e23c, &[0x000a_0005]);
+    for plane in [bg::PLANE_A, bg::PLANE_B] {
+        cpu.write32(plane + bg::X, 0xb0_0000);
+        cpu.write32(plane + bg::Y, 0x78_0000);
+        cpu.write32(plane + bg::SPEED_Y, 0);
+        cpu.write32(plane + bg::SPEED_X, 0);
+        cpu.write32(plane + bg::ZOOM_Y, 0x1_0000);
+        cpu.write32(plane + bg::ZOOM_X, 0x1_0000);
+        if plane == bg::PLANE_A {
+            nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+        } else {
+            nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+        }
+    }
+    nested!(cpu, 0x0606_dd5c, sgl::sl_scr_transparent(cpu, 3));
+    cpu.call(0x0607_0ddc, &[0]);
+    for (screen, pri) in [(1, 5), (0, 4), (-7i32 as u32, 4)] {
+        nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, screen, pri));
+    }
+    cpu.write8(o + 8, 0);
+    cpu.write32(o + 40, 0);
+    cpu.write32(o + 32, 0);
+    cpu.write8(o + 9, 0);
+    nested!(cpu, 0x0600_4e98, sound::request_music(cpu, 9));
+    cpu.write32(WORLD + 4, 0x21_0000);
+    cpu.write32(WORLD + 8, 0xce_0000);
+    cpu.write32(WORLD + 12, 0x2_0000);
+    cpu.write32(WORLD + 16, 0xffff_3b60);
+    cpu.write32(WORLD + 20, 0);
+    cpu.write32(WORLD + 24, 0xffff_9000);
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    let draw = cpu.read32(SCREEN_DRAW_OBJECT);
+    cpu.call(SL_GET_MATRIX, &[draw + 112]);
+    cpu.call(SL_POP_MATRIX, &[]);
+    nested!(cpu, 0x0606_4e54, models::pods_shading(cpu));
+    nested!(cpu, 0x0606_1738, player::scene_on(cpu));
+    for k in [0, 4] {
+        let s = cpu.read32(SPRITE_PAIR + k);
+        if s != 0 {
+            cpu.write8(s + 109, 0);
+            cpu.write16(s + 0x90, 0);
+            let f = cpu.read32(s + 16) | 0x8000_0000;
+            cpu.write32(s + 16, f);
+        }
+    }
+}
+
+/// The picture part's cells, colours and map put in the pictures' places (the scroll object `o`: +0x20
+/// the plane in use, +0x28 the picture's number; the file's parts `base`, as `screen::picture_part`
+/// reads them; the pictures' table `table` of 40-byte entries: the cells' size +8, the colours' count
+/// word +14, the map's width +18 and height +22): the plane's cells by a long copy, its colours, the
+/// map put by long cells, the bit 2 of the word at 0x06030e30 set.
+pub fn picture_load(cpu: &mut Cpu, o: u32, base: u32, table: u32) {
+    let d = cpu.stack();
+    let second = cpu.read32(o + 32) != 0;
+    let (cells_at, map_at, colours, add) = if second { (0x25e0_0000, 0x25e6_4000, 0x200, 0) } else { (0x25e4_0000, 0x25e6_0000, 0x100, 0x2000) };
+    cpu.write32(d, add);
+    cpu.write32(d + 4, map_at);
+    let map_part = cpu.read32(base + 8);
+    cpu.write32(d + 8, map_part);
+    let part = |cpu: &mut Cpu, k: u32| screen::picture_part(cpu, base, k);
+    let entry = |cpu: &mut Cpu| table + 40 * cpu.read32(o + 40);
+    let cells = part(cpu, 0);
+    let e = entry(cpu);
+    let size = cpu.read32(e + 8);
+    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, cells, cells_at, size, 0x2000));
+    let e = entry(cpu);
+    let count = cpu.read16(e + 14) as u32;
+    let colour_data = part(cpu, 1);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colour_data, colours, count));
+    let c = cpu.read32(0x0603_0e30) | 4;
+    cpu.write32(0x0603_0e30, c);
+    let e = entry(cpu);
+    let char_offset = colours >> 4;
+    let (w, h) = (cpu.read16(e + 18) as u32, cpu.read16(e + 22) as u32);
+    let map = screen::picture_part(cpu, base, 2);
+    cpu.nested_with_stack(&PICTURE_CELLS_PROLOGUE, 0x0605_ee94, &[char_offset, add], |cpu| screen::put_long_cells(cpu, map, map_at, w, h, char_offset, add));
+}
+
+static PICTURE_CELLS_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
