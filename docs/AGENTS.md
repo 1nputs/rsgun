@@ -83,6 +83,12 @@ into the next brief for that overlay.
    at the start of f150000 (before STG04 loads), and two "never run" groups ran there and in
    f140000.
 
+- **Partly run functions are registered.** A function counts when every call that ran was equal,
+  as with any rewrite's branches not reached; holding one back because only its first stage ran
+  leaves running SH-2 code (the RANK batch held back its result frame, 4 equal calls; the
+  orchestrator registered it again). Extra scenarios (patched states, scripted inputs) are worth
+  it only when asked: that batch spent 640k tokens, twice a normal batch, building them.
+
 ## What worked
 
 - Compare mode as the arbiter: Sonnet batches came back with real bugs found and fixed by the

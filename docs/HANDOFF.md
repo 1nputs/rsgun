@@ -26,9 +26,9 @@ Overlays (fingerprint, game mode, marathon segments, worktree and branch, where 
 - STG05 (2adefae5540dd556, game mode 11, f170000-f200000; ../rsgun-stg05, wip-stg05): every
   function that runs is rewritten (last runs out/port/stg05-19). Held back (never run):
   0x060894b0, 0x0608a510, 0x0608d104, 0x0608d48c.
-- RANK (4635b7419f6fc1a7, the ranking after a game ends, f200000: 16 functions run; the
-  marathon reports label many of them with STG05's fingerprint; ../rsgun-rank, wip-rank):
-  scaffolded (rank.rs, a marker in mod.rs).
+- RANK (4635b7419f6fc1a7, the ranking after a game ends, f200000; ../rsgun-rank, wip-rank):
+  every function that runs is rewritten (out/port/orch-rank/f200000.txt); its scenario scripts
+  (patched states for the name entry) are in out/port/rank-scripts.
 - STG03 (game mode 9) is stage 4: STG01's end asks "SELECT NEXT STAGE" (stage 2 or 4; up or down
   turns it, a button or 300 frames takes it) and the marathon took stage 2 (its weaving turned it
   at random). out/evidence/route4-input.txt is the marathon's input with the controls let go from
@@ -36,7 +36,7 @@ Overlays (fingerprint, game mode, marathon segments, worktree and branch, where 
   f060000 state (evidence out/evidence/route4.txt, states out/evidence/route4-states every 10000
   frames from 70000) is STG03's evidence. It is also the attract mode's third demo (mode 14).
 The whole-game check on main 96b4bf4 (out/port/marathon-96b4bf4): all 21 segments every call equal;
-still run unrewritten there: RANK's 16 and STG02's 0x06097610 (f140000) and 0x060a19d0-0x060a2504
+still run unrewritten there: RANK's 16 (since done) and STG02's 0x06097610 (f140000) and 0x060a19d0-0x060a2504
 (f150000, before STG04 loads), both in hand.
 Check each overlay's name with `states::overlay_name` before registering (a block registered
 under the wrong name never runs; its report shows only `f_...` names). The marathon reports in
