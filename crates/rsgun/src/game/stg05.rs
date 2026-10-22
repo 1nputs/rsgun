@@ -4676,6 +4676,507 @@ pub fn frame_phase(cpu: &mut Cpu, a: u32, b: u32) -> u32 {
     frame.wrapping_sub((a & 0xff) * (b & 0xff)) & 15
 }
 
+// ---- the figure drawn --------------------------------------------------------------------------------------
+
+/// SGL's calls the drawing makes (each as the SH-2 code calls it).
+fn push(cpu: &mut Cpu) {
+    nested!(cpu, SL_PUSH_MATRIX, sgl::sl_push_matrix(cpu));
+}
+
+fn pop(cpu: &mut Cpu) {
+    nested!(cpu, SL_POP_MATRIX, sgl::sl_pop_matrix(cpu));
+}
+
+fn pops(cpu: &mut Cpu, n: u32) {
+    for _ in 0..n {
+        pop(cpu);
+    }
+}
+
+fn translate(cpu: &mut Cpu, [x, y, z]: [u32; 3]) {
+    nested!(cpu, SL_TRANSLATE, sgl::sl_translate(cpu, x, y, z));
+}
+
+fn scale(cpu: &mut Cpu, x: u32, y: u32, z: u32) {
+    nested!(cpu, SL_SCALE, sgl::sl_scale(cpu, x, y, z));
+}
+
+fn rot_x(cpu: &mut Cpu, a: u32) {
+    nested!(cpu, SL_ROT_X, sgl::sl_rot_x(cpu, a));
+}
+
+fn rot_y(cpu: &mut Cpu, a: u32) {
+    nested!(cpu, SL_ROT_Y, sgl::sl_rot_y(cpu, a));
+}
+
+fn rot_z(cpu: &mut Cpu, a: u32) {
+    nested!(cpu, SL_ROT_Z, sgl::sl_rot_z(cpu, a));
+}
+
+fn get_matrix(cpu: &mut Cpu, dst: u32) {
+    nested!(cpu, SL_GET_MATRIX, sgl::sl_get_matrix(cpu, dst));
+}
+
+fn load_matrix(cpu: &mut Cpu, src: u32) {
+    nested!(cpu, SL_LOAD_MATRIX, sgl::sl_load_matrix(cpu, src));
+}
+
+fn calc_point(cpu: &mut Cpu, x: u32, y: u32, z: u32, out: u32) {
+    nested!(cpu, SL_CALC_POINT, sgl::sl_calc_point(cpu, x, y, z, out));
+}
+
+fn put_polygon(cpu: &mut Cpu, pd: u32) {
+    nested!(cpu, SL_PUT_POLYGON, sgl::sl_put_polygon(cpu, pd));
+}
+
+fn cur_window(cpu: &mut Cpu, window: u32) {
+    nested!(cpu, SL_CUR_WINDOW, sgl::sl_cur_window(cpu, window));
+}
+
+/// STG05's copy of SGL's matrix multiply: the matrix at `m` into the current one.
+fn multi_matrix(cpu: &mut Cpu, m: u32) {
+    nested!(cpu, 0x0608_da34, sgl::sl_multi_matrix_stg05(cpu, m));
+}
+
+/// A halfword field, sign-extended.
+fn half(cpu: &mut Cpu, at: u32) -> u32 {
+    cpu.read16(at) as i16 as i32 as u32
+}
+
+/// The three angles (z, y, x: the order they are turned in) at `at` in the figure.
+fn angles(cpu: &mut Cpu, at: u32) -> [u32; 3] {
+    [half(cpu, at), half(cpu, at + 2), half(cpu, at + 4)]
+}
+
+fn turn(cpu: &mut Cpu, [z, y, x]: [u32; 3]) {
+    rot_z(cpu, z);
+    rot_y(cpu, y);
+    rot_x(cpu, x);
+}
+
+/// The kinds the figure puts polygons of (the kinds' table's entries): the body's, the effects'
+/// (shadow, lift disc, shards) and the shell's. A kind's polygon sets are at +0x1c of its entry.
+const FIG_BODY_KIND: u32 = 0x4c;
+const FIG_EFFECT_KIND: u32 = 0x4d;
+const FIG_SHELL_KIND: u32 = 0x20;
+const KIND_POLYGONS: u32 = 0x1c;
+/// The figure's own matrices for its limbs: 17 of 48 bytes at the bottom of the drawing's frame
+/// (the 16 parts' and the last the whole figure's), and the ones its limbs' history keeps (the
+/// figure's +0xe80, +0x1180, +0x1480 and +0x580, +0x880, +0xb80, 16 each, one a frame).
+const FIG_MATRIX: u32 = 48;
+const FIG_ROOT_MATRIX: u32 = 16;
+/// The figure's drawn state: the flag bits (+0x2c4: 1 mirrored, 2, 0x80 hidden), the shell's
+/// size, the lift's and the rings' sizes, the figure's scale, the head's and limb's angles.
+const FIG_HIDDEN: u32 = 0x80;
+const FIG_SHELL: u32 = 0x18a4;
+const FIG_RING_TILT: u32 = 0x1788;
+const FIG_RIBBON_COUNTS: [u32; 2] = [0x57e, 0x57d];
+/// The beam's polygon data on the figure's chest (the model's at 0x06091bf0), and the places the
+/// drawing leaves the head's and limb's angles and aim for the beams to read.
+const FIG_BEAM_POLYGONS: u32 = 0x0609_1bf0;
+const FIG_HEAD_ANGLES_OUT: u32 = 0x0609_3540;
+const FIG_LIMB_AIM_OUT: u32 = 0x0609_3550;
+const FIG_ROOT_OUT: u32 = 0x0609_3510;
+const FIG_LIMB_BASE_Z: u32 = 0xff50_0000;
+/// The head's lean (+0x1880, added to its third angle) and the places the legs' tips' points are kept.
+const FIG_LEAN: u32 = 0x1880;
+const FIG_TIPS: [u32; 2] = [0x568, 0x55c];
+
+/// The polygon sets of a kind (its entry's +0x1c).
+fn kind_polygons(cpu: &mut Cpu, kind: u32) -> u32 {
+    let entry = cpu.read32(KINDS + K_SIZE * kind);
+    cpu.read32(entry + KIND_POLYGONS)
+}
+
+/// One limb's matrix kept in the frame (at `m`): the limb placed (at `place`), pushed, turned (the
+/// angles), moved on by `reach`, and the matrix got.
+fn limb_inner(cpu: &mut Cpu, m: u32, place: [u32; 3], turns: [u32; 3], reach: [u32; 3]) {
+    translate(cpu, place);
+    push(cpu);
+    turn(cpu, turns);
+    translate(cpu, reach);
+    get_matrix(cpu, m);
+}
+
+fn limb(cpu: &mut Cpu, m: u32, place: [u32; 3], turns: [u32; 3], reach: [u32; 3]) {
+    push(cpu);
+    limb_inner(cpu, m, place, turns, reach);
+}
+
+/// The sixteen parts' matrices, from the figure's place and its limbs' angles (the matrix stack
+/// kept pushed down the arm and leg chains, popped where a chain ends), and the root's: the
+/// parts' points kept in the frame as the drawing goes. `frame` is the drawing's.
+fn figure_limbs(cpu: &mut Cpu, o: u32, frame: u32) {
+    let m = |k: u32| frame + FIG_MATRIX * k;
+    let z = |d: u32| [0, 0, d];
+    push(cpu);
+    // the body: the figure's place, the head's and the body's own turns
+    let place = [cpu.read32(o + 0x14), cpu.read32(o + 0x18), cpu.read32(o + 0x1c)];
+    push(cpu);
+    let turns = angles(cpu, o + 0x158);
+    limb_inner(cpu, m(0), place, turns, [0; 3]);
+    let turns = angles(cpu, o + 0x15e);
+    limb(cpu, m(1), z(0xfff6_0000), turns, z(0xfff6_0000));
+    // the head's turns take the aim and the facing added
+    let (aim, lean) = (half(cpu, o + FIG_AIM), half(cpu, o + FIG_LEAN));
+    let turns = [
+        half(cpu, o + 0x16a).wrapping_add(aim) as i16 as i32 as u32,
+        half(cpu, o + 0x16c),
+        half(cpu, o + 0x16e).wrapping_add(lean) as i16 as i32 as u32,
+    ];
+    limb(cpu, m(2), z(0xffef_0000), turns, z(0xfffb_0000));
+    pops(cpu, 2);
+    // the left arm (the elbow, the hand), then the right arm's
+    let turns = angles(cpu, o + 0x170);
+    limb(cpu, m(3), [0xffe4_0000, 0x2_0000, 0], turns, z(0x4_0000));
+    let turns = angles(cpu, o + 0x176);
+    limb(cpu, m(4), [0xfffe_0000, 0, 0x12_0000], turns, [0xfffe_0000, 0, 0x12_0000]);
+    let turns = angles(cpu, o + 0x17c);
+    limb(cpu, m(5), z(0x11_0000), turns, z(0xd_0000));
+    pops(cpu, 6);
+    push(cpu);
+    scale(cpu, 0xffff_0000, 0x1_0000, 0x1_0000);
+    let turns = angles(cpu, o + 0x182);
+    limb_inner(cpu, m(6), [0xffe4_0000, 0x2_0000, 0], turns, z(0x4_0000));
+    let turns = angles(cpu, o + 0x188);
+    limb(cpu, m(7), [0xfffe_0000, 0, 0x12_0000], turns, [0xfffe_0000, 0, 0x12_0000]);
+    let turns = angles(cpu, o + 0x18e);
+    limb(cpu, m(8), z(0x11_0000), turns, z(0xd_0000));
+    pops(cpu, 8);
+    // the legs: the left, with the muzzle's place after its hand
+    let turns = angles(cpu, o + 0x164);
+    limb(cpu, m(9), z(0xc_0000), turns, z(0x6_0000));
+    let turns = angles(cpu, o + 0x194);
+    limb(cpu, m(10), [0xfff4_0000, 0, 0x4_0000], turns, z(0x14_0000));
+    let turns = angles(cpu, o + 0x19a);
+    limb(cpu, m(11), z(0x1b_0000), turns, z(0x19_0000));
+    let turns = angles(cpu, o + 0x1a0);
+    limb(cpu, m(12), z(0x20_0000), turns, [0, 0x8_0000, 0x7_0000]);
+    calc_point(cpu, 0, 0, 0, o + FIG_TIPS[0]);
+    pops(cpu, 6);
+    // the right
+    push(cpu);
+    scale(cpu, 0xffff_0000, 0x1_0000, 0x1_0000);
+    let turns = angles(cpu, o + 0x1a6);
+    limb_inner(cpu, m(13), [0xfff4_0000, 0, 0x4_0000], turns, z(0x14_0000));
+    let turns = angles(cpu, o + 0x1ac);
+    limb(cpu, m(14), z(0x1b_0000), turns, z(0x19_0000));
+    let turns = angles(cpu, o + 0x1b2);
+    limb(cpu, m(15), z(0x20_0000), turns, [0, 0x8_0000, 0x7_0000]);
+    calc_point(cpu, 0, 0, 0, o + FIG_TIPS[1]);
+    pops(cpu, 11);
+}
+
+/// A part's points: the part's table (FIG_PARTS' third) holds each point as three halfwords (x, y,
+/// z, a fourth unused), taken as 16.16 into the figure's own places (+offset, twelve bytes each).
+fn part_points(cpu: &mut Cpu, o: u32, part: usize) {
+    let (count, at, table, _) = FIG_PARTS[part];
+    for n in 0..count {
+        let point = table + 8 * n;
+        let x = (cpu.read16(point) as u32) << 16;
+        let y = (cpu.read16(point + 2) as u32) << 16;
+        let z = (cpu.read16(point + 4) as u32) << 16;
+        calc_point(cpu, x, y, z, o + at + 12 * n);
+    }
+}
+
+/// A part begun: pushed, its matrix (the drawing's frame's `k`th) multiplied in and its points
+/// kept.
+fn part_begin(cpu: &mut Cpu, o: u32, frame: u32, k: u32, part: usize) {
+    push(cpu);
+    multi_matrix(cpu, frame + FIG_MATRIX * k);
+    part_points(cpu, o, part);
+}
+
+/// A part's polygon unless the figure is hidden: the pointer at `row` leads to the part's
+/// polygons, one each for the figure as it is and mirrored (flag 1). Whether it was put.
+fn part_polygon(cpu: &mut Cpu, o: u32, row: u32) -> bool {
+    let flags = cpu.read16(o + FIG_FLAGS) as u32;
+    if flags & FIG_HIDDEN != 0 {
+        return false;
+    }
+    let set = cpu.read32(row);
+    let pd = cpu.read32(set + (flags & 1) * 4);
+    put_polygon(cpu, pd);
+    true
+}
+
+/// The limbs' history matrix of the frame (16 kept, from `at`).
+fn history_matrix(cpu: &mut Cpu, o: u32, at: u32) {
+    let phase = cpu.read32(GAME_FRAMES) & 15;
+    get_matrix(cpu, o + at + FIG_MATRIX * phase);
+}
+
+/// The figure's polygon set for one of its bodies' numbered parts (a byte at +0x575 and the
+/// next).
+fn body_row(cpu: &mut Cpu, o: u32, byte: u32, plus: u32) -> u32 {
+    let polygons = kind_polygons(cpu, FIG_BODY_KIND);
+    polygons + u32::from(cpu.read8(o + byte)) * 4 + plus
+}
+
+/// The rings behind a limb (the lift's, the rings' sizes at `ease`): pushed, placed by the size,
+/// the rings' eight points laid out (a quarter turn per frame parity) and the model of rings put
+/// scaled by the sizes.
+fn figure_rings(cpu: &mut Cpu, o: u32, ease: u32, first: u32, points: u32) {
+    let size = cpu.read32(o + ease);
+    if size == 0 {
+        return;
+    }
+    push(cpu);
+    translate(cpu, [0, 0, 0x18_0000u32.wrapping_sub(size.wrapping_mul(40))]);
+    calc_point(cpu, 0, 0, 0, o + first);
+    let parity = (cpu.read32(LOOPS) & 1) + 1;
+    for n in 0..8u32 {
+        let z = (3 * n).wrapping_mul(0xc_0000).wrapping_add(parity.wrapping_mul(0x12_0000));
+        calc_point(cpu, 0, 0, z, o + points + 12 * n);
+    }
+    rot_x(cpu, 0xffff_c000);
+    let spin = cpu.read32(LOOPS).wrapping_mul(0x920) as i16 as i32 as u32;
+    rot_y(cpu, spin);
+    let tilt = cpu.read32(o + FIG_RING_TILT).wrapping_add(0x1_0000);
+    scale(cpu, size, tilt, size);
+    let polygons = kind_polygons(cpu, FIG_EFFECT_KIND);
+    let set = cpu.read32(polygons + 0x14);
+    let pd = cpu.read32(set);
+    put_polygon(cpu, pd);
+    pop(cpu);
+}
+
+/// The shell's polygon (the shell kind's first set's first).
+fn shell_polygon(cpu: &mut Cpu) -> u32 {
+    let polygons = kind_polygons(cpu, FIG_SHELL_KIND);
+    let set = cpu.read32(polygons);
+    cpu.read32(set)
+}
+
+/// The sixteen parts, each pushed, its matrix multiplied in, its points laid out and its polygon
+/// put: the body (the first parts, the head with the shell and the lifted shell's polygons), the
+/// arms and legs and the ribbons' ends (the limbs' history matrices kept each frame are got in
+/// some of them).
+fn figure_parts(cpu: &mut Cpu, o: u32, frame: u32) {
+    let mode = |cpu: &mut Cpu| cpu.read8(o + FIG_MODE);
+    let body = kind_polygons(cpu, FIG_BODY_KIND);
+    let (one, two) = (FIG_BYTE_575, FIG_BYTE_576);
+    // the body
+    part_begin(cpu, o, frame, 0, 0);
+    part_polygon(cpu, o, body + 8);
+    pop(cpu);
+    part_begin(cpu, o, frame, 1, 1);
+    if part_polygon(cpu, o, body + 4) && mode(cpu) == 0x16 {
+        let shell = cpu.read32(o + FIG_SHELL);
+        if shell != 0 {
+            push(cpu);
+            translate(cpu, [0x8_0000, shell << 4, 0x8_0000]);
+            scale(cpu, shell, shell.wrapping_mul(2), shell);
+            rot_x(cpu, 0x4000);
+            let turn = (cpu.read32(GAME_FRAMES) << 8) as i16 as i32 as u32;
+            rot_z(cpu, turn);
+            let pd = shell_polygon(cpu);
+            put_polygon(cpu, pd);
+            pop(cpu);
+        }
+    }
+    pop(cpu);
+    part_begin(cpu, o, frame, 2, 2);
+    calc_point(cpu, 0, 0, 0, o + 0x186c);
+    part_polygon(cpu, o, body);
+    let m = mode(cpu);
+    let counted = cpu.read16(o + FIG_COUNT) as u32;
+    if m > 0x17 && (m != 0x1a || counted <= 0xc0) {
+        let turn = (cpu.read32(LOOPS) << 8) as i16 as i32 as u32;
+        rot_z(cpu, turn);
+        let pd = shell_polygon(cpu);
+        put_polygon(cpu, pd);
+    }
+    pop(cpu);
+    // the left arm
+    part_begin(cpu, o, frame, 3, 4);
+    history_matrix(cpu, o, 0xe80);
+    let row = body_row(cpu, o, one, 0x10);
+    part_polygon(cpu, o, row);
+    pop(cpu);
+    part_begin(cpu, o, frame, 4, 5);
+    history_matrix(cpu, o, 0x1180);
+    let row = body_row(cpu, o, one, 0x18);
+    part_polygon(cpu, o, row);
+    figure_rings(cpu, o, FIG_EASE_X, 0x17f4, 0x1794);
+    pop(cpu);
+    part_begin(cpu, o, frame, 5, 6);
+    history_matrix(cpu, o, 0x1480);
+    let row = body_row(cpu, o, one, 0).wrapping_add(u32::from(cpu.read8(o + FIG_BYTE_579)) * 4);
+    part_polygon(cpu, o, row);
+    pop(cpu);
+    // (a matrix multiplied in and out again)
+    push(cpu);
+    multi_matrix(cpu, frame + FIG_MATRIX * 9);
+    pop(cpu);
+    // the right arm
+    part_begin(cpu, o, frame, 6, 10);
+    history_matrix(cpu, o, 0x580);
+    let row = body_row(cpu, o, two, 0x10);
+    part_polygon(cpu, o, row);
+    pop(cpu);
+    part_begin(cpu, o, frame, 7, 11);
+    let row = body_row(cpu, o, two, 0x18);
+    part_polygon(cpu, o, row);
+    history_matrix(cpu, o, 0x880);
+    figure_rings(cpu, o, FIG_EASE_Y, 0x1860, 0x1800);
+    pop(cpu);
+    part_begin(cpu, o, frame, 8, 12);
+    history_matrix(cpu, o, 0xb80);
+    let row = body_row(cpu, o, two, 0).wrapping_add(u32::from(cpu.read8(o + FIG_BYTE_57A)) * 4);
+    part_polygon(cpu, o, row);
+    pop(cpu);
+    // the legs
+    part_begin(cpu, o, frame, 9, 3);
+    part_polygon(cpu, o, body + 0xc);
+    pop(cpu);
+    for (k, part, byte, plus) in [
+        (10, 7, 0x577, 0x30),
+        (11, 8, 0x577, 0x38),
+        (12, 9, 0x577, 0x40),
+        (13, 13, 0x578, 0x30),
+        (14, 14, 0x578, 0x38),
+        (15, 15, 0x578, 0x40),
+    ] {
+        part_begin(cpu, o, frame, k, part);
+        let row = body_row(cpu, o, byte, plus);
+        part_polygon(cpu, o, row);
+        pop(cpu);
+    }
+}
+
+/// The ribbons' ends (three of them, on the frame's side of the limbs' history): each pushed, the
+/// history matrix a few frames back (the frame less the ribbon's age times its number) loaded and
+/// the three polygons of the body put.
+fn figure_ribbon_ends(cpu: &mut Cpu, o: u32) {
+    let (age_at, history, byte) = if cpu.read32(LOOPS) & 1 == 0 {
+        (FIG_RIBBON_COUNTS[0], [0xe80, 0x1180, 0x1480], FIG_BYTE_575)
+    } else {
+        (FIG_RIBBON_COUNTS[1], [0x580, 0x880, 0xb80], FIG_BYTE_576)
+    };
+    if cpu.read8(o + age_at) == 0 {
+        return;
+    }
+    for k in 1..=3 {
+        for (n, at) in history.into_iter().enumerate() {
+            push(cpu);
+            let age = u32::from(cpu.read8(o + age_at));
+            let phase = nested!(cpu, 0x0608_750c, frame_phase(cpu, age, k)) & 0xff;
+            load_matrix(cpu, o + at + FIG_MATRIX * phase);
+            let polygons = kind_polygons(cpu, FIG_BODY_KIND);
+            let b = u32::from(cpu.read8(o + byte)) * 4;
+            let pd_set = match n {
+                0 => cpu.read32(polygons + b + 0x10),
+                1 => cpu.read32(polygons + b + 0x18),
+                _ => {
+                    let plus = u32::from(cpu.read8(o + FIG_BYTE_57A)) * 4;
+                    cpu.read32(polygons + b + plus)
+                }
+            };
+            let pd = cpu.read32(pd_set);
+            put_polygon(cpu, pd);
+            pop(cpu);
+        }
+    }
+}
+
+/// The figure's drawing (`v` its object's +0x10, as the draw calls pass it): the flags' bit 1
+/// raises bit 2 (and bit 2 on its own is cleared); the limbs' matrices; the beam from the chest in
+/// the last two attacks' modes; the figure's whole matrix (kept for the beams, at 0x06093510) and
+/// its head's angles and limb's aim (kept at 0x06093540 and 0x06093550); the lift's and the
+/// shell's discs; the parts; the ribbons' ends; the whole matrix again.
+pub fn figure_draw(cpu: &mut Cpu, v: u32) {
+    let o = v.wrapping_sub(0x10);
+    let frame = cpu.stack();
+    let mut flags = cpu.read16(o + FIG_FLAGS);
+    if flags & 2 != 0 {
+        flags &= 0xfffc;
+        cpu.write16(o + FIG_FLAGS, flags);
+    }
+    if flags & 1 != 0 {
+        cpu.write16(o + FIG_FLAGS, flags | 2);
+    }
+    figure_limbs(cpu, o, frame);
+    let mode = cpu.read8(o + FIG_MODE);
+    if (mode == 0x15 && cpu.read8(o + FIG_ANGRY) == 1) || mode == 0x16 {
+        cur_window(cpu, 0);
+        push(cpu);
+        translate(cpu, [0, 0xff90_0000, 0]);
+        scale(cpu, 0xb0_0000, 0x1_0000, 0x1_0000);
+        rot_z(cpu, 0xffff_8000);
+        nested!(cpu, SL_PUT_POLYGONS, sgl::put_polygons(cpu, FIG_BEAM_POLYGONS, 1));
+        pop(cpu);
+        cur_window(cpu, 1);
+    }
+    push(cpu);
+    translate(cpu, [0, 0, 0x8d_0000]);
+    get_matrix(cpu, frame + FIG_MATRIX * FIG_ROOT_MATRIX);
+    pop(cpu);
+    push(cpu);
+    let size = cpu.read32(o + FIG_SCALE);
+    if size != 0x1_0000 {
+        scale(cpu, size, size, size);
+    }
+    let head = angles(cpu, o + FIG_HEAD);
+    rot_x(cpu, head[0]);
+    rot_y(cpu, head[1]);
+    rot_z(cpu, head[2]);
+    for (k, a) in head.into_iter().enumerate() {
+        cpu.write16(FIG_HEAD_ANGLES_OUT + 2 * k as u32, a as u16);
+    }
+    let reach = [
+        cpu.read32(o + FIG_LIMB).wrapping_sub(cpu.read32(o + 0x14)),
+        cpu.read32(o + FIG_LIMB + 4).wrapping_sub(cpu.read32(o + 0x18)),
+        cpu.read32(o + FIG_LIMB + 8).wrapping_add(FIG_LIMB_BASE_Z),
+    ];
+    translate(cpu, reach);
+    for (k, r) in reach.into_iter().enumerate() {
+        cpu.write32(FIG_LIMB_AIM_OUT + 4 * k as u32, r);
+    }
+    if cpu.read8(o + FIG_MODE) == 2 {
+        cur_window(cpu, 0);
+    }
+    let lift = cpu.read32(o + FIG_LIFT);
+    if lift != 0 {
+        nested!(cpu, 0x0604_5cdc, models::model_flip_bits(cpu, FIG_EFFECT_KIND, 4, 0x100));
+        push(cpu);
+        let y = cpu.read32(o + 0x18);
+        translate(cpu, [0, y, 0x140_0000u32.wrapping_sub(lift)]);
+        let spin = (cpu.read32(LOOPS) << 12) as i16 as i32 as u32;
+        rot_z(cpu, spin);
+        scale(cpu, lift, lift, lift);
+        let polygons = kind_polygons(cpu, FIG_EFFECT_KIND);
+        let set = cpu.read32(polygons + 0x10);
+        let pd = cpu.read32(set);
+        put_polygon(cpu, pd);
+        pop(cpu);
+    }
+    let flags = cpu.read16(o + FIG_FLAGS);
+    if cpu.read32(o + 0x1c) as i32 > -0x40_0000 && cpu.read32(LOOPS) & 1 != 0 && flags & 0x80 == 0 {
+        push(cpu);
+        let (x, y) = (cpu.read32(o + 0x14), cpu.read32(o + 0x18));
+        translate(cpu, [x, y, 0x142_0000]);
+        scale(cpu, 0x1_4000, 0x1_4000, 0x1_4000);
+        let polygons = kind_polygons(cpu, FIG_EFFECT_KIND);
+        let set = cpu.read32(polygons + 0x18);
+        let pd = cpu.read32(set);
+        put_polygon(cpu, pd);
+        pop(cpu);
+    }
+    figure_parts(cpu, o, frame);
+    if cpu.read8(o + FIG_MODE) == 2 {
+        cur_window(cpu, 1);
+    }
+    figure_ribbon_ends(cpu, o);
+    multi_matrix(cpu, frame + FIG_MATRIX * FIG_ROOT_MATRIX);
+    get_matrix(cpu, FIG_ROOT_OUT);
+    pop(cpu);
+    if cpu.read32(o + FIG_EASE_X) != 0 || cpu.read32(o + FIG_EASE_Y) != 0 {
+        nested!(cpu, 0x0604_5cdc, models::model_flip_bits(cpu, FIG_EFFECT_KIND, 5, 0x100));
+    }
+}
+
 // ---- the figure made ---------------------------------------------------------------------------------------
 
 /// The figure's parts, in the order they are made: how many points (a part's points follow each
@@ -5198,6 +5699,111 @@ pub fn figure_event(cpu: &mut Cpu, e: u32) -> u32 {
         }
         _ => 0,
     }
+}
+
+// ---- the stage's screens' start -----------------------------------------------------------------------------
+
+const STAGE_ROOM: u32 = 0x0607_47a0;
+const SCREEN_STARTS: u32 = 0x0609_1264;
+const START_KTABLE: u32 = 0x25e2_0000;
+const START_MARKS: u32 = 0x0609_1268;
+const START_SCROLL_MARKS: u32 = 0x54;
+const START_PRIORITIES: [(i32, u32); 5] = [(1, 3), (0, 5), (5, 4), (-7, 5), (-8, 4)];
+/// The stage's maps put as cells: the map (the stage data's), where; the two words pushed for each
+/// (the character offset and the pattern name add) and the pushes let go after each four.
+type MapGroup = ([(u32, u32); 4], u32, u32);
+const START_MAPS: [MapGroup; 4] = [
+    ([(0, 0x25e4_0000), (1, 0x25e4_0040), (0, 0x25e4_1000), (1, 0x25e4_1040)], 0, 0),
+    ([(2, 0x25e4_2000), (3, 0x25e4_2040), (3, 0x25e4_3000), (2, 0x25e4_3040)], 0, 0),
+    ([(9, 0x25e4_4000), (10, 0x25e4_4040), (12, 0x25e4_5000), (11, 0x25e4_5040)], 1, 0x800),
+    ([(6, 0x25e7_6000), (7, 0x25e7_6040), (7, 0x25e7_7000), (6, 0x25e7_7040)], 0, 0),
+];
+
+/// The stage's screens' start (the scroll table's first function, called by the screen's start with
+/// the stage data and the screen room): the room kept, the start counted, the stage data set;
+/// RBG0's rotation tables and coefficient table (this overlay's copies of SGL's setters), its
+/// cells and map; NBG0 and NBG1's; the screens shown and their priorities, the sprite type and
+/// colour calculation and window; then the cells, maps and colours put from the stage data; the
+/// scroll marks given.
+pub fn stg05_start(cpu: &mut Cpu, data: u32, room: u32) {
+    cpu.write32(STAGE_ROOM, room);
+    let starts = cpu.read32(SCREEN_STARTS).wrapping_add(1);
+    cpu.write32(SCREEN_STARTS, starts);
+    nested!(cpu, 0x0605_e17c, states::stage_data_set(cpu, data));
+    nested!(cpu, 0x0608_db44, sgl::sl_rpara_init_set_stg04(cpu, 0x25e3_fe00));
+    nested!(cpu, 0x0608_dbb4, sgl::sl_make_ktable(cpu, START_KTABLE));
+    nested!(cpu, 0x0606_e27c, sgl::sl_char_rbg0(cpu, 0, 0));
+    nested!(cpu, 0x0606_e2ce, sgl::sl_page_rbg0(cpu, 0x25e0_0000, 0, 0xc000));
+    nested!(cpu, 0x0608_dc34, sgl::sl_plane_ra(cpu, 0));
+    nested!(cpu, 0x0607_1c4c, sgl::sl_map_rbg0(cpu, 0x25e4_0000));
+    nested!(cpu, 0x0608_dc44, sgl::sl_over_ra(cpu, 0));
+    nested!(cpu, 0x0608_dc54, sgl::sl_ktable_ra(cpu, START_KTABLE, 0x61));
+    nested!(cpu, 0x0608_dcd4, sgl::sl_rpara_mode(cpu, 2));
+    nested!(cpu, 0x0608_dce4, sgl::sl_cur_rpara(cpu, 0));
+    nested!(cpu, 0x0608_dcf4, sgl::sl_plane_rb(cpu, 0));
+    nested!(cpu, 0x0608_dd04, sgl::sl_map_rb(cpu, 0x25e4_2000));
+    nested!(cpu, 0x0608_dda4, sgl::sl_over_rb(cpu, 0));
+    nested!(cpu, 0x0608_ddb4, sgl::sl_ktable_rb(cpu, START_KTABLE, 0x61));
+    nested!(cpu, 0x0607_0dec, sgl::sl_back1_col_set(cpu, 0x25e3_fffe, 0));
+    nested!(cpu, 0x0606_e288, sgl::sl_char_nbg0(cpu, 0, 0));
+    nested!(cpu, 0x0606_e300, sgl::sl_page_nbg0(cpu, 0x25e6_0000, 0x200, 0xc000));
+    nested!(cpu, 0x0607_0c3c, sgl::sl_plane_nbg0(cpu, 0));
+    nested!(cpu, 0x0607_0c4c, sgl::sl_map_nbg0(cpu, 0x25e7_6000, 0x25e7_6000, 0x25e7_6000, 0x25e7_6000));
+    nested!(cpu, 0x0607_0cfc, sgl::sl_zoom_mode(cpu, 1, 1));
+    nested!(cpu, 0x0606_e294, sgl::sl_char_nbg1(cpu, 0, 0));
+    nested!(cpu, 0x0606_e2e4, sgl::sl_page_nbg1(cpu, 0x25e6_0000, 0x400, 0x8000));
+    nested!(cpu, 0x0607_0d0c, sgl::sl_plane_nbg1(cpu, 0));
+    nested!(cpu, 0x0607_0d1c, sgl::sl_map_nbg1(cpu, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000));
+    nested!(cpu, 0x0607_0cfc, sgl::sl_zoom_mode(cpu, 0, 0));
+    nested!(cpu, 0x0606_dd6c, sgl::sl_scr_auto_disp(cpu, 0x17));
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x17_0000));
+    for (screen, pri) in START_PRIORITIES {
+        nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, screen as u32, pri));
+    }
+    nested!(cpu, 0x0608_de14, sgl::sl_sprite_type(cpu, 5));
+    nested!(cpu, 0x0606_e19e, sgl::sl_special_mode_high(cpu, 3));
+    nested!(cpu, 0x0608_de24, sgl::sl_sprite_cc_condition(cpu, 1));
+    nested!(cpu, 0x0608_de44, sgl::sl_sprite_cc_number(cpu, 4));
+    cur_window(cpu, 0);
+    nested!(cpu, 0x0606_990c, sgl::sl_zdsp_level(cpu, 1));
+    cur_window(cpu, 1);
+    let cells = states::stage_part(cpu, states::CELLS, 0);
+    nested!(cpu, 0x0605_edf8, screen::copy_words(cpu, cells, 0x25e0_0000, 0xfc60));
+    let cells = states::stage_part(cpu, states::CELLS, 4);
+    nested!(cpu, 0x0605_edf8, screen::copy_words(cpu, cells, 0x25e1_0000, 0xb4a0));
+    for (maps, chars, add) in &START_MAPS[..3] {
+        start_maps(cpu, maps, *chars, *add);
+    }
+    let colours = states::stage_part(cpu, states::COLOURS, 0);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0, 0x20));
+    let cells = states::stage_part(cpu, states::CELLS, 2);
+    nested!(cpu, 0x0605_edf8, screen::copy_words(cpu, cells, 0x25e6_0000, 0xc600));
+    let (maps, chars, add) = START_MAPS[3];
+    start_maps(cpu, &maps, chars, add);
+    let colours = states::stage_part(cpu, states::COLOURS, 2);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0x100, 0x10));
+    let cells = states::stage_part(cpu, states::CELLS, 3);
+    nested!(cpu, 0x0605_edf8, screen::copy_words(cpu, cells, 0x25e7_0000, 0x1ec0));
+    nested!(cpu, 0x0605_eee4, screen::fill_cells(cpu, 0, 0x25e7_4000, 0x40, 0x40));
+    // the last map's pushes stay while the colours are put (the SH-2 code lets them go at its end)
+    let map = states::stage_part(cpu, states::MAPS, 8);
+    cpu.push(&[0, 0]);
+    nested!(cpu, 0x0605_ee3c, screen::put_cells(cpu, map, 0x25e7_4000, 0x11, 0x11, 0, 0));
+    let colours = states::stage_part(cpu, states::COLOURS, 3);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0x200, 0x10));
+    let s = cpu.read32(screen::SCREEN);
+    cpu.write32(s + START_SCROLL_MARKS, START_MARKS);
+}
+
+/// Four of the stage's maps put as cells (each where) with the two words pushed for each; then
+/// the pushes let go.
+fn start_maps(cpu: &mut Cpu, maps: &[(u32, u32); 4], chars: u32, add: u32) {
+    for &(k, at) in maps {
+        let map = states::stage_part(cpu, states::MAPS, k);
+        cpu.push(&[chars, add]);
+        nested!(cpu, 0x0605_ee3c, screen::put_cells(cpu, map, at, 32, 32, chars, add));
+    }
+    cpu.pop(32);
 }
 
 // ---- the stage's screen -------------------------------------------------------------------------------------
