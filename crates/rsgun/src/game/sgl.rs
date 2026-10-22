@@ -7725,6 +7725,11 @@ pub fn sl_rpara_init_set_stg01(cpu: &mut Cpu, tables: u32) {
     rpara_init_set(cpu, tables, |cpu| nested!(cpu, 0x0609_f260, rpara_init(cpu)));
 }
 
+/// slRparaInitSet (STG04.BIN's copy, its own rpara_init's).
+pub fn sl_rpara_init_set_stg04(cpu: &mut Cpu, tables: u32) {
+    rpara_init_set(cpu, tables, |cpu| nested!(cpu, 0x0608_7b30, rpara_init(cpu)));
+}
+
 fn rpara_init_set(cpu: &mut Cpu, tables: u32, init: impl Fn(&mut Cpu)) {
     let w = cpu.gbr();
     cpu.write32(w + ROTATION_TABLES, tables);
