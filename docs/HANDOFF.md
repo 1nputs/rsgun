@@ -4,19 +4,22 @@ Read this first. `PLAN.md` beside it has the owner's decisions and the phases, `
 game asks of the hardware; the method is md-recomp's playbook (`md-recomp/playbook/PLAYBOOK.md`, a
 sibling project: not needed to carry on). Paths are from the repository's root.
 
-**Now (21 October 2026, late).** Everything the game runs is readable Rust now but its stage
-overlays (and, on purpose, the .control interrupt layer and the BIOS's own services). Overlays done:
-TITLE, OPENING, STG00. STG01 (`crates/rsgun/src/game/stg01.rs`, 384 functions, stage 3, the first
-stage played) is about half done, in address order: everything up to 0x0608e778 (the scenery, the
-riser fortress, the boss, the enemy rows, the bomber, the rail claw, the gunship and the passing
-gunship, and the winged boss up to its step functions: its guns, flames, breath, laser and steps
-0-6). Next in STG01: 0x0608e778 (the winged boss's arms' steps, from the table at 0x060a0d74:
-0x0608e778, 0x0608e7cc, 0x0608eb18, 0x0608eb94; 0x0608e798 is a helper of theirs), then its
-behaviour 0x0608ecd4, draw 0x0608f15c, part draws and set 0x0608f878, then on to 0x06095204.
-After STG01: STG02 (458 functions), STG04 (199), STG05 (165), RANK (16) by their fingerprints
-(1a653c2164fc4f52, 2adefae5540dd556, 5c18364ee98aacb1, 4635b7419f6fc1a7: check each name with
-`states::overlay_name` before registering). How each function is done, step by step: section 6,
-step 1, "The overlay loop". The branch is main.
+**Now (22 October 2026).** Everything the game runs is readable Rust now but its stage overlays
+(and, on purpose, the .control interrupt layer and the BIOS's own services). Overlays done:
+TITLE, OPENING, STG00, STG01 (`crates/rsgun/src/game/stg01.rs`, stage 3, the first stage
+played): every STG01 function the marathon runs is rewritten (main bbb0f2c and the batch after
+it: the stage boss's arms' attacks, guns, beam, blasts and maker). STG01's functions no segment
+runs are left to the SH-2 code (cpu.call where a rewrite calls them): 0x0608e044, 0x0609a888,
+0x0609b8a4, 0x0609b8d0, 0x0609c400, 0x0609cf60, 0x0609d25c, 0x0609d2a4, 0x0609d83c, 0x0609d984,
+0x0609db48, 0x0609dc58, 0x0609ddb4, 0x0609de74, 0x0609e0d8, 0x0609e2e8, 0x0609d124,
+0x0609ee24, 0x0609ef70 and the other never-called ones. Two agents work at once (21 October):
+STG01 on wip-stg01 (../rsgun-stg01), STG02 on wip-stg02 (../rsgun-stg02). Left after them:
+STG04 (199), STG05 (165), RANK (16) by their fingerprints (2adefae5540dd556, 5c18364ee98aacb1,
+4635b7419f6fc1a7: check each name with `states::overlay_name` before registering). The marathon
+reports in out/port/marathon-898fd01 label an address by one overlay's fingerprint only: a
+function shown as another overlay's (f_ADDR_1a653c... in an STG01 segment) may be STG01's; check
+the compare runs' own reports. How each function is done, step by step: section 6, step 1, "The
+overlay loop". The branch is main.
 
 State as of 21 October 2026 (night): main = d2162fe, fast-forwarded from wip-b6 after the gate
 below; check.sh on main every call equal; the whole-game check (`check_marathon.sh 7`, reports
@@ -653,12 +656,13 @@ start reach the Trial Ride tutorial with the ship moving and firing. Gameplay fr
    frame F: ...` naming what differed. On this laptop (4 cores) a segment took 25-30 minutes,
    four at once; write the next functions meanwhile. A batch is committed when every new
    function it ran is equal (hold back, uncommitted, the ones no segment ran).
-   Where STG01 stands (21 October, night): committed through the winged boss's steps (see the
-   top). The winged boss (0x0608cd98-0x0608fd58) is the stage's second big enemy (frames
-   10000-30000 of the marathon): its core (parts at +0xe0, flags +0x1a0, life +0x1a4), two wings
-   (left +0x288/+0x28c with its gun +0x2a4, right +0x1f0/+0x1f4 with its gun +0x2b0), arms (their
-   own objects, +0x6c the boss), a script of timed acts (0x060a0ce8) choosing its attack (+0x7e).
-   Its step table is at 0x060a0d58 (seven boss steps, then four arm steps from 0x060a0d74).
+   Where STG01 stands (22 October): done (see the top). Its last part, the stage boss
+   (0x0609bcc4-0x0609f028, frames 40000-50000): the boss object (its parts' numbers +0x70-+0x75,
+   its script +0xb4 of 20-byte entries, its move +0x6d from 0x060a429c, its burst +0x6f, its
+   beam's size +0xbc), four arms (numbered objects, steps from 0x060a4314, given the boss in r5),
+   two guns, the beam's segments and the head's glow. One stale-stack read was matched there:
+   targets_frame holds the SH-2 code's r8-r13 around a rotation matrix (a hatch's set-up reads
+   r13's push back).
 2. (done: stale stack reads are matched by holding registers, section 3. Compare mode's other
    way, answering a native read of a pushed byte with the SH-2 code's read, was not needed and
    would hide a real difference in the native game.)
