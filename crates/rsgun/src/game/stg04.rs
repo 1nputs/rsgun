@@ -2607,7 +2607,7 @@ pub fn gate_next_entry(cpu: &mut Cpu, o: u32) {
     let e = cpu.read32(o + G_SCRIPT);
     let mv = cpu.read8(e) as i8;
     if mv == -1 {
-        cpu.call(0x0608_3110, &[o]);
+        nested!(cpu, 0x0608_3110, gate_boss_end(cpu, o));
         return;
     }
     cpu.write8(o + G_MOVE, mv as u8);
@@ -2739,7 +2739,7 @@ pub fn gate_boss_behaviour(cpu: &mut Cpu, o: u32) {
             let shooter = cpu.read8(hit + 0x32) as i8 as i32 as u32;
             let weapon = cpu.read8(hit + 0x55) as i8 as i32 as u32;
             nested!(cpu, 0x0604_3108, hits::score_kill(cpu, shooter, weapon, o, B_KILL_SCORE));
-            cpu.call(0x0608_3110, &[o]);
+            nested!(cpu, 0x0608_3110, gate_boss_end(cpu, o));
             return;
         }
     }
@@ -2760,6 +2760,116 @@ pub fn gate_boss_behaviour(cpu: &mut Cpu, o: u32) {
     cpu.write32(B_MIDDLE, (a.wrapping_add(b) as i32 >> 1) as u32);
     let (a, b) = (cpu.read32(0x0608_a290 + 0x40), cpu.read32(B_OUT));
     cpu.write32(B_MIDDLE + 4, (a.wrapping_add(b) as i32 >> 1) as u32);
+}
+
+const GB_TIME: u32 = 0x8c;
+const GB_WAIT: u32 = 0x88;
+const GB_DEATH_SCRIPT: u32 = 0x0608_8a3c;
+const GB_DEATH_SOUND: u32 = 18;
+const GB_BLAST_AT: u32 = 0x60;
+const GB_SPINNER_AT: u32 = 118;
+const GB_END_AT: u32 = 0x80;
+const GB_ENTRY_SIZE: u32 = 20;
+
+/// The gate boss's ending (the function at 0x06083110; `o` the boss): the bullets cleared, its
+/// flags faded (+0x10 bit 19), its behaviour the dying one below, step (+0x71) 0 and +0x6c 1, the
+/// linked object's (+0xd8) step (+0x10) 5 and its +0x11 cleared; the scroll goes on.
+pub fn gate_boss_end(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0605_61e0, screen::bullets_cleared(cpu));
+    let flags = cpu.read32(o + FLAGS) | FADED;
+    cpu.write32(o + FLAGS, flags);
+    cpu.write32(o + BEHAVIOUR, 0x0608_3bfc);
+    cpu.write8(o + B_STEP, 0);
+    cpu.write32(o + 0x6c, 1);
+    let link = cpu.read32(o + G_LINK);
+    if link != 0 {
+        cpu.write8(link + 0x10, 5);
+        let link = cpu.read32(o + G_LINK);
+        cpu.write8(link + 0x11, 0);
+    }
+    nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+}
+
+/// The gate boss's dying (its behaviour from 0x06083110; +0x71 its step, +0x8c its time). Step 0:
+/// the time and +0x88 0, its list (+0xa4) the table at 0x06088a3c, a burning at its place, the step 1.
+/// Step 1: the list's entries (20 bytes: a time, a point at +4 turned through the scenery's matrix
+/// with +12 as its z, the puff's flag at +16) whose time is the boss's are each handed to the puff,
+/// then the sound 18 if any was, an explosion at its place at time 0x60, the time counted, and
+/// at 0x80 the step 2 and the time 0. Step 2: the time counted, at 118 a spinner made at +0xa8 and
+/// its mode (+3) 112. Then the point at 0x06088a18 converted into its place (+0x14).
+pub fn gate_boss_dying(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let step = cpu.read8(o + B_STEP) as i8;
+    let mut in_loop = step == 1;
+    if step == 0 {
+        cpu.write32(o + GB_WAIT, 0);
+        cpu.write32(o + GB_TIME, 0);
+        cpu.write32(o + G_SCRIPT, GB_DEATH_SCRIPT);
+        for k in 0..3 {
+            let v = cpu.read32(o + 0x14 + 4 * k);
+            cpu.write32(f + 4 * k, v);
+        }
+        nested!(cpu, 0x0605_7cb0, explosions::burning_set(cpu, f));
+        let n = cpu.read8(o + B_STEP).wrapping_add(1);
+        cpu.write8(o + B_STEP, n);
+        in_loop = true;
+    }
+    if in_loop {
+        let time = cpu.read32(o + GB_TIME);
+        let first = cpu.read32(o + G_SCRIPT);
+        let mut any = false;
+        if cpu.read32(first) == time {
+            any = true;
+            let out = f + 0x40;
+            loop {
+                nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+                nested!(cpu, 0x0606_db7c, sgl::sl_load_matrix(cpu, SCENERY_MATRIX));
+                let entry = cpu.read32(o + G_SCRIPT);
+                nested!(cpu, 0x0606_750c, sgl::sl_convert(cpu, entry + 4, out));
+                let z = cpu.read32(entry + 12);
+                cpu.write32(out + 8, z);
+                nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+                let flag = cpu.read32(entry + 16);
+                nested!(cpu, 0x0608_668c, puff(cpu, out, 0, 0, flag));
+                let entry = cpu.read32(o + G_SCRIPT);
+                cpu.write32(o + G_SCRIPT, entry + GB_ENTRY_SIZE);
+                let next = cpu.read32(entry + GB_ENTRY_SIZE);
+                if next != cpu.read32(o + GB_TIME) {
+                    break;
+                }
+            }
+        }
+        if any {
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, GB_DEATH_SOUND));
+        }
+        if cpu.read32(o + GB_TIME) == GB_BLAST_AT {
+            let at = f + 0x4c;
+            for k in 0..3 {
+                let v = cpu.read32(o + 0x14 + 4 * k);
+                cpu.write32(at + 4 * k, v);
+            }
+            cpu.write32(at + 0x3c, o);
+            nested!(cpu, 0x0605_8ba4, explosions::explosion_set(cpu, at));
+        }
+        let t = cpu.read32(o + GB_TIME).wrapping_add(1);
+        cpu.write32(o + GB_TIME, t);
+        if t == GB_END_AT {
+            let n = cpu.read8(o + B_STEP).wrapping_add(1);
+            cpu.write8(o + B_STEP, n);
+            cpu.write32(o + GB_TIME, 0);
+        }
+    } else if step == 2 {
+        let t = cpu.read32(o + GB_TIME).wrapping_add(1);
+        cpu.write32(o + GB_TIME, t);
+        if t == GB_SPINNER_AT {
+            nested!(cpu, 0x0608_78cc, spinner_set(cpu, o + 0xa8));
+            cpu.write8(o + 3, 112);
+        }
+    }
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0606_db7c, sgl::sl_load_matrix(cpu, SCENERY_MATRIX));
+    nested!(cpu, 0x0606_750c, sgl::sl_convert(cpu, B_FAR_POINT, o + 0x14));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
 }
 
 /// A marker (an object, +0x3c a byte: the set of points it shows): it ends when the leader (the
