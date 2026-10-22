@@ -78,6 +78,11 @@ into the next brief for that overlay.
    forward main from the main checkout (`git merge --ff-only wip-X`), `git stash pop`.
 7. Start the next batch with a fresh agent.
 
+8. An overlay is done only when a whole-game check on main (`check_marathon.sh`) lists none of its
+   functions as `f_ADDR_FP` with calls: STG02's batches ran f060000-f140000, but its code also runs
+   at the start of f150000 (before STG04 loads), and two "never run" groups ran there and in
+   f140000.
+
 ## What worked
 
 - Compare mode as the arbiter: Sonnet batches came back with real bugs found and fixed by the

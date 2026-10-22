@@ -29,9 +29,15 @@ Overlays (fingerprint, game mode, marathon segments, worktree and branch, where 
 - RANK (4635b7419f6fc1a7, the ranking after a game ends, f200000: 16 functions run; the
   marathon reports label many of them with STG05's fingerprint; ../rsgun-rank, wip-rank):
   scaffolded (rank.rs, a marker in mod.rs).
-- STG03: not in the marathon as far as its evidence shows (its overlay images are STG00
-  159bb713, STG01, STG02, STG04, STG05, RANK and 1410a40e, and no latest report has an unrewritten
-  `f_..._1410a40e` call); nothing to check it against until a run that plays it is recorded.
+- STG03 (game mode 9) is stage 4: STG01's end asks "SELECT NEXT STAGE" (stage 2 or 4; up or down
+  turns it, a button or 300 frames takes it) and the marathon took stage 2 (its weaving turned it
+  at random). out/evidence/route4-input.txt is the marathon's input with the controls let go from
+  65500 and down pressed at 66900 (stage 4 taken, STG03 loaded at 67050); its run from the
+  f060000 state (evidence out/evidence/route4.txt, states out/evidence/route4-states every 10000
+  frames from 70000) is STG03's evidence. It is also the attract mode's third demo (mode 14).
+The whole-game check on main 96b4bf4 (out/port/marathon-96b4bf4): all 21 segments every call equal;
+still run unrewritten there: RANK's 16 and STG02's 0x06097610 (f140000) and 0x060a19d0-0x060a2504
+(f150000, before STG04 loads), both in hand.
 Check each overlay's name with `states::overlay_name` before registering (a block registered
 under the wrong name never runs; its report shows only `f_...` names). The marathon reports in
 out/port/marathon-898fd01 label an address by one overlay's fingerprint only: in a segment where
