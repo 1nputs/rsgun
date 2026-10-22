@@ -15,15 +15,15 @@ Overlays (fingerprint, game mode, marathon segments, worktree and branch, where 
   0x0609a888, 0x0609b8a4, 0x0609b8d0, 0x0609c400, 0x0609cf60, 0x0609d124, 0x0609d25c,
   0x0609d2a4, 0x0609d83c, 0x0609d984, 0x0609db48, 0x0609dc58, 0x0609ddb4, 0x0609de74,
   0x0609e0d8, 0x0609e2e8, 0x0609ee24, 0x0609ef70 and the never-called ones.
-- STG02 (1a653c2164fc4f52, f060000-f130000; ../rsgun-stg02, wip-stg02): through 0x0609b2f4 and
-  the early events; next 0x0609b5a8 (f060000), about 120 left. Held back, uncommitted in the
-  worktree (never run): stage_boss_event 0x06097610, last_part_lost 0x060979cc, twelve mid-boss
-  steps 0x0608a054-0x0608b0c0.
-- STG04 (5c18364ee98aacb1, game mode 10, f150000-f170000; ../rsgun-stg04, wip-stg04):
-  0x0608034c-0x060818d4 done; next 0x06081914. Its mode at 0x06080000 shows in those reports
-  under fingerprint 1410a40e (a load-time state?): find which segment runs it as STG04's.
-- STG05 (2adefae5540dd556, game mode 11, f170000-f200000; ../rsgun-stg05, wip-stg05):
-  0x06080000-0x0608345c done; next 0x060835b4, about 150 left.
+- STG02 (1a653c2164fc4f52, f060000-f140000; ../rsgun-stg02, wip-stg02): through 0x060a1518.
+  Still running unrewritten (last reports): 0x06096f34, 0x060a0318, 0x060a074c (f110000),
+  0x060a18cc-0x060a1ca4 (f140000), the setters 0x060a2524-0x060a28a4 (f060000-f080000): one last
+  batch. Held back, uncommitted in the worktree (never run): stage_boss_event 0x06097610,
+  last_part_lost 0x060979cc, twelve mid-boss steps 0x0608a054-0x0608b0c0.
+- STG04 (5c18364ee98aacb1, game mode 10, f150000-f170000; ../rsgun-stg04, wip-stg04): the mode
+  and 0x0608034c-0x0608415c done; next 0x06084304. Held back (never run): 0x06082520, 0x060828f4.
+- STG05 (2adefae5540dd556, game mode 11, f170000-f200000; ../rsgun-stg05, wip-stg05): through
+  0x060863e0; next 0x060864e4.
 - RANK (4635b7419f6fc1a7): not started.
 Check each overlay's name with `states::overlay_name` before registering (a block registered
 under the wrong name never runs; its report shows only `f_...` names). The marathon reports in
