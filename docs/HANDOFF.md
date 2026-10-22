@@ -15,16 +15,20 @@ Overlays (fingerprint, game mode, marathon segments, worktree and branch, where 
   0x0609a888, 0x0609b8a4, 0x0609b8d0, 0x0609c400, 0x0609cf60, 0x0609d124, 0x0609d25c,
   0x0609d2a4, 0x0609d83c, 0x0609d984, 0x0609db48, 0x0609dc58, 0x0609ddb4, 0x0609de74,
   0x0609e0d8, 0x0609e2e8, 0x0609ee24, 0x0609ef70 and the never-called ones.
-- STG02 (1a653c2164fc4f52, f060000-f140000; ../rsgun-stg02, wip-stg02): through 0x060a1518.
-  Still running unrewritten (last reports): 0x06096f34, 0x060a0318, 0x060a074c (f110000),
-  0x060a18cc-0x060a1ca4 (f140000), the setters 0x060a2524-0x060a28a4 (f060000-f080000): one last
-  batch. Held back, uncommitted in the worktree (never run): stage_boss_event 0x06097610,
-  last_part_lost 0x060979cc, twelve mid-boss steps 0x0608a054-0x0608b0c0.
+- STG02 (1a653c2164fc4f52, f060000-f140000; ../rsgun-stg02, wip-stg02): every function that runs
+  is rewritten (last runs out/port/stg02-33, all nine segments equal). Held back (never run):
+  0x060a19d0-0x060a2504 (the grid scene's other half), 0x060a282c, 0x060a2834; and, uncommitted
+  in the worktree, stage_boss_event 0x06097610, last_part_lost 0x060979cc, twelve mid-boss steps
+  0x0608a054-0x0608b0c0.
 - STG04 (5c18364ee98aacb1, game mode 10, f150000-f170000; ../rsgun-stg04, wip-stg04): the mode
   and 0x0608034c-0x0608415c done; next 0x06084304. Held back (never run): 0x06082520, 0x060828f4.
 - STG05 (2adefae5540dd556, game mode 11, f170000-f200000; ../rsgun-stg05, wip-stg05): through
   0x060863e0; next 0x060864e4.
-- RANK (4635b7419f6fc1a7): not started.
+- RANK (4635b7419f6fc1a7, the ranking after a game ends, f200000: about 54 functions run; the
+  marathon reports label many of them with STG05's fingerprint; ../rsgun-rank, wip-rank):
+  scaffolded (rank.rs, a marker in mod.rs).
+- STG03: never runs in the marathon (its input script does not reach it); nothing to check it
+  against until a run that plays it is recorded.
 Check each overlay's name with `states::overlay_name` before registering (a block registered
 under the wrong name never runs; its report shows only `f_...` names). The marathon reports in
 out/port/marathon-898fd01 label an address by one overlay's fingerprint only: in a segment where
