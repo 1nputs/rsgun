@@ -6,7 +6,7 @@ use super::globals::mode::DEMO10;
 use super::globals::{BIOS_SETTING, GAME_FRAMES, GAME_MODE, GROUND_DY_AT};
 use super::globals::{GAME_FLAGS, HELD, LOOPS, PLAY_DATA, PLAY_DATA_SIZE};
 use super::bullets::{AS_ANGLE, AS_FLAGS, AS_POSITION, AS_SHOOTER, AS_SPEED};
-use super::{actors, aim, bg, bullets, camera, clib, director, dma, effects, explosions, files, gouraud, ground, hits, hud, kinds, math, models, nested, objects, orbits, palette, parts, player, results, screen, sgl, sound, sprites, states, system, text, timeline, Cpu};
+use super::{actors, aim, bg, bullets, camera, clib, director, dma, effects, explosions, files, gouraud, ground, hits, hud, kinds, math, models, nested, objects, orbits, palette, parts, player, results, ribbons, rings, screen, sgl, sound, sprites, states, system, text, timeline, Cpu};
 
 /// The director's slots the mode uses (states.rs's): its step, the load (a local written back
 /// each time), the settings kept (states::keep_mode_settings: the buffer +0x6c, the room's top
@@ -12514,8 +12514,7 @@ pub fn area_3_kinds_event(cpu: &mut Cpu, e: u32) -> u32 {
     done
 }
 
-/// The stage boss's maker (not rewritten yet) and the events after it.
-const STAGE_BOSS_MAKE: u32 = 0x0609_f028;
+/// The events after the stage boss.
 const AFTER_STAGE_BOSS_EVENTS: u32 = 0x060a_2510;
 
 /// The stage boss's event: made (its number kept at +8); once its number's slot is empty, the
@@ -12529,7 +12528,7 @@ pub fn stage_boss_event(cpu: &mut Cpu, e: u32) -> u32 {
     let step = cpu.read8(e + EV_STEP);
     match step {
         0 => {
-            let n = cpu.call(STAGE_BOSS_MAKE, &[]) as i8 as i32 as u32;
+            let n = nested!(cpu, 0x0609_f028, sb_make(cpu)) as i8 as i32 as u32;
             if n != 0 {
                 next(cpu);
                 cpu.write32(e + EV_NUMBER, n);
@@ -15869,7 +15868,6 @@ const SB_SCRIPT_INDEX: u32 = 0x060a_4484;
 const SB_BEHAVIOUR: u32 = 0x0609_be58;
 const SB_DRAW: u32 = 0x0609_c40c;
 const SB_KIND: u32 = 43;
-const SB_GUN_SET: u32 = 0x0609_e3f0;
 /// Each arm's place (x, y), turn (z) and its model (kind 43's), each gun's (x, y, z) and model.
 const SB_ARMS: [(u32, u32, u32, u32); 4] = [
     (0xffd8_0000, 0x4_0000, 0xffdc_0000, 1),
@@ -15909,7 +15907,7 @@ pub fn sb_wait(cpu: &mut Cpu, o: u32) {
     for (k, (x, y, z, model)) in SB_GUNS.into_iter().enumerate() {
         let model = models(cpu, model);
         cpu.push(&[z, model]);
-        let n = cpu.call(SB_GUN_SET, &[number, k as u32, x, y]);
+        let n = nested!(cpu, 0x0609_e3f0, sb_gun_set(cpu, number, k as u32, x, y, z, model));
         cpu.write8(o + SB_PARTS + 4 + k as u32, n as u8);
     }
     cpu.write8(o + SB_6C, 0xff);
@@ -15979,7 +15977,6 @@ const SB_D8: u32 = 0xd8;
 const SB_MOVES: u32 = 0x060a_429c;
 const SB_FIRST_SCRIPTS: u32 = 0x060a_422c;
 const SB_DOWNED: u32 = 0x0609_c868;
-const SB_BURST_STEP: u32 = 0x0609_e9ec;
 const SB_UNSEEN: u32 = 0x0609_a888;
 /// Its downing's bonus, the rate it adds and the points to whoever downed it.
 const SB_BONUS: u32 = 50_000;
@@ -16058,16 +16055,16 @@ pub fn sb_fight(cpu: &mut Cpu, o: u32) {
             nested!(cpu, 0x0600_50d4, sound::se_set(cpu, SB_BURST_SOUND));
             let v = cpu.read32(o + SB_D8).wrapping_add(0x2_0000);
             cpu.write32(o + SB_D8, v);
-            cpu.call(SB_BURST_STEP, &[o]);
+            nested!(cpu, 0x0609_e9ec, sb_burst_step(cpu, o));
             burst_down(cpu);
         }
         2 => {
-            cpu.call(SB_BURST_STEP, &[o]);
+            nested!(cpu, 0x0609_e9ec, sb_burst_step(cpu, o));
             let v = cpu.read32(o + SB_D8).wrapping_add(0x1000);
             cpu.write32(o + SB_D8, v);
         }
         1 => {
-            cpu.call(SB_BURST_STEP, &[o]);
+            nested!(cpu, 0x0609_e9ec, sb_burst_step(cpu, o));
             let v = cpu.read32(o + SB_BC).wrapping_add(0xffff_f000);
             cpu.write32(o + SB_BC, v);
             if (v as i32) < 0 {
@@ -16092,10 +16089,7 @@ pub fn sb_fight(cpu: &mut Cpu, o: u32) {
     }
 }
 
-/// The boss's sinking's explosions (0x0609ef14's, and 0x0609edac's two kinds), where they go
-/// (within 80 dots of 40 dots up and left of it), the big one's frame and its end's.
-const SB_BLAST: u32 = 0x0609_ef14;
-const SB_BLAST_2: u32 = 0x0609_edac;
+/// Where the boss's sinking's blasts go (within 80 dots of 40 dots up and left of it), the big one's frame and its end's.
 const SB_BLAST_SPREAD: u32 = 0x50_0000;
 const SB_BLAST_OFFSET: u32 = 0xffd8_0000;
 const SB_BLOWN_AT: u32 = 150;
@@ -16124,9 +16118,9 @@ pub fn sb_sinking(cpu: &mut Cpu, o: u32) {
         let z = cpu.read32(o + POSITION + 8);
         cpu.write32(p + 8, z);
         match (cpu.read32(GAME_FRAMES) & 12) >> 2 {
-            1 => cpu.call(SB_BLAST_2, &[p, 1]),
-            3 => cpu.call(SB_BLAST_2, &[p, 0]),
-            _ => cpu.call(SB_BLAST, &[p]),
+            1 => nested!(cpu, 0x0609_edac, blast_small(cpu, p, 1)),
+            3 => nested!(cpu, 0x0609_edac, blast_small(cpu, p, 0)),
+            _ => nested!(cpu, 0x0609_ef14, blast_small_quiet(cpu, p)),
         };
     }
     if cpu.read32(o + SB_MOVE_LEFT) == SB_BLOWN_AT {
@@ -16371,11 +16365,10 @@ pub fn sb_turn_move(cpu: &mut Cpu, o: u32) {
     }
 }
 
-/// The spin's opening shot (0x0609ed4c's), its count (+0xb0).
-const SB_SPIN_SHOT: u32 = 0x0609_ed4c;
+/// The spin's count (+0xb0).
 const SB_COUNT: u32 = SB_B0;
 
-/// The spin's steps (+0x6e): 0 the shot, then after 45 frames a burst (3); 1 the turn speed down 2
+/// The spin's steps (+0x6e): 0 the beam started, then after 45 frames a burst (3); 1 the turn speed down 2
 /// a frame to -128; 2 128 frames; 3 back up 2 a frame to none, then a burst (1); 4 15 frames, then
 /// the next move.
 pub fn sb_spin(cpu: &mut Cpu, o: u32) {
@@ -16386,7 +16379,7 @@ pub fn sb_spin(cpu: &mut Cpu, o: u32) {
     match cpu.read8(o + SB_6E) {
         0 => {
             if cpu.read32(o + SB_COUNT) == 0 {
-                cpu.call(SB_SPIN_SHOT, &[o]);
+                nested!(cpu, 0x0609_ed4c, sb_beam_start(cpu, o));
             }
             let n = cpu.read32(o + SB_COUNT).wrapping_add(1);
             cpu.write32(o + SB_COUNT, n);
@@ -16446,7 +16439,7 @@ pub fn sb_spin_right(cpu: &mut Cpu, o: u32) {
     cpu.write16(o + TURN_Z, turn);
 }
 
-/// A move, the long spin (its steps +0x6e): 0 the shot and after 45 frames a burst (3); three
+/// A move, the long spin (its steps +0x6e): 0 the beam started and after 45 frames a burst (3); three
 /// spins (1, 5, 9: the turn speed down to -128; 2, 6, 10: 128 frames; 3, 7, 11: back to none, the
 /// screen's words +0x24 and +0x26 turned over but after the last), with waits of 180 frames
 /// between (4, 8: after the second, back to the first spin while the boss's phase is -1); 12 a
@@ -16465,7 +16458,7 @@ pub fn sb_long_spin(cpu: &mut Cpu, o: u32) {
     match step {
         0 => {
             if cpu.read32(o + SB_COUNT) == 0 {
-                cpu.call(SB_SPIN_SHOT, &[o]);
+                nested!(cpu, 0x0609_ed4c, sb_beam_start(cpu, o));
             }
             let n = cpu.read32(o + SB_COUNT).wrapping_add(1);
             cpu.write32(o + SB_COUNT, n);
@@ -16536,7 +16529,7 @@ pub fn sb_long_spin(cpu: &mut Cpu, o: u32) {
     cpu.write16(o + TURN_Z, if backwards { turn.wrapping_sub(speed) } else { turn.wrapping_add(speed) });
 }
 
-/// The fast spin (its steps +0x6e): 0 the shot and after 45 frames a burst (3), its turn speed
+/// The fast spin (its steps +0x6e): 0 the beam started and after 45 frames a burst (3), its speed
 /// none; 1 the speed down to -0xc0 (2 a frame), or with the script index 3 or 4 to -0x100 (4 a
 /// frame); 2 786 frames (585 with the index 3 or 4); 3 back up 6 a frame to none, then a burst
 /// (1); 4 16 frames, then the next move.
@@ -16549,7 +16542,7 @@ pub fn sb_fast_spin(cpu: &mut Cpu, o: u32) {
     match cpu.read8(o + SB_6E) {
         0 => {
             if cpu.read32(o + SB_COUNT) == 0 {
-                cpu.call(SB_SPIN_SHOT, &[o]);
+                nested!(cpu, 0x0609_ed4c, sb_beam_start(cpu, o));
             }
             let n = cpu.read32(o + SB_COUNT).wrapping_add(1);
             cpu.write32(o + SB_COUNT, n);
@@ -16714,7 +16707,7 @@ const SB_ARM_POINTS: u32 = 10_000;
 const SB_ARM_FAR: u8 = 2;
 
 /// An arm, a frame: downed once its life is gone (dying, not hit, +0x94 none, its rate and 10000
-/// points to whoever downed it); else its step; then its lean: from its own turn (+0x8c, the other
+/// points to whoever downed it); else its step (given the boss); then its lean: from its own turn (+0x8c, the other
 /// way on the far side) while +0x70 is none, else from its turn kept less the boss's (its own turn
 /// following); its turn kept the boss's plus its lean.
 pub fn sb_arm_behaviour(cpu: &mut Cpu, o: u32) {
@@ -16733,7 +16726,9 @@ pub fn sb_arm_behaviour(cpu: &mut Cpu, o: u32) {
     }
     let step = cpu.read8(o + SB_ARM_STEP) as i8 as i32 as u32;
     let f = cpu.read32(SB_ARM_STEPS + 4 * step);
-    cpu.call(f, &[o]);
+    let n = cpu.read8(o + SB_ARM_BOSS) as i8 as i32 as u32;
+    let boss = cpu.read32(NUMBERED + 4 * n);
+    cpu.call(f, &[o, boss]);
     let far = cpu.read8(o + SB_ARM_PLACE) & SB_ARM_FAR != 0;
     let boss = |cpu: &mut Cpu| {
         let n = cpu.read8(o + SB_ARM_BOSS) as i8 as i32 as u32;
@@ -16753,10 +16748,6 @@ pub fn sb_arm_behaviour(cpu: &mut Cpu, o: u32) {
     cpu.write16(o + SB_ARM_BOSS_TURN, turn);
 }
 
-/// The arm's dying's blasts (0x0609efcc's, and 0x0609ee9c's two kinds; its last 0x0609edac's).
-const SB_ARM_BLAST: u32 = 0x0609_efcc;
-const SB_ARM_BLAST_2: u32 = 0x0609_ee9c;
-
 /// An arm dying, a frame: a blast within 24 dots of it every fourth frame (by the frame count's
 /// kind); at 60 frames a big one within 32 dots, the boss's phase a step on, and it gone.
 pub fn sb_arm_dying(cpu: &mut Cpu, o: u32) {
@@ -16774,16 +16765,16 @@ pub fn sb_arm_dying(cpu: &mut Cpu, o: u32) {
     if cpu.read32(GAME_FRAMES) & 3 == 0 {
         place(cpu, 0x18_0000, 0xfff4_0000);
         match (cpu.read32(GAME_FRAMES) & 12) >> 2 {
-            1 => cpu.call(SB_ARM_BLAST_2, &[p, 1]),
-            3 => cpu.call(SB_ARM_BLAST_2, &[p, 0]),
-            _ => cpu.call(SB_ARM_BLAST, &[p]),
+            1 => nested!(cpu, 0x0609_ee9c, blast_large(cpu, p, 1)),
+            3 => nested!(cpu, 0x0609_ee9c, blast_large(cpu, p, 0)),
+            _ => nested!(cpu, 0x0609_efcc, blast_large_quiet(cpu, p)),
         };
     }
     let n = cpu.read32(o + SB_ARM_94);
     cpu.write32(o + SB_ARM_94, n.wrapping_add(1));
     if n == 60 {
         place(cpu, 0x20_0000, 0xfff0_0000);
-        cpu.call(SB_BLAST_2, &[p, 1]);
+        nested!(cpu, 0x0609_edac, blast_small(cpu, p, 1));
         let phase = cpu.read8(BOSS_PHASE).wrapping_sub(1);
         cpu.write8(BOSS_PHASE, phase);
         cpu.write32(o + BEHAVIOUR, SB_ARM_GONE);
@@ -16889,4 +16880,815 @@ pub fn sb_arm_spread(cpu: &mut Cpu, o: u32) {
         cpu.write16(d + SHOT_ANGLE, a.wrapping_add(off));
         nested!(cpu, 0x0605_3f48, bullets::bullet_set_plain(cpu, d));
     }
+}
+
+
+/// An arm's stray shot: from its muzzle, half turned round from its turn kept and up to 0x3000
+/// either way (random, in steps of 0x400), at 1 to 1.75 dots a frame (random, in quarters).
+pub fn sb_arm_stray_shot(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    nested!(cpu, 0x0609_d814, sb_arm_shot_from(cpu, d, o));
+    let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+    let v = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, r, 0x6000));
+    let a = (v.wrapping_add(0xffff_d000) & 0xffff_fc00)
+        .wrapping_add(0xffff_8000)
+        .wrapping_add(cpu.read16(o + SB_ARM_BOSS_TURN) as i16 as i32 as u32);
+    cpu.write16(d + SHOT_ANGLE, a as u16);
+    cpu.write16(d + SHOT_FLAGS, 0);
+    let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+    cpu.write32(d + SHOT_SPEED, (r & 0xc000).wrapping_add(0x1_0000));
+    nested!(cpu, 0x0605_3db0, bullets::bullet_set(cpu, d));
+}
+
+/// The arm's ribbons (ribbons.rs's description: its colour +0x20, heading +0x2c, turn +0x2e, speed
+/// up +0x30, turn's reach +0x38, the place it follows +0x3c): their speed up and the homing one's
+/// turn by the script index (0x060a42e0's longs, 0x060a42f4's words), the homing one's reach,
+/// their colours (16 apart past the first character), their sound.
+const RIBBON_COLOUR: u32 = 0x20;
+const RIBBON_HEADING: u32 = 0x2c;
+const RIBBON_TURN: u32 = 0x2e;
+const RIBBON_ACCEL: u32 = 0x30;
+const RIBBON_REACH: u32 = 0x38;
+const RIBBON_SOURCE: u32 = 0x3c;
+const SB_RIBBON_ACCELS: u32 = 0x060a_42e0;
+const SB_RIBBON_TURNS: u32 = 0x060a_42f4;
+const SB_RIBBON_REACH: u16 = 0x1000;
+const SB_RIBBON_SOUND: u32 = 41;
+
+/// An arm's ribbon (mover `kind`, colour `colour` past the first character, its own `flags`) from
+/// its muzzle, half turned round from its turn kept, with its flare and sound.
+fn sb_arm_ribbon(cpu: &mut Cpu, o: u32, kind: u32, colour: u16, flags: u32) {
+    let d = cpu.stack();
+    nested!(cpu, 0x0609_d814, sb_arm_shot_from(cpu, d, o));
+    let heading = cpu.read16(o + SB_ARM_BOSS_TURN).wrapping_add(0x8000);
+    cpu.write16(d + RIBBON_HEADING, heading);
+    let index = cpu.read8(SB_SCRIPT_INDEX) as i8 as i32 as u32;
+    if kind == 1 {
+        let turn = cpu.read16(SB_RIBBON_TURNS + 2 * index);
+        cpu.write16(d + RIBBON_TURN, turn);
+        cpu.write16(d + RIBBON_REACH, SB_RIBBON_REACH);
+    }
+    let accel = cpu.read32(SB_RIBBON_ACCELS + 4 * index);
+    cpu.write32(d + RIBBON_ACCEL, accel);
+    cpu.write32(d + RIBBON_SOURCE, o + SB_ARM_MUZZLE);
+    let c = cpu.read16(CHAR_BASE).wrapping_add(colour);
+    cpu.write16(d + RIBBON_COLOUR, c);
+    nested!(cpu, 0x0606_42e0, ribbons::ribbon_set(cpu, kind, d, flags));
+    nested!(cpu, 0x0606_43ec, effects::flare_set(cpu, d));
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, SB_RIBBON_SOUND));
+}
+
+/// An arm's straight ribbon.
+pub fn sb_arm_straight_ribbon(cpu: &mut Cpu, o: u32) {
+    sb_arm_ribbon(cpu, o, 0, 48, 0);
+}
+
+/// An arm's homing ribbon.
+pub fn sb_arm_homing_ribbon(cpu: &mut Cpu, o: u32) {
+    sb_arm_ribbon(cpu, o, 1, 64, 0);
+}
+
+/// An arm's straight ribbon of the second colour (its flags 1: ending in a burst).
+pub fn sb_arm_straight_ribbon_2(cpu: &mut Cpu, o: u32) {
+    sb_arm_ribbon(cpu, o, 0, 16, 1);
+}
+
+/// An arm's step, pointing: the near arms (places 0 and 2) turned to their word (+0x8e), the far
+/// ones aimed at the player: 1 once there.
+pub fn sb_arm_point(cpu: &mut Cpu, o: u32) -> u32 {
+    match cpu.read8(o + SB_ARM_PLACE) {
+        0 | 2 => {
+            let a = cpu.read16(o + SB_ARM_WORD) as i16 as i32 as u32;
+            nested!(cpu, 0x0609_d760, sb_arm_turn_to(cpu, o, a))
+        }
+        _ => nested!(cpu, 0x0609_d798, sb_arm_aim(cpu, o)),
+    }
+}
+
+/// An arm's step, the volley: turned to its word, its spread every 90 frames (60 past the first
+/// script).
+pub fn sb_arm_volley(cpu: &mut Cpu, o: u32, _boss: u32) {
+    let a = cpu.read16(o + SB_ARM_WORD) as i16 as i32 as u32;
+    nested!(cpu, 0x0609_d760, sb_arm_turn_to(cpu, o, a));
+    let every = if cpu.read8(SB_SCRIPT_INDEX) == 0 { 90 } else { 60 };
+    let n = cpu.read32(o + SB_ARM_94).wrapping_add(1);
+    cpu.write32(o + SB_ARM_94, n);
+    if n == every {
+        nested!(cpu, 0x0609_d87c, sb_arm_spread(cpu, o));
+        cpu.write32(o + SB_ARM_94, 0);
+    }
+}
+
+/// An arm's step, strays: turned to its word, three stray shots every 15 frames.
+pub fn sb_arm_strays(cpu: &mut Cpu, o: u32, _boss: u32) {
+    let a = cpu.read16(o + SB_ARM_WORD) as i16 as i32 as u32;
+    nested!(cpu, 0x0609_d760, sb_arm_turn_to(cpu, o, a));
+    let n = cpu.read32(o + SB_ARM_94).wrapping_add(1);
+    cpu.write32(o + SB_ARM_94, n);
+    if n == 15 {
+        for _ in 0..3 {
+            nested!(cpu, 0x0609_d8f0, sb_arm_stray_shot(cpu, o));
+        }
+        cpu.write32(o + SB_ARM_94, 0);
+    }
+}
+
+/// The ribbons' interval by the script index (0x060a4300's).
+const SB_RIBBON_EVERY: u32 = 0x060a_4300;
+
+/// An arm's ribbon cycle (its inner step +0x6f): 0 aiming, until its first ribbon's time (30
+/// frames for the far arms, half the interval and 54 more for the near ones); 1 aiming, its ribbon
+/// (`fire`) at the interval, then held (+0x70); 2 48 frames, then let go and back to 1.
+fn sb_arm_ribbon_cycle(cpu: &mut Cpu, o: u32, boss: u32, fire: fn(&mut Cpu, u32)) {
+    let count = |cpu: &mut Cpu| {
+        let n = cpu.read32(o + SB_ARM_94).wrapping_add(1);
+        cpu.write32(o + SB_ARM_94, n);
+        n
+    };
+    let every = |cpu: &mut Cpu| {
+        let index = cpu.read8(SB_SCRIPT_INDEX) as i8 as i32 as u32;
+        cpu.read32(SB_RIBBON_EVERY + 4 * index)
+    };
+    let next = |cpu: &mut Cpu| {
+        let step = cpu.read8(o + SB_ARM_INNER).wrapping_add(1);
+        cpu.write8(o + SB_ARM_INNER, step);
+    };
+    // the SH-2 code holds the inner step, its address and the boss in r9-r11 across the aim:
+    // aim.rs's target pushes them, and a straight ribbon reads one back as its turn's reach
+    let inner = cpu.read8(o + SB_ARM_INNER);
+    let held = [(9, inner as i8 as i32 as u32), (10, o + SB_ARM_INNER), (11, boss)];
+    let aim = |cpu: &mut Cpu| cpu.holding(&held, |cpu| nested!(cpu, 0x0609_d798, sb_arm_aim(cpu, o)));
+    match inner {
+        0 => {
+            aim(cpu);
+            let first = if cpu.read8(o + SB_ARM_PLACE) & SB_ARM_FAR != 0 {
+                30
+            } else {
+                (((every(cpu) as i32 + 48) >> 1) + 30) as u32
+            };
+            if count(cpu) == first {
+                cpu.write32(o + SB_ARM_94, 0);
+                next(cpu);
+            }
+        }
+        1 => {
+            aim(cpu);
+            let n = count(cpu);
+            if n == every(cpu) {
+                fire(cpu, o);
+                cpu.write32(o + SB_ARM_94, 0);
+                cpu.write8(o + SB_ARM_70, 1);
+                next(cpu);
+            }
+        }
+        2 if count(cpu) == 48 => {
+            cpu.write32(o + SB_ARM_94, 0);
+            cpu.write8(o + SB_ARM_70, 0);
+            cpu.write8(o + SB_ARM_INNER, 1);
+        }
+        _ => {}
+    }
+}
+
+/// An arm's step, straight ribbons.
+pub fn sb_arm_ribbons(cpu: &mut Cpu, o: u32, boss: u32) {
+    sb_arm_ribbon_cycle(cpu, o, boss, |cpu, o| nested!(cpu, 0x0609_da1c, sb_arm_straight_ribbon(cpu, o)));
+}
+
+/// An arm's step, homing ribbons.
+pub fn sb_arm_homing_ribbons(cpu: &mut Cpu, o: u32, boss: u32) {
+    sb_arm_ribbon_cycle(cpu, o, boss, |cpu, o| nested!(cpu, 0x0609_daa4, sb_arm_homing_ribbon(cpu, o)));
+}
+
+/// An arm's step, straight ribbons of the second colour.
+pub fn sb_arm_ribbons_2(cpu: &mut Cpu, o: u32, boss: u32) {
+    sb_arm_ribbon_cycle(cpu, o, boss, |cpu, o| nested!(cpu, 0x0609_dbd0, sb_arm_straight_ribbon_2(cpu, o)));
+}
+
+/// A gun of the stage boss (a numbered object, 0x80 bytes): its behaviour and draw, unseen and not
+/// hit at first (a model drawn by its own function); its boss's number (+0x6c) and its side
+/// (+0x6d: 0 the left), where it is on the boss (+0x70 x, +0x74 y, +0x78 z), its model (+0x7c),
+/// tilted 0x2aaa about x and turned out 0x1800 about y (the left one the other way); side 1, its
+/// boxes (0x060a433c) and life 10000.
+const SB_GUN_SIZE: u32 = 0x80;
+const SB_GUN_BEHAVIOUR: u32 = 0x0609_e51c;
+const SB_GUN_DRAW: u32 = 0x0609_e5d4;
+const SB_GUN_BOSS: u32 = 0x6c;
+const SB_GUN_SIDE: u32 = 0x6d;
+const SB_GUN_AT: u32 = 0x70;
+const SB_GUN_MODEL: u32 = 0x7c;
+const SB_GUN_TILT: u16 = 0x2aaa;
+const SB_GUN_TURN: u16 = 0x1800;
+const SB_GUN_BOXES: u32 = 0x060a_433c;
+const SB_GUN_LIFE: u32 = 10_000;
+
+/// Gun `side` of the boss numbered `boss` made at (x, y, z) on it with `model`: its number, or 0.
+pub fn sb_gun_set(cpu: &mut Cpu, boss: u32, side: u32, x: u32, y: u32, z: u32, model: u32) -> u32 {
+    let (boss, side) = (boss as i8, side as i8);
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, ENEMY_NUMBERS)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, SB_GUN_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, NUMBERED_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + HIT_BOXES));
+    cpu.write32(o + BEHAVIOUR, SB_GUN_BEHAVIOUR);
+    let flags = cpu.read32(o + FLAGS) | SB_ARM_FLAGS;
+    cpu.write32(o + FLAGS, flags);
+    cpu.write32(o + MODEL, SB_GUN_DRAW);
+    for k in [8, 4, 0] {
+        cpu.write32(o + POSITION + k, 0);
+    }
+    cpu.write8(o + LIFT, 0);
+    for (at, v) in [(0, x), (4, y), (8, z)] {
+        cpu.write32(o + SB_GUN_AT + at, v);
+    }
+    cpu.write8(o + SB_GUN_SIDE, side as u8);
+    cpu.write8(o + SB_GUN_BOSS, boss as u8);
+    cpu.write32(o + SB_GUN_MODEL, model);
+    cpu.write16(o + TURN_X, SB_GUN_TILT);
+    let turn = if side == 0 { SB_GUN_TURN.wrapping_neg() } else { SB_GUN_TURN };
+    cpu.write16(o + TURN_Y, turn);
+    cpu.write8(o + HIT_SIDE, 1);
+    cpu.write32(o + HIT_BOXES, SB_GUN_BOXES);
+    cpu.write32(o + HIT_LIFE, SB_GUN_LIFE);
+    cpu.write8(o + NUMBER, n as u8);
+    let n = cpu.read8(o + NUMBER) as i8 as i32;
+    cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), o);
+    n as u32
+}
+
+/// The gun's breaking: its puffs (five about it, by its side's points: 0x060a4388's for the left,
+/// 0x060a434c's for the right, turned with the boss), its gone behaviour and draw (nothing), the
+/// rate and points it gives, its sound.
+const SB_GUN_PUFFS: [u32; 2] = [0x060a_4388, 0x060a_434c];
+const SB_GUN_GONE: u32 = 0x0609_e5c8;
+const SB_GUN_NO_DRAW: u32 = 0x0609_c400;
+const SB_GUN_RATE: u32 = 5;
+const SB_GUN_POINTS: u32 = 10_000;
+const SB_GUN_SOUND: u32 = 19;
+
+/// A gun, a frame: once its life is gone, broken (puffs, not hit, gone, its rate and 10000 points
+/// to whoever broke it, its sound).
+pub fn sb_gun_behaviour(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(o + HIT_LIFE) as i32 > 0 {
+        return;
+    }
+    let boss = cpu.read8(o + SB_GUN_BOSS) as i8 as i32 as u32;
+    let boss = cpu.read32(NUMBERED + 4 * boss);
+    let side = (cpu.read8(o + SB_GUN_SIDE) != 0) as usize;
+    let turn = cpu.read16(boss + TURN_Z) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_2940, actors::puffs_around(cpu, o + POSITION, turn, SB_GUN_PUFFS[side], 5));
+    let flags = cpu.read32(o + FLAGS) | NO_HITS;
+    cpu.write32(o + FLAGS, flags);
+    cpu.write32(o + BEHAVIOUR, SB_GUN_GONE);
+    cpu.write32(o + MODEL, SB_GUN_NO_DRAW);
+    let rate = cpu.read32(STAGE_RATE_AT).wrapping_add(SB_GUN_RATE);
+    cpu.write32(STAGE_RATE_AT, rate);
+    let by = cpu.read32(o + HIT_BY);
+    let player = cpu.read8(by + HIT_PLAYER) as i8 as i32 as u32;
+    let weapon = cpu.read8(by + HIT_WEAPON) as i8 as i32 as u32;
+    nested!(cpu, 0x0604_3108, hits::score_kill(cpu, player, weapon, o, SB_GUN_POINTS));
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, SB_GUN_SOUND));
+}
+
+/// A broken gun's behaviour: nothing.
+pub fn sb_gun_gone(_cpu: &mut Cpu, _o: u32) {}
+
+/// A gun drawn (given its sprite): in window 0, from the boss's head's matrix, its place on screen
+/// kept; moved to its place on the boss, tilted about x and turned about y; its model (flashing
+/// when hit) unless its life is gone.
+pub fn sb_gun_draw(cpu: &mut Cpu, s: u32) {
+    let o = s.wrapping_sub(FLAGS);
+    let boss = cpu.read8(o + SB_GUN_BOSS) as i8 as i32 as u32;
+    let boss = cpu.read32(NUMBERED + 4 * boss);
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 0));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0606_db7c, sgl::sl_load_matrix(cpu, boss + SB_HEAD_MATRIX));
+    nested!(cpu, 0x0606_750c, sgl::sl_convert(cpu, o + SB_GUN_AT, o + POSITION));
+    let [x, y, z] = [0, 4, 8].map(|k| cpu.read32(o + SB_GUN_AT + k));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, z));
+    let tilt = cpu.read16(o + TURN_X) as i16 as u32;
+    nested!(cpu, 0x0606_72ec, sgl::sl_rot_x(cpu, tilt));
+    let turn = cpu.read16(o + TURN_Y) as i16 as u32;
+    nested!(cpu, 0x0606_736c, sgl::sl_rot_y(cpu, turn));
+    if cpu.read32(o + HIT_LIFE) as i32 > 0 {
+        let flash = (cpu.read16(o + HIT_FLAGS) & FLASH) as u32;
+        let models = cpu.read32(o + SB_GUN_MODEL);
+        let model = cpu.read32(models + 4 * flash);
+        nested!(cpu, 0x0606_745c, sgl::sl_put_polygon(cpu, model));
+    }
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 1));
+}
+
+/// A beam's segment's colours (its sprite's colour and own colour: the first character's, or 16
+/// past it, on alternate frames) and its frame (0x060a43dc's two moving or stopped (+0x75),
+/// changing every other frame).
+const SEG_STOPPED: u32 = 0x75;
+const SEG_FRAMES: u32 = 0x060a_43dc;
+
+pub fn segment_look(cpu: &mut Cpu, o: u32) {
+    let odd = cpu.read32(GAME_FRAMES) & 1 != 0;
+    let c = cpu.read16(CHAR_BASE).wrapping_add(if odd { 0 } else { 16 });
+    cpu.write16(o + OWN_COLOUR, c);
+    cpu.write16(o + COLOUR, c);
+    let step = cpu.read8(o + SEG_STOPPED) as i8 as i32 as u32;
+    let half = (cpu.read32(GAME_FRAMES) & 2) >> 1;
+    let frame = cpu.read8(SEG_FRAMES.wrapping_add(2 * step).wrapping_add(half));
+    cpu.write8(o + SPRITE_FRAME, frame);
+}
+
+/// A beam's segment (the boss's burst): its boss (+0x6c, a pointer), how far out along the boss's
+/// turn it is (+0x70) and its age (+0x74, a byte: 0 its first frame); it stops (+0x75) where the
+/// beam was hit, its boxes then 0x060a43d4's and its lift -8.
+const SEG_BOSS: u32 = 0x6c;
+const SEG_OUT: u32 = 0x70;
+const SEG_AGE: u32 = 0x74;
+const SEG_STOPPED_BOXES: u32 = 0x060a_43d4;
+const SEG_FIRST_FLAGS: u32 = 32;
+const SEG_FIRST_TURN: u8 = 44;
+/// Its hit flags' bit for touching (hits.rs's).
+const TOUCHING: u16 = 0x400;
+
+/// A segment, a frame: ended past the segment the beam was hit at last frame, or off screen; else
+/// out along the beam (8 dots its first frame, 12 its second with its flags and turn set, then 24 a
+/// frame until it reaches where the beam was hit, where it stops); touching something, the beam's
+/// hit kept at the nearest segment, and while the beam is strong every eighth frame a blast at it;
+/// placed out from the boss's head along the boss's turn, turned with it, sized by the beam; aged,
+/// and past its first frame its colours and frame.
+pub fn segment_behaviour(cpu: &mut Cpu, o: u32) {
+    let boss = cpu.read32(o + SEG_BOSS);
+    let hit_at = cpu.read8(boss + SB_KEPT) as i8;
+    let past = hit_at != -1 && cpu.read8(o + SEG_AGE) as i8 > hit_at;
+    if past || nested!(cpu, 0x0605_6a24, aim::off_screen(cpu, o + FLAGS)) as u8 != 0 {
+        cpu.write8(o + OBJ_MODE, 112);
+        return;
+    }
+    let out = |cpu: &mut Cpu, by: u32| {
+        let v = cpu.read32(o + SEG_OUT).wrapping_add(by);
+        cpu.write32(o + SEG_OUT, v);
+    };
+    match cpu.read8(o + SEG_AGE) {
+        0 => out(cpu, 0x8_0000),
+        1 => {
+            cpu.write32(o + FLAGS, SEG_FIRST_FLAGS);
+            cpu.write8(o + TURN_Y, SEG_FIRST_TURN);
+            out(cpu, 0xc_0000);
+        }
+        age => {
+            if cpu.read8(o + SEG_STOPPED) == 1 {
+                if age != 2 {
+                    out(cpu, 0x18_0000);
+                }
+            } else if age == {
+                let boss = cpu.read32(o + SEG_BOSS);
+                cpu.read8(boss + SB_KEPT)
+            } {
+                cpu.write8(o + SEG_STOPPED, 1);
+                cpu.write32(o + HIT_BOXES, SEG_STOPPED_BOXES);
+                cpu.write8(o + LIFT, 0xf8);
+            } else {
+                out(cpu, 0x18_0000);
+            }
+        }
+    }
+    if cpu.read16(o + HIT_FLAGS) & TOUCHING != 0 {
+        let frames = cpu.read32(GAME_FRAMES);
+        let boss = cpu.read32(o + SEG_BOSS);
+        if frames & 7 == 0 && cpu.read32(boss + SB_BC) as i32 > 0x7fff {
+            let p = cpu.stack();
+            for k in [0, 4, 8] {
+                let v = cpu.read32(o + POSITION + k);
+                cpu.write32(p + k, v);
+            }
+            if frames & 8 != 0 {
+                nested!(cpu, 0x0609_ef14, blast_small_quiet(cpu, p));
+            } else {
+                nested!(cpu, 0x0609_edac, blast_small(cpu, p, 1));
+            }
+        }
+        let boss = cpu.read32(o + SEG_BOSS);
+        let nearest = cpu.read8(boss + SB_THIS_FRAME) as i8;
+        let age = cpu.read8(o + SEG_AGE);
+        if nearest == -1 || nearest > age as i8 {
+            cpu.write8(boss + SB_THIS_FRAME, age);
+        }
+    }
+    let boss = cpu.read32(o + SEG_BOSS);
+    let turn = cpu.read16(boss + TURN_Z) as i16 as i32 as u32;
+    let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, turn));
+    let reach = cpu.read32(o + SEG_OUT);
+    let dx = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, reach.wrapping_neg(), s));
+    let boss = cpu.read32(o + SEG_BOSS);
+    let x = cpu.read32(boss + SB_HEAD_AT).wrapping_add(dx);
+    cpu.write32(o + POSITION, x);
+    let turn = cpu.read16(boss + TURN_Z) as i16 as i32 as u32;
+    let c = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, turn));
+    let reach = cpu.read32(o + SEG_OUT);
+    let dy = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, reach, c));
+    let boss = cpu.read32(o + SEG_BOSS);
+    let y = cpu.read32(boss + SB_HEAD_AT + 4).wrapping_add(dy);
+    cpu.write32(o + POSITION + 4, y);
+    let turn = cpu.read16(boss + TURN_Z);
+    cpu.write16(o + TURN_Z, turn);
+    let size = cpu.read32(boss + SB_BC);
+    cpu.write32(o + SCALES, size);
+    let age = cpu.read8(o + SEG_AGE);
+    cpu.write8(o + SEG_AGE, age.wrapping_add(1));
+    if age != 0 {
+        nested!(cpu, 0x0609_e6a0, segment_look(cpu, o));
+    }
+}
+
+/// A segment's flags (drawn over, ...), its first frame (-82), its side and type (1, 5), its
+/// boxes and lift while moving (0x060a43c4's, -16).
+const SEG_FLAGS: u32 = 0x2000_0400;
+const SEG_FIRST_FRAME: u8 = 0xae;
+const SEG_TYPE: u8 = 5;
+const SEG_BOXES: u32 = 0x060a_43c4;
+
+/// A segment `o` set up for `boss`'s beam: its sprite and hits, its behaviour, the boss's number,
+/// at the boss's head, its first frame, its colours by the frame count, side 1 type 5, sized by
+/// the beam, not out and new; its boxes and lift as it moves or is stopped.
+pub fn segment_init(cpu: &mut Cpu, o: u32, boss: u32) {
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + HIT_BOXES));
+    let flags = cpu.read32(o + FLAGS) | SEG_FLAGS;
+    cpu.write32(o + FLAGS, flags);
+    cpu.write32(o + BEHAVIOUR, 0x0609_e6fc);
+    let n = cpu.read8(boss + NUMBER);
+    cpu.write8(o + NUMBER, n);
+    let x = cpu.read32(boss + SB_HEAD_AT);
+    cpu.write32(o + POSITION, x);
+    let y = cpu.read32(boss + SB_HEAD_AT + 4);
+    cpu.write32(o + POSITION + 4, y);
+    cpu.write32(o + POSITION + 8, 0);
+    cpu.write8(o + SPRITE_FRAME, SEG_FIRST_FRAME);
+    cpu.write8(o + TURN_Y, 0);
+    let odd = cpu.read32(GAME_FRAMES) & 1 != 0;
+    let c = cpu.read16(CHAR_BASE).wrapping_add(if odd { 0 } else { 16 });
+    cpu.write16(o + OWN_COLOUR, c);
+    cpu.write16(o + COLOUR, c);
+    cpu.write8(o + HIT_SIDE, 1);
+    cpu.write8(o + HIT_TYPE, SEG_TYPE);
+    let size = cpu.read32(boss + SB_BC);
+    cpu.write32(o + SCALES, size);
+    cpu.write32(o + SEG_BOSS, boss);
+    cpu.write32(o + SEG_OUT, 0);
+    cpu.write8(o + SEG_AGE, 0);
+    let stopped = cpu.read8(o + SEG_STOPPED) != 0;
+    let (boxes, lift) = if stopped { (SEG_STOPPED_BOXES, 0xf8) } else { (SEG_BOXES, 0xf0) };
+    cpu.write32(o + HIT_BOXES, boxes);
+    cpu.write8(o + LIFT, lift);
+}
+
+/// The beam's next segment (list 2, 0x78 bytes, actor_exec's): stopped from the start while the
+/// boss's burst is starting (3).
+const SEG_SIZE: u32 = 0x78;
+
+pub fn sb_burst_step(cpu: &mut Cpu, boss: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, SEG_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, ACTOR_EXEC));
+    if o == 0 {
+        return;
+    }
+    let stopped = (cpu.read8(boss + SB_BURST) == 3) as u8;
+    cpu.write8(o + SEG_STOPPED, stopped);
+    nested!(cpu, 0x0609_e8f4, segment_init(cpu, o, boss));
+}
+
+/// A ring's description (rings.rs's): its flags (a byte), colour (a word), turn (three words),
+/// place (three longs), scale (two), the scale's rates (two), its radii (inner, outer), their
+/// rates (+0x30, +0x34, +0x38), what it follows (+0x3c) and its matrix (+0x40).
+const RD_FLAGS: u32 = 0x00;
+const RD_COLOUR: u32 = 0x02;
+const RD_TURN: u32 = 0x04;
+const RD_PLACE: u32 = 0x0c;
+const RD_SCALE: u32 = 0x18;
+const RD_SCALE_RATE: u32 = 0x20;
+const RD_RADII: u32 = 0x28;
+const RD_RATES: u32 = 0x30;
+const RD_FOLLOWS: u32 = 0x3c;
+const RD_MATRIX: u32 = 0x40;
+
+/// A ring about the boss's head (as its beam starts): flags 1, the first character's colour,
+/// unturned, at the head, whole and growing 1/16 a frame, 48 to 80 dots across, the first rate
+/// whole.
+pub fn sb_head_ring(cpu: &mut Cpu, boss: u32) {
+    let d = cpu.stack();
+    let x = cpu.read32(boss + SB_HEAD_AT);
+    cpu.write32(d + RD_PLACE, x);
+    let y = cpu.read32(boss + SB_HEAD_AT + 4);
+    cpu.write32(d + RD_PLACE + 4, y);
+    cpu.write32(d + RD_PLACE + 8, 0);
+    for k in [0, 2, 4] {
+        cpu.write16(d + RD_TURN + k, 0);
+    }
+    for k in [0, 4] {
+        cpu.write32(d + RD_SCALE_RATE + k, 0x1000);
+    }
+    let c = cpu.read16(CHAR_BASE);
+    cpu.write16(d + RD_COLOUR, c);
+    cpu.write8(d + RD_FLAGS, 1);
+    for k in [0, 4] {
+        cpu.write32(d + RD_SCALE + k, 0x1_0000);
+    }
+    cpu.write32(d + RD_RADII + 4, 0x50_0000);
+    cpu.write32(d + RD_RADII, 0x30_0000);
+    cpu.write32(d + RD_RATES, 0x1_0000);
+    for k in [4, 8] {
+        cpu.write32(d + RD_RATES + k, 0);
+    }
+    cpu.write32(d + RD_FOLLOWS, 0);
+    cpu.write32(d + RD_MATRIX, 0);
+    nested!(cpu, 0x0606_2738, rings::ring_set(cpu, d));
+}
+
+/// The head's glow (an object: its boss +0x3c, its step +0x40, its size x and y +0x48, +0x4c):
+/// ended once the beam is gone.
+const HG_BOSS: u32 = 0x3c;
+const HG_STEP: u32 = 0x40;
+const HG_SIZE: u32 = 0x48;
+const HG_FRAME: u8 = 0xd3;
+const HG_FLIP: u32 = 0x100;
+
+/// The head's glow, a frame: 0 growing (0x5b0 a frame) until the burst is in its second step, then
+/// wide and flat, its frame, turned against the boss, a ring at the head, the screen flashed and
+/// fading back; 1 turned against the boss, narrowing (0x3000 a frame) and lengthening (0x800) to
+/// whole, then on; 2 until the burst is in its last step; 3 sized with the beam. At the head,
+/// jittering (up to 0x2d00 more, and 0x2000 on alternate frames, flipped), its colours by the frame
+/// count.
+pub fn head_glow(cpu: &mut Cpu, o: u32) {
+    let boss = cpu.read32(o + HG_BOSS);
+    if cpu.read32(boss + SB_BC) == 0 {
+        cpu.write8(o + OBJ_MODE, 112);
+        return;
+    }
+    let next = |cpu: &mut Cpu| {
+        let step = cpu.read32(o + HG_STEP).wrapping_add(1);
+        cpu.write32(o + HG_STEP, step);
+    };
+    let burst = |cpu: &mut Cpu| {
+        let boss = cpu.read32(o + HG_BOSS);
+        cpu.read8(boss + SB_BURST)
+    };
+    let against = |cpu: &mut Cpu| {
+        let boss = cpu.read32(o + HG_BOSS);
+        let turn = cpu.read16(boss + TURN_Z).wrapping_add(0x8000);
+        cpu.write16(o + TURN_Z, turn);
+    };
+    match cpu.read32(o + HG_STEP) {
+        0 => {
+            for k in [0, 4] {
+                let v = cpu.read32(o + HG_SIZE + k).wrapping_add(0x5b0);
+                cpu.write32(o + HG_SIZE + k, v);
+            }
+            if burst(cpu) == 2 {
+                cpu.write32(o + HG_SIZE, 0x4_0000);
+                cpu.write32(o + HG_SIZE + 4, 0x8000);
+                cpu.write8(o + SPRITE_FRAME, HG_FRAME);
+                against(cpu);
+                let boss = cpu.read32(o + HG_BOSS);
+                nested!(cpu, 0x0609_ea4c, sb_head_ring(cpu, boss));
+                nested!(cpu, 0x0605_e6dc, screen::set_fade_offset(cpu, 60, 40, 40));
+                nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, 0, 0, 0, 0x200));
+                next(cpu);
+            }
+        }
+        1 => {
+            against(cpu);
+            let x = cpu.read32(o + HG_SIZE).wrapping_add(0xffff_d000);
+            cpu.write32(o + HG_SIZE, x);
+            let y = cpu.read32(o + HG_SIZE + 4).wrapping_add(0x800);
+            cpu.write32(o + HG_SIZE + 4, y);
+            if y == 0x1_0000 {
+                next(cpu);
+                cpu.write16(o + TURN_Z, 0);
+            }
+            if burst(cpu) == 1 {
+                next(cpu);
+            }
+        }
+        2 => {
+            if burst(cpu) == 1 {
+                next(cpu);
+            }
+        }
+        3 => {
+            let boss = cpu.read32(o + HG_BOSS);
+            let size = cpu.read32(boss + SB_BC);
+            let v = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x1_0000, size));
+            cpu.write32(o + HG_SIZE + 4, v);
+            cpu.write32(o + HG_SIZE, v);
+        }
+        _ => {}
+    }
+    let boss = cpu.read32(o + HG_BOSS);
+    let x = cpu.read32(boss + SB_HEAD_AT);
+    cpu.write32(o + POSITION, x);
+    let y = cpu.read32(boss + SB_HEAD_AT + 4);
+    cpu.write32(o + POSITION + 4, y);
+    let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu)) & 15;
+    let mut jitter = (r * 3) << 8;
+    let flags = cpu.read32(o + FLAGS);
+    if cpu.read32(GAME_FRAMES) & 1 != 0 {
+        cpu.write32(o + FLAGS, flags | HG_FLIP);
+        jitter += 0x2000;
+    } else {
+        cpu.write32(o + FLAGS, flags & !HG_FLIP);
+    }
+    let even = cpu.read32(GAME_FRAMES) & 2 == 0;
+    let c = cpu.read16(CHAR_BASE).wrapping_add(if even { 16 } else { 0 });
+    cpu.write16(o + OWN_COLOUR, c);
+    cpu.write16(o + COLOUR, c);
+    for k in [0, 4] {
+        let v = cpu.read32(o + HG_SIZE + k).wrapping_add(jitter);
+        cpu.write32(o + SCALES + k, v);
+    }
+}
+
+/// The head's glow's flags (drawn over, ...), its +0x44.
+const HG_FLAGS: u32 = 0x2000_0400;
+const HG_44: u32 = 0x44;
+
+/// A head's glow `o` set up for `boss`: its sprite, flags and behaviour, the boss's number, at the
+/// boss's head, no lift, its frame, unturned, 16 past the first character's colours, half size,
+/// following the boss, at its first step.
+pub fn head_glow_init(cpu: &mut Cpu, o: u32, boss: u32) {
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + FLAGS));
+    let flags = cpu.read32(o + FLAGS) | HG_FLAGS;
+    cpu.write32(o + FLAGS, flags);
+    cpu.write32(o + BEHAVIOUR, 0x0609_ead4);
+    let n = cpu.read8(boss + NUMBER);
+    cpu.write8(o + NUMBER, n);
+    let x = cpu.read32(boss + SB_HEAD_AT);
+    cpu.write32(o + POSITION, x);
+    let y = cpu.read32(boss + SB_HEAD_AT + 4);
+    cpu.write32(o + POSITION + 4, y);
+    cpu.write32(o + POSITION + 8, 0);
+    cpu.write8(o + LIFT, 0);
+    cpu.write8(o + SPRITE_FRAME, HG_FRAME);
+    cpu.write8(o + TURN_Y, 0);
+    let c = cpu.read16(CHAR_BASE).wrapping_add(16);
+    cpu.write16(o + OWN_COLOUR, c);
+    cpu.write16(o + COLOUR, c);
+    for k in [0, 4] {
+        cpu.write32(o + HG_SIZE + k, 0x8000);
+    }
+    cpu.write32(o + HG_BOSS, boss);
+    cpu.write32(o + HG_44, 0);
+    cpu.write32(o + HG_STEP, 0);
+}
+
+/// The beam's start (list 2, 0x50 bytes, plain_exec's): the head's glow made, the beam whole, its
+/// sound.
+const HG_SIZE_BYTES: u32 = 0x50;
+const SB_BEAM_SOUND: u32 = 69;
+
+pub fn sb_beam_start(cpu: &mut Cpu, boss: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, HG_SIZE_BYTES)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PLAIN_EXEC));
+    if o != 0 {
+        nested!(cpu, 0x0609_eca8, head_glow_init(cpu, o, boss));
+    }
+    cpu.write32(boss + SB_BC, 0x1_0000);
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, SB_BEAM_SOUND));
+}
+
+/// The blasts' scripts (the effects' drift_effect: 0x06073008 small, 0x0607305c large), their
+/// colours (0x90; the silent ones 0x8090) and sounds.
+const BLAST_SMALL: u32 = 0x0607_3008;
+const BLAST_LARGE: u32 = 0x0607_305c;
+const BLAST_COLOUR: u16 = 0x90;
+const BLAST_QUIET_COLOUR: u16 = 0x8090;
+const BLAST_SMALL_SOUND: u32 = 18;
+const BLAST_LARGE_SOUND: u32 = 12;
+/// A blast's random flip (its flags' bits 4 and 5).
+const BLAST_FLIP: u32 = 0x30;
+
+/// A blast at `p` (an effect's description: the place there): its script and colour, unturned and
+/// still, whole; flipped at random.
+fn blast(cpu: &mut Cpu, p: u32, script: u32, colour: u16) {
+    cpu.write32(p + actors::E_SCRIPT, script);
+    cpu.write16(p + actors::E_COLOUR, colour);
+    cpu.write16(p + actors::E_ANGLE, 0);
+    cpu.write32(p + actors::E_SPEED, 0);
+    cpu.write32(p + actors::E_SCALES, 0x1_0000);
+    cpu.write32(p + actors::E_SCALES + 4, 0x1_0000);
+    let e = nested!(cpu, 0x0605_7454, actors::drift_effect(cpu, p));
+    if e != 0 {
+        let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+        let flags = cpu.read32(e + FLAGS) | (r & BLAST_FLIP);
+        cpu.write32(e + FLAGS, flags);
+    }
+}
+
+/// A small blast at `p`, with its sound when `loud`.
+pub fn blast_small(cpu: &mut Cpu, p: u32, loud: u32) {
+    blast(cpu, p, BLAST_SMALL, BLAST_COLOUR);
+    if loud != 0 {
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, BLAST_SMALL_SOUND));
+    }
+}
+
+/// A large blast at `p`, with its sound when `loud`.
+pub fn blast_large(cpu: &mut Cpu, p: u32, loud: u32) {
+    blast(cpu, p, BLAST_LARGE, BLAST_COLOUR);
+    if loud != 0 {
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, BLAST_LARGE_SOUND));
+    }
+}
+
+/// A small blast at `p`, silent.
+pub fn blast_small_quiet(cpu: &mut Cpu, p: u32) {
+    blast(cpu, p, BLAST_SMALL, BLAST_QUIET_COLOUR);
+}
+
+/// A large blast at `p`, silent.
+pub fn blast_large_quiet(cpu: &mut Cpu, p: u32) {
+    blast(cpu, p, BLAST_LARGE, BLAST_QUIET_COLOUR);
+}
+
+/// The stage boss made (a numbered object, 0x13c bytes): its script index the difficulty; waiting,
+/// unseen and not hit (a model drawn by its own function, its draw at first nothing), a quarter
+/// tilted about x, no lift; at its place, 0x8000000 down; its fields none, its turns kept its turn;
+/// its phase 4; side 1, its boxes (0x060a4240) and life 90000; the stage's rate and score none;
+/// kind 43's models sorted (the eighth by 2, the first, second, third and fifth by 1), the Gouraud
+/// tables' ramp (24, 24, 26) and floor 10; the light set. Its number, or 0.
+const SB_SIZE_BYTES: u32 = 0x13c;
+const SB_FLAGS: u32 = IS_MODEL | OWN_DRAW | NO_HITS;
+const SB_TILT: u16 = 0x4000;
+const SB_9E: u32 = 0x9e;
+const SB_BOXES: u32 = 0x060a_4240;
+const SB_FIRST_PHASE: u8 = 4;
+const SB_LIGHT: [u32; 3] = [0xffff_4a3e, 0xb5c2, 0xb5c2];
+const SB_SORTS: [(u32, u32); 5] = [(7, 2), (0, 1), (1, 1), (2, 1), (4, 1)];
+
+pub fn sb_make(cpu: &mut Cpu) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, ENEMY_NUMBERS)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, SB_SIZE_BYTES)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, NUMBERED_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    let difficulty = cpu.read8(DIFFICULTY);
+    cpu.write8(SB_SCRIPT_INDEX, difficulty);
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + HIT_BOXES));
+    cpu.write32(o + BEHAVIOUR, 0x0609_bcc4);
+    for k in [0, 4, 8] {
+        cpu.write32(o + POSITION + k, 0);
+    }
+    let flags = cpu.read32(o + FLAGS) | SB_FLAGS;
+    cpu.write32(o + FLAGS, flags);
+    cpu.write32(o + MODEL, SB_GUN_NO_DRAW);
+    cpu.write16(o + TURN_X, SB_TILT);
+    cpu.write8(o + LIFT, 0);
+    cpu.write8(o + NUMBER, n as u8);
+    let n = cpu.read8(o + NUMBER) as i8 as i32;
+    cpu.write32(NUMBERED.wrapping_add((4 * n) as u32), o);
+    cpu.write32(o + SB_AT, 0);
+    cpu.write32(o + SB_AT + 4, 0);
+    cpu.write32(o + SB_HEIGHT, SB_FROM);
+    cpu.write16(o + SB_BOB_PHASE, 0);
+    cpu.write16(o + SB_9E, 0);
+    cpu.write8(o + SB_TURNS_AT, 0);
+    cpu.write32(o + SB_D8, 0);
+    cpu.write8(o + SB_BURST, 0);
+    for at in [SB_B0, SB_AC, SB_MOVE_LEFT] {
+        cpu.write32(o + at, 0);
+    }
+    cpu.write16(o + SB_7A, 0);
+    cpu.write16(o + SB_TURN_WAS, 0);
+    cpu.write32(o + SB_BC, 0);
+    cpu.write32(o + SB_BOB, 0);
+    cpu.write8(BOSS_PHASE, SB_FIRST_PHASE);
+    for k in 0..16 {
+        let turn = cpu.read16(o + TURN_Z);
+        cpu.write16(o + SB_TURNS + 2 * k, turn);
+    }
+    cpu.write8(o + HIT_SIDE, 1);
+    cpu.write32(o + HIT_BOXES, SB_BOXES);
+    cpu.write32(o + HIT_LIFE, SB_LIFE);
+    cpu.write32(STAGE_RATE_AT, 0);
+    cpu.write32(STAGE_SCORE_AT, 0);
+    for (frame, sort) in SB_SORTS {
+        nested!(cpu, 0x0606_3428, gouraud::model_sort(cpu, SB_KIND, frame, sort));
+    }
+    nested!(cpu, 0x0606_3168, gouraud::table_ramp(cpu, 24, 24, 26));
+    nested!(cpu, 0x0606_30e0, gouraud::table_floor(cpu, 10, 10, 10));
+    let v = cpu.stack();
+    for (k, c) in SB_LIGHT.into_iter().enumerate() {
+        cpu.write32(v + 4 * k as u32, c);
+    }
+    nested!(cpu, 0x0607_0f8c, sgl::sl_light(cpu, v));
+    cpu.read8(o + NUMBER) as i8 as i32 as u32
 }
