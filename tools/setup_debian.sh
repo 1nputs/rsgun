@@ -91,11 +91,20 @@ if [ -n "$MAKE_EVIDENCE" ] && [ ! -f out/evidence/marathon.txt ]; then
         --evidence out/evidence/marathon.txt
     target/release/rsgun --headless --script out/evidence/marathon-input.txt \
         --load-state out/evidence/marathon-140000.state --frames 210000 --evidence out/evidence/marathon-end.txt
+    # the stage 4 route (STG03), from the marathon's f060000 state
+    python3 -I tools/port/marathon.py --frames 230000 --stage4 > out/evidence/route4-input.txt
+    target/release/rsgun --headless --script out/evidence/route4-input.txt \
+        --load-state out/evidence/marathon-states/f060000.state --frames 170000 \
+        --states "$(seq -s, 70000 10000 170000)" --dump-dir out/evidence/route4-states \
+        --evidence out/evidence/route4.txt
+    target/release/rsgun --headless --script out/evidence/route4-input.txt \
+        --load-state out/evidence/route4-states/f170000.state --frames 210000 \
+        --states 180000,190000,200000 --dump-dir out/evidence/route4-states --evidence out/evidence/route4-end.txt
 fi
 
 step "the translation (build/port) and the build with it"
 EVIDENCE=out/evidence/play1.txt,out/evidence/attract.txt
-for e in marathon marathon-end; do
+for e in marathon marathon-end route4 route4-end; do
     if [ -f "out/evidence/$e.txt" ]; then EVIDENCE="$EVIDENCE,out/evidence/$e.txt"; fi
 done
 if [ ! -f build/port/generated.rs ]; then

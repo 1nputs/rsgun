@@ -54,6 +54,7 @@ mod states;
 mod stg00;
 mod stg01;
 mod stg02;
+mod stg03;
 mod stg04;
 mod stg05;
 mod system;
@@ -1335,6 +1336,8 @@ pub fn register(n: &mut Natives) {
         0x0608_4904 => rank::text_plane_clear[] -> (),
         0x0608_4924 => sgl::sl_sprite_type[t] -> (),
     }
+    // STG03.BIN's code (stage 4's): its `rewrites! { n; overlay "STG03"; ... }` block goes here (an
+    // empty block does not compile; the first batch makes it with its first entry).
     // OPENING.BIN's code (the opening mode's), with its copies of SGL's NBG3 and sprite setters
     rewrites! { n; overlay "OPENING";
         0x0608_0000 => opening::opening_mode[game] -> u32,

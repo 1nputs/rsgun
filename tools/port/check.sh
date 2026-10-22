@@ -15,13 +15,15 @@
 #     rsgun --headless --script out/evidence/marathon-input.txt --frames 150000 --evidence out/evidence/marathon.txt
 #     rsgun --headless --script out/evidence/marathon-input.txt --load-state out/evidence/marathon-140000.state \
 #         --frames 210000 --evidence out/evidence/marathon-end.txt
+# and the stage 4 route's (STG03; tools/setup_debian.sh has its commands): out/evidence/route4.txt,
+# route4-end.txt.
 # Output: out/port/ (the reports).
 set -e
 cd "$(dirname "$0")/../.."
 PLAY=${1:-4000}
 ATTRACT=${2:-7200}
 EVIDENCE=out/evidence/play1.txt,out/evidence/attract.txt
-for e in marathon marathon-end; do
+for e in marathon marathon-end route4 route4-end; do
     if [ -f "out/evidence/$e.txt" ]; then EVIDENCE="$EVIDENCE,out/evidence/$e.txt"; fi
 done
 python3 -I tools/port/sh2rust.py --image out/evidence/dumps/f003000/wram-h.bin --evidence "$EVIDENCE" \
