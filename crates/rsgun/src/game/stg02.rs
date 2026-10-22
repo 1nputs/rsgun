@@ -13338,7 +13338,7 @@ const LAST_MAKE: u32 = 0x0609_b2f4;
 pub fn last_boss_event(cpu: &mut Cpu, e: u32) -> u32 {
     match cpu.read8(e + EV_STEP) {
         0 => {
-            let n = cpu.call(LAST_MAKE, &[]) as i8;
+            let n = nested!(cpu, LAST_MAKE, last_boss_make(cpu)) as i8;
             if n != 0 {
                 cpu.write8(e + EV_STEP, 1);
                 cpu.write32(e + MB_EVENT_NUMBER, n as i32 as u32);
@@ -13465,7 +13465,7 @@ pub fn last_boss_behaviour(cpu: &mut Cpu, o: u32) {
         let by = cpu.read32(o + HIT_BY);
         let (player, weapon) = (cpu.read8(by + HIT_PLAYER) as i8 as i32 as u32, cpu.read8(by + HIT_WEAPON) as i8 as i32 as u32);
         nested!(cpu, 0x0604_3108, hits::score_kill(cpu, player, weapon, o, LB_POINTS));
-        cpu.call(LB_BEATEN, &[o]);
+        nested!(cpu, LB_BEATEN, last_boss_beaten(cpu, o));
     }
     let step = cpu.read8(o + LB_STEP) as i8 as i32 as u32;
     let f = cpu.read32(LB_STATES.wrapping_add(step << 2));
@@ -13574,7 +13574,7 @@ pub fn last_part_behaviour(cpu: &mut Cpu, o: u32) {
                     cpu.write32(t + i, v);
                 }
                 let c = cpu.read32(o + LP_COUNT);
-                cpu.call(LP_SPARKS, &[t, c & 4]);
+                nested!(cpu, LP_SPARKS, last_spark_make(cpu, t, c & 4));
             }
             let c = cpu.read32(o + LP_COUNT);
             cpu.write32(o + LP_COUNT, c.wrapping_add(1));
@@ -13584,7 +13584,7 @@ pub fn last_part_behaviour(cpu: &mut Cpu, o: u32) {
                     cpu.write32(t + 12 + i, v);
                 }
                 let a = cpu.read16(o + LP_FACING) as i16 as i32 as u32;
-                cpu.call(LP_BURST, &[t + 12, a]);
+                nested!(cpu, LP_BURST, last_burst(cpu, t + 12, a));
                 let k = index(cpu);
                 let v = cpu.read8(LP_MARKS_AGAIN + k);
                 cpu.write8(LP_MARKS + 2 * k, v);
@@ -14216,7 +14216,7 @@ pub fn last_script_next(cpu: &mut Cpu, o: u32) {
     let row = cpu.read32(o + LF_SCRIPT).wrapping_add((i as i8 as i32 as u32).wrapping_mul(LF_ROW));
     let phase = cpu.read8(row);
     if phase as i8 == -1 {
-        cpu.call(LB_BEATEN, &[o]);
+        nested!(cpu, LB_BEATEN, last_boss_beaten(cpu, o));
         return;
     }
     cpu.write8(o + LF_PHASE, phase);
@@ -14582,7 +14582,7 @@ pub fn last_arm_behaviour(cpu: &mut Cpu, o: u32) {
                     cpu.write32(t + i, v);
                 }
                 let c = cpu.read32(o + LA_TIME);
-                cpu.call(LP_SPARKS, &[t, c & 4]);
+                nested!(cpu, LP_SPARKS, last_spark_make(cpu, t, c & 4));
             }
             let c = cpu.read32(o + LA_TIME);
             cpu.write32(o + LA_TIME, c.wrapping_add(1));
@@ -14592,7 +14592,7 @@ pub fn last_arm_behaviour(cpu: &mut Cpu, o: u32) {
                     cpu.write32(t + 12 + i, v);
                 }
                 let a = cpu.read16(o + LP_FACING) as i16 as i32 as u32;
-                cpu.call(LP_BURST, &[t + 12, a]);
+                nested!(cpu, LP_BURST, last_burst(cpu, t + 12, a));
                 let k = cpu.read8(o + LA_INDEX) as i8 as i32 as u32;
                 let m = cpu.read8(LP_MARKS_AGAIN.wrapping_add(k));
                 cpu.write8(LP_MARKS.wrapping_add(k << 1), m);
@@ -15225,4 +15225,1091 @@ pub fn last_flash_behaviour(cpu: &mut Cpu, o: u32) {
     cpu.write32(o + 0x20, v);
     let v = cpu.read32(o + LFL_SCALES + 4).wrapping_add(flick);
     cpu.write32(o + 0x24, v);
+}
+
+// ---- the last boss's flying pieces and its wreck -------------------------------------------------
+
+/// A piece that flies the blended pose's circle (made by 0x0609a218): its boss (+0x44), how far
+/// along the pose's 13 points it is (+0x48: the point's number in the high word, how far on to the
+/// next in the low), how fast it goes on (+0x4c), its count (+0x50), its tag (+0x3d) and its frame
+/// number (+0x3e), its turn (+0x40, a word).
+const LQ_BOSS: u32 = 0x44;
+const LQ_ALONG: u32 = 0x48;
+const LQ_SPEED: u32 = 0x4c;
+const LQ_COUNT: u32 = 0x50;
+const LQ_TAG: u32 = 0x3d;
+const LQ_FRAME_AT: u32 = 0x3e;
+const LQ_TURN: u32 = 0x40;
+const LQ_BOSS_MODE: u32 = 0x9c;
+const LQ_BEHAVIOUR: u32 = 0x0609_9da0;
+const LQ_ANIMATION: u32 = 0x060a_76b0;
+const LQ_TURNS: u32 = 0x060a_7698;
+const LQ_PATH_END: u32 = 0xc_0000;
+const LQ_PATH_MOST: i32 = 0xb_ffff;
+
+/// The point of the blended pose's 13 (0x060a8920, two longs each) that `along` stands at: each
+/// coordinate from the point's to the next's by the low word.
+fn last_path_point(cpu: &mut Cpu, along: u32) -> (u32, u32) {
+    let i = (along >> 16) as i16 as i32 as u32;
+    let (at, next) = (LPB_POSE_B.wrapping_add(i << 3), LPB_POSE_B.wrapping_add((i.wrapping_add(1)) << 3));
+    let t = along & 0xffff;
+    let (a, b) = (cpu.read32(at), cpu.read32(next));
+    let x = nested!(cpu, 0x0606_2e7c, math::lerp(cpu, a, b, t));
+    let (a, b) = (cpu.read32(at + 4), cpu.read32(next + 4));
+    let y = nested!(cpu, 0x0606_2e7c, math::lerp(cpu, a, b, t));
+    (x, y)
+}
+
+/// A piece placed: its point of the pose turned by its boss's turn (+0x78).
+pub fn last_piece_place(cpu: &mut Cpu, o: u32) {
+    let along = cpu.read32(o + LQ_ALONG);
+    let (u, v) = last_path_point(cpu, along);
+    let boss = cpu.read32(o + LQ_BOSS);
+    let a = cpu.read16(boss + LF_TURN) as i16 as i32 as u32;
+    let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let c = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let p = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, u, c));
+    let q = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, v, s));
+    cpu.write32(o + POSITION, p.wrapping_sub(q));
+    let p = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, u, s));
+    let q = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, v, c));
+    cpu.write32(o + POSITION + 4, p.wrapping_add(q));
+}
+
+/// A piece's frame, on each odd frame: its number (+0x3e) counts down (up when its tag, +0x3d,
+/// is 0), wrapping 0 to 5 and 6 to 0; its sprite frame (+0x2f) is the table's for it.
+pub fn last_piece_animate(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(GAME_FRAMES) & 1 == 0 {
+        return;
+    }
+    let down = cpu.read8(o + LQ_TAG) as i8 != 0;
+    let k = cpu.read8(o + LQ_FRAME_AT) as i8 as i32;
+    cpu.write8(o + LQ_FRAME_AT, (if down { k - 1 } else { k + 1 }) as u8);
+    let k = cpu.read8(o + LQ_FRAME_AT) as i8 as i32;
+    if k < 0 {
+        cpu.write8(o + LQ_FRAME_AT, 5);
+    } else if k == 6 {
+        cpu.write8(o + LQ_FRAME_AT, 0);
+    }
+    let k = cpu.read8(o + LQ_FRAME_AT) as i8 as i32 as u32;
+    let f = cpu.read8(LQ_ANIMATION.wrapping_add(k));
+    cpu.write8(o + SPRITE_FRAME, f);
+}
+
+/// A piece's behaviour once made (it comes in as 0x06099e94: 0x06099da0 after): with its boss no
+/// longer the last boss it ends in a burst of sparks (a random angle, speed 1 1/8). Its place on the
+/// path goes on by its speed (round the 12 points, 0xc0000 long); placed. With its boss's mode
+/// 1 its turn is the table's by its point plus the boss's, and every 32 frames it fires
+/// (0x0609a13c). Animated; its count up.
+pub fn last_piece_behaviour(cpu: &mut Cpu, o: u32) {
+    let boss = cpu.read32(o + LQ_BOSS);
+    if cpu.read32(boss + BEHAVIOUR) != 0x0609_7628 {
+        let t = cpu.stack();
+        for k in [0, 4, 8] {
+            let v = cpu.read32(o + POSITION + k);
+            cpu.write32(t + actors::E_POSITION + k, v);
+        }
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0));
+        cpu.write16(t + actors::E_ANGLE, r as u16);
+        cpu.write32(t + actors::E_SPEED, 0x1_2000);
+        nested!(cpu, 0x0605_786c, explosions::spark_burst(cpu, t));
+        cpu.write8(o + OBJ_MODE, TO_STOP);
+    }
+    let along = cpu.read32(o + LQ_ALONG).wrapping_add(cpu.read32(o + LQ_SPEED));
+    cpu.write32(o + LQ_ALONG, along);
+    if along as i32 > 0 {
+        if along as i32 > LQ_PATH_MOST {
+            cpu.write32(o + LQ_ALONG, along & 0xffff);
+        }
+    } else {
+        cpu.write32(o + LQ_ALONG, along.wrapping_add(LQ_PATH_END));
+    }
+    nested!(cpu, 0x0609_9c7c, last_piece_place(cpu, o));
+    let boss = cpu.read32(o + LQ_BOSS);
+    if cpu.read32(boss + LQ_BOSS_MODE) == 1 {
+        let i = cpu.read16(o + LQ_ALONG) as i16 as i32 as u32;
+        let turn = cpu.read16(boss + LF_TURN) as i16 as i32 as u32;
+        let a = cpu.read16(LQ_TURNS.wrapping_add(i << 1)) as i16 as i32 as u32;
+        cpu.write16(o + LQ_TURN, a.wrapping_add(turn) as u16);
+        if cpu.read32(o + LQ_COUNT) & 31 == 0 {
+            nested!(cpu, 0x0609_a13c, last_piece_fire(cpu, o));
+        }
+    }
+    nested!(cpu, 0x0609_9d44, last_piece_animate(cpu, o));
+    let n = cpu.read32(o + LQ_COUNT).wrapping_add(1);
+    cpu.write32(o + LQ_COUNT, n);
+}
+
+/// A piece swinging out as it is made (0x06099e94): its count up by 1/256 a frame, its place the
+/// path's turned by its boss's turn and by the count's ease from 3 to 1 (its point scaled
+/// by it); at a count of 1 the count goes back to 0 and it is the behaviour 0x06099da0. Animated.
+const LQS_COUNT_STEP: u32 = 0x100;
+const LQS_FROM: u32 = 0x3_0000;
+const LQS_TO: u32 = 0x1_0000;
+
+pub fn last_piece_swing(cpu: &mut Cpu, o: u32) {
+    let n = cpu.read32(o + LQ_COUNT).wrapping_add(LQS_COUNT_STEP);
+    cpu.write32(o + LQ_COUNT, n);
+    let along = cpu.read32(o + LQ_ALONG);
+    let (u, v) = last_path_point(cpu, along);
+    let boss = cpu.read32(o + LQ_BOSS);
+    let a = cpu.read16(boss + LF_TURN) as i16 as i32 as u32;
+    let count = cpu.read32(o + LQ_COUNT);
+    let e = nested!(cpu, 0x0606_2ebc, math::ease(cpu, LQS_FROM, LQS_TO, count));
+    let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let x = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, s, e));
+    let count = cpu.read32(o + LQ_COUNT);
+    let e = nested!(cpu, 0x0606_2ebc, math::ease(cpu, LQS_FROM, LQS_TO, count));
+    let c = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let y = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, c, e));
+    let p = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, u, y));
+    let q = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, v, x));
+    cpu.write32(o + POSITION, p.wrapping_sub(q));
+    let p = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, u, x));
+    let q = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, v, y));
+    cpu.write32(o + POSITION + 4, p.wrapping_add(q));
+    if cpu.read32(o + LQ_COUNT) == LQS_TO {
+        cpu.write32(o + LQ_COUNT, 0);
+        cpu.write32(o + BEHAVIOUR, LQ_BEHAVIOUR);
+    }
+    nested!(cpu, 0x0609_9d44, last_piece_animate(cpu, o));
+}
+
+/// Whether the point `p` (x, y) is off the pose's hull, after turning it back (0x060a8914) and
+/// holding it against the blended pose's 13 points (their corners 2, 5, 8 and 11, 4 dots out):
+/// 1 or 0.
+const LO_MARGIN: u32 = 0x4_0000;
+
+pub fn last_pose_outside(cpu: &mut Cpu, p: u32) -> u32 {
+    let a = cpu.read16(LF_TURN_BACK) as i16 as i32 as u32;
+    let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let c = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let (x, y) = (cpu.read32(p), cpu.read32(p + 4));
+    let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, x, c));
+    let n = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, y, s));
+    let u = m.wrapping_sub(n) as i32;
+    let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, x, s));
+    let n = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, y, c));
+    let w = m.wrapping_add(n) as i32;
+    let at = |cpu: &mut Cpu, k: u32| cpu.read32(LPB_POSE_B + k) as i32;
+    let margin = LO_MARGIN as i32;
+    if (u < at(cpu, 16).wrapping_sub(margin) && w < at(cpu, 20).wrapping_sub(margin))
+        || (u < at(cpu, 40).wrapping_sub(margin) && w > at(cpu, 44).wrapping_add(margin))
+        || (u > at(cpu, 64).wrapping_add(margin) && w > at(cpu, 68).wrapping_add(margin))
+        || (u > at(cpu, 88).wrapping_add(margin) && w < at(cpu, 92).wrapping_sub(margin))
+    {
+        1
+    } else {
+        0
+    }
+}
+
+/// A burst of smoke (drift_effect's, colour `colour`, its animation 0x06073174, a random angle,
+/// speed 1/2, scales 1/4) at the piece's place.
+pub fn last_piece_spark(cpu: &mut Cpu, o: u32, colour: u32) {
+    let t = cpu.stack();
+    cpu.write32(t + actors::E_SCRIPT, 0x0607_3174);
+    cpu.write16(t + actors::E_COLOUR, colour as u16);
+    for k in [0, 4, 8] {
+        let v = cpu.read32(o + POSITION + k);
+        cpu.write32(t + actors::E_POSITION + k, v);
+    }
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    cpu.write16(t + actors::E_ANGLE, r as u16);
+    cpu.write32(t + actors::E_SPEED, 0x8000);
+    cpu.write32(t + actors::E_SCALES, 0x4000);
+    cpu.write32(t + actors::E_SCALES + 4, 0x4000);
+    nested!(cpu, 0x0605_7454, actors::drift_effect(cpu, t));
+}
+
+/// A piece's bullet's behaviour: out of the pose's hull (0x06099fc4) it ends in smoke
+/// (colour 0x40, 0x0609a09c), else it flies on (bullets.rs's bullet_move).
+pub fn last_piece_move(cpu: &mut Cpu, o: u32) {
+    if nested!(cpu, 0x0609_9fc4, last_pose_outside(cpu, o + POSITION)) != 0 {
+        cpu.write8(o + OBJ_MODE, TO_STOP);
+        nested!(cpu, 0x0609_a09c, last_piece_spark(cpu, o, 0x40));
+    } else {
+        nested!(cpu, 0x0605_3ccc, bullets::bullet_move(cpu, o));
+    }
+}
+
+/// A piece's shot at the nearer player (a shot struct on the stack: its number the piece's,
+/// its place the piece's): when the player is more than 0x18ff dots squared away (in whole dots)
+/// it is aimed 0x7000 times a random of up to a turn, less 0x3800, rounded to 0x800, from the
+/// piece's turn (+0x40), speed 1/2; with its tag (+0x3d) set a bullet (bullets.rs's bullet_set,
+/// no flags) of behaviour 0x0609a0f8, else 0x0609a3b0's.
+const LPF_RANGE: i32 = 0x18ff;
+const LPF_SPREAD: u32 = 0x7000;
+const LPF_SPREAD_LOW: u32 = 0xffff_c800;
+const LPF_SPREAD_ROUND: u32 = 0xffff_f800;
+const LPF_SPEED: u32 = 0x8000;
+const LPF_FLAGS: u32 = 0x2e;
+
+pub fn last_piece_fire(cpu: &mut Cpu, o: u32) {
+    let t = cpu.stack();
+    let (x, y) = (cpu.read32(o + POSITION), cpu.read32(o + POSITION + 4));
+    cpu.write32(t + S_POSITION, x);
+    cpu.write32(t + S_POSITION + 4, y);
+    cpu.write32(t + S_POSITION + 8, 0);
+    let n = cpu.read8(o + NUMBER);
+    cpu.write8(t + S_NUMBER, n);
+    let p = nested!(cpu, 0x0605_6a58, aim::nearer_player(cpu, o + 0x10));
+    let dx = (cpu.read32(p + POSITION).wrapping_sub(x) >> 16) as i16 as i32;
+    let dy = (cpu.read32(p + POSITION + 4).wrapping_sub(y) >> 16) as i16 as i32;
+    if dx.wrapping_mul(dx).wrapping_add(dy.wrapping_mul(dy)) <= LPF_RANGE {
+        return;
+    }
+    let a = cpu.read16(o + LQ_TURN);
+    cpu.write16(t + S_ANGLE, a);
+    let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+    let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, r, LPF_SPREAD));
+    let spread = m.wrapping_add(LPF_SPREAD_LOW) & LPF_SPREAD_ROUND;
+    let a = cpu.read16(t + S_ANGLE).wrapping_add(spread as u16);
+    cpu.write16(t + S_ANGLE, a);
+    cpu.write32(t + AS_SPEED, LPF_SPEED);
+    if cpu.read8(o + LQ_TAG) as i8 != 0 {
+        cpu.write16(t + LPF_FLAGS, 0);
+        let b = nested!(cpu, 0x0605_3db0, bullets::bullet_set(cpu, t));
+        if b != 0 {
+            cpu.write32(b + BEHAVIOUR, 0x0609_a0f8);
+        }
+    } else {
+        nested!(cpu, 0x0609_a3b0, last_piece_bolt_make(cpu, t));
+    }
+}
+
+/// A piece's bolt made from a shot struct (a plain actor of 116 bytes, its number the shot's, its
+/// place the shot's, behaviour 0x0609a300): flags 0x20000400, scales 1/2, a random turn of its
+/// own (+0x30), side 1... its frame 0xc6 of kind 8 (+0x33 is 8, +0x2e 0), its colour the base's
+/// plus 32, its boxes 0x060a76b6, type 5 (+0x55), no owner (+0x48, +0x4c: -1), its speed (+0x6c, +0x70)
+/// the shot's (+0x30) along its angle (+0x2c).
+const LPB_BOLT_SIZE: u32 = 116;
+const LPB_BOLT_BOXES: u32 = 0x060a_76b6;
+const LPB_BOLT_BEHAVIOUR: u32 = 0x0609_a300;
+const LPB_BOLT_SPEED: u32 = 0x6c;
+
+pub fn last_piece_bolt_make(cpu: &mut Cpu, t: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, LPB_BOLT_SIZE)) as i8 as i32 as u32;
+    let b = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, ACTOR_EXEC));
+    if b == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, b + 0x10));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, b + HITS_AT));
+    let f = cpu.read32(b + FLAGS) | 0x2000_0400;
+    cpu.write32(b + FLAGS, f);
+    cpu.write32(b + BEHAVIOUR, LPB_BOLT_BEHAVIOUR);
+    let n = cpu.read8(t + S_NUMBER);
+    cpu.write8(b + NUMBER, n);
+    for k in [0, 4, 8] {
+        let v = cpu.read32(t + S_POSITION + k);
+        cpu.write32(b + POSITION + k, v);
+    }
+    cpu.write32(b + 0x24, 0x8000);
+    let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+    cpu.write16(b + ANGLE, r as u16);
+    cpu.write8(b + BYTE_33, 8);
+    cpu.write8(b + SPRITE_FRAME, 0xc6);
+    cpu.write8(b + SPRITE_KIND, 0);
+    let colour = cpu.read16(CHAR_BASE).wrapping_add(32);
+    cpu.write16(b + OWN_COLOUR, colour);
+    cpu.write16(b + COLOUR, colour);
+    cpu.write32(b + HITS_AT, LPB_BOLT_BOXES);
+    cpu.write8(b + 0x54, 1);
+    cpu.write8(b + 0x55, 5);
+    cpu.write32(b + 0x48, u32::MAX);
+    cpu.write32(b + 0x4c, u32::MAX);
+    let a = cpu.read16(t + S_ANGLE) as i16 as i32 as u32;
+    let speed = cpu.read32(t + AS_SPEED);
+    let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let dx = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, speed, s));
+    cpu.write32(b + LPB_BOLT_SPEED, dx);
+    let c = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let dy = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, speed, c));
+    cpu.write32(b + LPB_BOLT_SPEED + 4, dy.wrapping_neg());
+}
+
+/// A bolt (0x0609a300): off the screen it ends; out of the pose's hull it ends in smoke (the
+/// colour it has); else its colour is the base's (16 more on odd frames), it moves by its
+/// speed (+0x6c, +0x70) and turns by 1/16 of a turn.
+pub fn last_bolt_behaviour(cpu: &mut Cpu, o: u32) {
+    if nested!(cpu, 0x0605_6a24, aim::off_screen(cpu, o + 0x10)) as u8 != 0 {
+        cpu.write8(o + OBJ_MODE, TO_STOP);
+        return;
+    }
+    if nested!(cpu, 0x0609_9fc4, last_pose_outside(cpu, o + POSITION)) != 0 {
+        cpu.write8(o + OBJ_MODE, TO_STOP);
+        let colour = cpu.read16(o + COLOUR) as u32;
+        nested!(cpu, 0x0609_a09c, last_piece_spark(cpu, o, colour));
+        return;
+    }
+    let mut colour = cpu.read16(CHAR_BASE);
+    if cpu.read32(GAME_FRAMES) & 1 != 0 {
+        colour = colour.wrapping_add(16);
+    }
+    cpu.write16(o + OWN_COLOUR, colour);
+    cpu.write16(o + COLOUR, colour);
+    let x = cpu.read32(o + POSITION).wrapping_add(cpu.read32(o + LPB_BOLT_SPEED));
+    cpu.write32(o + POSITION, x);
+    let y = cpu.read32(o + POSITION + 4).wrapping_add(cpu.read32(o + LPB_BOLT_SPEED + 4));
+    cpu.write32(o + POSITION + 4, y);
+    let a = cpu.read16(o + ANGLE).wrapping_add(0x1000);
+    cpu.write16(o + ANGLE, a);
+}
+
+/// A piece made for the boss `p` (0x0609a218): a plain actor of 84 bytes (flags +0x20000000,
+/// behaviour 0x06099e94, its number the boss's, its place the pose's point `along` (the high
+/// word) on the blended pose, no z, side 0, frame 0, kind 59, its colours that kind's) with its boss,
+/// its place along the path, its speed `speed`, a count of 0, its tag `tag` and its frame number 0.
+const LPM_SIZE: u32 = 84;
+const LPM_FLAGS: u32 = 0x2000_0000;
+const LPM_KIND: u32 = 59;
+const LPM_SWING: u32 = 0x0609_9e94;
+
+pub fn last_piece_make(cpu: &mut Cpu, p: u32, along: u32, speed: u32, tag: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, LPM_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PLAIN_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + 0x10));
+    let f = cpu.read32(o + FLAGS) | LPM_FLAGS;
+    cpu.write32(o + FLAGS, f);
+    cpu.write32(o + BEHAVIOUR, LPM_SWING);
+    let n = cpu.read8(p + NUMBER);
+    cpu.write8(o + NUMBER, n);
+    let i = (along >> 16) as i16 as i32 as u32;
+    let at = LPB_POSE_B.wrapping_add(i << 3);
+    let x = cpu.read32(at);
+    cpu.write32(o + POSITION, x);
+    let y = cpu.read32(at + 4);
+    cpu.write32(o + POSITION + 4, y);
+    cpu.write32(o + POSITION + 8, 0);
+    cpu.write8(o + BYTE_33, 0);
+    cpu.write8(o + SPRITE_FRAME, 0);
+    cpu.write8(o + SPRITE_KIND, LPM_KIND as u8);
+    let colour = cpu.read16(kind(LPM_KIND) + K_COLOUR);
+    cpu.write16(o + OWN_COLOUR, colour);
+    cpu.write16(o + COLOUR, colour);
+    cpu.write32(o + LQ_BOSS, p);
+    cpu.write32(o + LQ_ALONG, along);
+    cpu.write32(o + LQ_COUNT, 0);
+    cpu.write32(o + LQ_SPEED, speed);
+    cpu.write8(o + LQ_TAG, tag as u8);
+    cpu.write8(o + LQ_FRAME_AT, 0);
+}
+
+/// The last boss's modes that bring it on (its step +0x6d in each, its mode +0x6c, its count
+/// +0x80 up through each step's move to 1; its place's x, y, z at +0xa0, its turns (words) at
+/// +0x74 (x), +0x76 (y) and +0x78 (z), 0x0609879c after each).
+const LS_STEP: u32 = 0x6d;
+const LS_COUNT: u32 = 0x80;
+const LS_PLACE: u32 = 0xa0;
+const LS_TURNS: u32 = 0x74;
+const LS_ARMS: u32 = 0x70;
+const LS_DONE: u32 = 0x1_0000;
+
+/// A place (three longs) moved from `a` to `b` by the count `t`, into the boss's place (+0xa0).
+fn last_place_ease(cpu: &mut Cpu, o: u32, a: [u32; 3], b: [u32; 3], t: u32) {
+    for k in 0..3 {
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, a[k], b[k], t));
+        cpu.write32(o + LS_PLACE + 4 * k as u32, v);
+    }
+}
+
+fn last_table(cpu: &mut Cpu, at: u32) -> [u32; 3] {
+    [cpu.read32(at), cpu.read32(at + 4), cpu.read32(at + 8)]
+}
+
+/// The mode that gathers its parts (0x0609a4d8). Step 0: it is drawn into its place (the flags'
+/// 0x80000, the place +0x14 to its +0xa0), its z turn kept (+0x2e from +0x76), the count 0. 1: the
+/// count up by 1/128, its place eased from its own to the point 0x060a76c0, its x turn eased from
+/// 0x12200 to 0 and, in the first quarter of the count, its y turn from the kept one to 0 by four
+/// times the count; sound 100 half way; at the count's end (1) the count, the y and z turns are
+/// 0. 2: the count up by 1/256, its place eased on to the point 0x060a76cc; at the end its arms (0x06099030, 0 to 3,
+/// kept at +0x70) and followers (0x06099230, 4 to 15, with the turns of
+/// 0x060a6588 and 0x060a6598) are made and, by the pick (0x060a8988), pieces
+/// (0x0609a218) circle it: 2 to 4 one at 0x20000 and 1 to 4 one at 0x80000 (speed 1/128), and two at 0xb0000
+/// and 0x50000 going the other way. 3: the second pose (0x06098934) until its count is full, then
+/// its mode is 3.
+const LG_FLAGS: u32 = 0x8_0000;
+const LG_KEPT: u32 = 0x2e;
+const LG_Z_TURN: u32 = 0x78;
+const LG_RISE_STEP: u32 = 0x100;
+const LG_FROM: u32 = 0x060a_76c0;
+const LG_TO: u32 = 0x060a_76cc;
+const LG_X_TURN_FROM: u32 = 0x1_2200;
+const LG_QUARTER: i32 = 0x3fff;
+const LG_SOUND: u32 = 100;
+const LG_SOUND_AT: u32 = 0x4000;
+const LG_FOLLOWER_HITS: [u32; 2] = [0x060a_6588, 0x060a_6598];
+const LG_FOLLOWERS: [(u32, usize, u32); 12] = [
+    (4, 0, 0x2000),
+    (5, 0, 0xffff_e000),
+    (6, 0, 0xffff_a000),
+    (7, 0, 0x6000),
+    (8, 1, 0),
+    (9, 1, 0),
+    (10, 1, 0x4000),
+    (11, 1, 0x4000),
+    (12, 1, 0),
+    (13, 1, 0),
+    (14, 1, 0x4000),
+    (15, 1, 0x4000),
+];
+const LG_PIECE_SPEED: u32 = 0x200;
+const LG_PIECE_BACK: u32 = 0xffff_fe00;
+
+pub fn last_boss_gather(cpu: &mut Cpu, o: u32) {
+    let step = cpu.read8(o + LS_STEP);
+    let next = |cpu: &mut Cpu| {
+        let s = cpu.read8(o + LS_STEP).wrapping_add(1);
+        cpu.write8(o + LS_STEP, s);
+    };
+    match step {
+        0 => {
+            let f = cpu.read32(o + FLAGS) | LG_FLAGS;
+            cpu.write32(o + FLAGS, f);
+            for k in [0, 4, 8] {
+                let v = cpu.read32(o + LS_PLACE + k);
+                cpu.write32(o + POSITION + k, v);
+            }
+            let v = cpu.read16(o + LS_TURNS + 2);
+            cpu.write16(o + LG_KEPT, v);
+            cpu.write32(o + LS_COUNT, 0);
+            next(cpu);
+        }
+        1 => {
+            let t = cpu.read32(o + LS_COUNT).wrapping_add(LG_RISE_STEP);
+            cpu.write32(o + LS_COUNT, t);
+            let from = [cpu.read32(o + POSITION), cpu.read32(o + POSITION + 4), cpu.read32(o + POSITION + 8)];
+            let to = last_table(cpu, LG_FROM);
+            last_place_ease(cpu, o, from, to, t);
+            let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, LG_X_TURN_FROM, 0, t));
+            cpu.write16(o + LS_TURNS, v as u16);
+            let t = cpu.read32(o + LS_COUNT);
+            if t as i32 <= LG_QUARTER {
+                let kept = cpu.read16(o + LG_KEPT) as i16 as i32 as u32;
+                let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, kept, 0, t << 2));
+                cpu.write16(o + LS_TURNS + 2, v as u16);
+            }
+            if cpu.read32(o + LS_COUNT) & 0x7fff == LG_SOUND_AT {
+                nested!(cpu, 0x0600_50d4, sound::se_set(cpu, LG_SOUND));
+            }
+            if cpu.read32(o + LS_COUNT) == LS_DONE {
+                cpu.write32(o + LS_COUNT, 0);
+                cpu.write16(o + LS_TURNS + 2, 0);
+                cpu.write16(o + LG_Z_TURN, 0);
+                next(cpu);
+            }
+        }
+        2 => {
+            let t = cpu.read32(o + LS_COUNT).wrapping_add(LG_RISE_STEP);
+            cpu.write32(o + LS_COUNT, t);
+            let (from, to) = (last_table(cpu, LG_FROM), last_table(cpu, LG_TO));
+            last_place_ease(cpu, o, from, to, t);
+            if cpu.read32(o + LS_COUNT) == LS_DONE {
+                for k in 0..3 {
+                    cpu.write32(o + LS_PLACE + 4 * k, to[k as usize]);
+                }
+                cpu.write16(o + LS_TURNS, 0);
+                cpu.write32(o + LS_COUNT, 0);
+                cpu.write16(o + LS_TURNS + 6, 0);
+                for i in 0..4 {
+                    let a = nested!(cpu, 0x0609_9030, last_arm_make(cpu, o, i));
+                    cpu.write8(o + LS_ARMS + i, a as u8);
+                }
+                for (i, table, turn) in LG_FOLLOWERS {
+                    nested!(cpu, 0x0609_9230, last_follower_make(cpu, o, i, LG_FOLLOWER_HITS[table], turn));
+                }
+                let pick = cpu.read32(LP_PICK_AT) as i32;
+                if (2..=4).contains(&pick) {
+                    nested!(cpu, 0x0609_a218, last_piece_make(cpu, o, 0x2_0000, LG_PIECE_SPEED, 0));
+                }
+                if (1..=4).contains(&pick) {
+                    nested!(cpu, 0x0609_a218, last_piece_make(cpu, o, 0x8_0000, LG_PIECE_SPEED, 0));
+                }
+                nested!(cpu, 0x0609_a218, last_piece_make(cpu, o, 0xb_0000, LG_PIECE_BACK, 1));
+                nested!(cpu, 0x0609_a218, last_piece_make(cpu, o, 0x5_0000, LG_PIECE_BACK, 2));
+                next(cpu);
+            }
+        }
+        3 => {
+            nested!(cpu, 0x0609_8934, last_pose_first(cpu, o));
+            if cpu.read32(o + LS_COUNT) == LS_DONE {
+                cpu.write8(o + LS_STEP, 0);
+                cpu.write8(o + LB_STEP, 3);
+            }
+        }
+        _ => {}
+    }
+    nested!(cpu, 0x0609_879c, last_boss_matrix(cpu, o));
+}
+
+/// The mode before it (0x0609a834: no matrix after). Step 0: sound 96, the count 0x4000. 1: the
+/// count up by 1/64, its place eased from 0x060a76d8 to 0x060a76ec; at the end the count is 0.
+/// 2: the count up by 1/128, its place eased from there to 0x060a76f8 and its turns (words, x, y, z
+/// at +0x74) from the words at 0x060a76e4 to those at 0x060a7704. 3: the boss's gauge set (most
+/// 0x1adb0), its step 0, its mode 1.
+const LA_FROM: u32 = 0x060a_76d8;
+const LA_MID: u32 = 0x060a_76ec;
+const LA_TO: u32 = 0x060a_76f8;
+const LA_TURNS_FROM: u32 = 0x060a_76e4;
+const LA_TURNS_TO: u32 = 0x060a_7704;
+const LA_START_SOUND: u32 = 96;
+const LA_START_COUNT: u32 = 0x4000;
+const LA_STEP_ONE: u32 = 0x200;
+const LA_STEP_TWO: u32 = 0x100;
+const LA_GAUGE: u32 = 0x1_adb0;
+
+pub fn last_boss_arrival(cpu: &mut Cpu, o: u32) {
+    let step = cpu.read8(o + LS_STEP);
+    let next = |cpu: &mut Cpu| {
+        let s = cpu.read8(o + LS_STEP).wrapping_add(1);
+        cpu.write8(o + LS_STEP, s);
+    };
+    match step {
+        0 => {
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, LA_START_SOUND));
+            cpu.write32(o + LS_COUNT, LA_START_COUNT);
+            next(cpu);
+        }
+        1 => {
+            let t = cpu.read32(o + LS_COUNT).wrapping_add(LA_STEP_ONE);
+            cpu.write32(o + LS_COUNT, t);
+            let (from, to) = (last_table(cpu, LA_FROM), last_table(cpu, LA_MID));
+            last_place_ease(cpu, o, from, to, t);
+            if cpu.read32(o + LS_COUNT) == LS_DONE {
+                cpu.write32(o + LS_COUNT, 0);
+                next(cpu);
+            }
+        }
+        2 => {
+            let t = cpu.read32(o + LS_COUNT).wrapping_add(LA_STEP_TWO);
+            cpu.write32(o + LS_COUNT, t);
+            let (from, to) = (last_table(cpu, LA_MID), last_table(cpu, LA_TO));
+            last_place_ease(cpu, o, from, to, t);
+            for k in 0..3 {
+                let a = cpu.read16(LA_TURNS_FROM + 2 * k) as i16 as i32 as u32;
+                let b = cpu.read16(LA_TURNS_TO + 2 * k) as i16 as i32 as u32;
+                let t = cpu.read32(o + LS_COUNT);
+                let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, a, b, t));
+                cpu.write16(o + LS_TURNS + 2 * k, v as u16);
+            }
+            if cpu.read32(o + LS_COUNT) == LS_DONE {
+                cpu.write32(o + LS_COUNT, 0);
+                next(cpu);
+            }
+        }
+        3 => {
+            nested!(cpu, 0x0604_64d8, hud::boss_gauge_set(cpu, LA_GAUGE));
+            cpu.write8(o + LS_STEP, 0);
+            cpu.write8(o + LB_STEP, 1);
+        }
+        _ => {}
+    }
+}
+
+/// The last boss beaten (0x0609af58; the behaviour 0x0609a9d4 after it): bullets cleared, the
+/// scroll on, 15 pieces of wreck (0x0609adfc, 1 to 15) made, the flags' 0x80000, drawn by
+/// 0x0609b1f0, its speed (+0xac) and count (+0x80) 0 and its turns (+0x2c, +0x2e) 0.
+const LW_SPEED: u32 = 0xac;
+const LW_PIECES: u32 = 15;
+const LW_BEHAVIOUR: u32 = 0x0609_a9d4;
+const LW_DRAW: u32 = 0x0609_b1f0;
+
+pub fn last_boss_beaten(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0605_61e0, screen::bullets_cleared(cpu));
+    nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    for i in 1..=LW_PIECES {
+        nested!(cpu, 0x0609_adfc, last_wreck_make(cpu, o, i));
+    }
+    let f = cpu.read32(o + FLAGS) | LG_FLAGS;
+    cpu.write32(o + FLAGS, f);
+    cpu.write32(o + BEHAVIOUR, LW_BEHAVIOUR);
+    cpu.write32(o + CORNERS_AT, LW_DRAW);
+    cpu.write32(o + LW_SPEED, 0);
+    cpu.write32(o + LS_COUNT, 0);
+    cpu.write16(o + 0x2c, 0);
+    cpu.write16(o + 0x2e, 0);
+}
+
+/// The wrecked boss's behaviour (0x0609a9d4): its count (+0x80) up; past 0x1c1 it ends once the
+/// stage's file (+0x51 of the one at 0x06074740) is 28. Every 16 frames to 0x12b sparks at its
+/// place (0x0609ad20, by the count's low 5 bits), at 0x12c the explosion (0x06058ba4) there, at
+/// 0x14a its draw is 0x06033654. It falls: its speed (+0xac) up by 0x28f, its z (+0xa8) by that,
+/// its turns (+0x2c, +0x2e) by 0x80.
+const LWB_END: i32 = 0x1c1;
+const LWB_SPARKS: i32 = 0x12b;
+const LWB_BLAST: u32 = 0x12c;
+const LWB_DRAW: u32 = 0x14a;
+const LWB_DRAW_TO: u32 = 0x0603_3654;
+const LWB_FILE: u32 = 0x0607_4740;
+const LWB_FILE_AT: u32 = 0x51;
+const LWB_FILE_DONE: i8 = 28;
+const LWB_FALL: u32 = 0x28f;
+const LWB_TURN: u16 = 0x80;
+
+pub fn last_wreck_behaviour(cpu: &mut Cpu, o: u32) {
+    let n = cpu.read32(o + LS_COUNT).wrapping_add(1);
+    cpu.write32(o + LS_COUNT, n);
+    if n as i32 > LWB_END {
+        let file = cpu.read32(LWB_FILE);
+        if cpu.read8(file + LWB_FILE_AT) as i8 == LWB_FILE_DONE {
+            cpu.write8(o + OBJ_MODE, TO_STOP);
+            return;
+        }
+    }
+    let n = cpu.read32(o + LS_COUNT);
+    if n as i32 > LWB_SPARKS {
+        if n == LWB_BLAST {
+            let t = cpu.stack();
+            for k in [0, 4, 8] {
+                let v = cpu.read32(o + POSITION + k);
+                cpu.write32(t + k, v);
+            }
+            cpu.write32(t + 60, o);
+            nested!(cpu, 0x0605_8ba4, explosions::explosion_set(cpu, t));
+        } else if n == LWB_DRAW {
+            cpu.write32(o + CORNERS_AT, LWB_DRAW_TO);
+        }
+    } else if n & 15 == 0 {
+        nested!(cpu, 0x0609_ad20, last_spark_make(cpu, o + POSITION, n & 31));
+    }
+    let v = cpu.read32(o + LW_SPEED).wrapping_add(LWB_FALL);
+    cpu.write32(o + LW_SPEED, v);
+    let z = cpu.read32(o + LS_PLACE + 8).wrapping_add(v);
+    cpu.write32(o + LS_PLACE + 8, z);
+    for at in [0x2c, 0x2e] {
+        let a = cpu.read16(o + at).wrapping_add(LWB_TURN);
+        cpu.write16(o + at, a);
+    }
+}
+
+/// A piece of the wreck made for the boss `p` (0x0609adfc; number `i`): a plain actor of 104
+/// bytes (behaviour 0x0609aaa0, flags +0xc00000, drawn by 0x0609ab90) at the boss's place
+/// (+0xa0, as +0x4c) with its turns (words at +0x44, from the boss's +0x74), turning
+/// at random (+0x58, +0x5c, +0x60: a random less 0x8000; words +0x40 and +0x42, the turns' speeds:
+/// -256 to 255), its life +0x64 by its number (1: 240, 2: 180, 3: 120, else a random byte).
+const LWM_SIZE: u32 = 104;
+const LWM_FLAGS: u32 = 0xc0_0000;
+const LWM_BEHAVIOUR: u32 = 0x0609_aaa0;
+const LWM_DRAW: u32 = 0x0609_ab90;
+const LWM_AT: u32 = 0x4c;
+const LWM_TURNS: u32 = 0x44;
+const LWM_SPINS: u32 = 0x58;
+const LWM_TURN_SPEEDS: u32 = 0x40;
+const LWM_LIFE: u32 = 0x64;
+const LWM_INDEX: u32 = 0x3c;
+const LWM_SPIN_BASE: u32 = 0xffff_8000;
+
+pub fn last_wreck_make(cpu: &mut Cpu, p: u32, i: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, LWM_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PLAIN_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + 0x10));
+    cpu.write32(o + BEHAVIOUR, LWM_BEHAVIOUR);
+    let f = cpu.read32(o + FLAGS) | LWM_FLAGS;
+    cpu.write32(o + FLAGS, f);
+    cpu.write32(o + CORNERS_AT, LWM_DRAW);
+    cpu.write8(o + BYTE_33, 0);
+    for k in 0..3 {
+        let v = cpu.read32(p + LS_PLACE + 4 * k);
+        cpu.write32(o + LWM_AT + 4 * k, v);
+    }
+    for k in 0..3 {
+        let v = cpu.read16(p + LS_TURNS + 2 * k);
+        cpu.write16(o + LWM_TURNS + 2 * k, v);
+    }
+    cpu.write16(o + 0x2e, 0);
+    cpu.write16(o + 0x2c, 0);
+    cpu.write32(o + LWM_INDEX, i);
+    for k in 0..3 {
+        let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+        cpu.write32(o + LWM_SPINS + 4 * k, r.wrapping_add(LWM_SPIN_BASE));
+    }
+    for k in 0..2 {
+        let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+        cpu.write16(o + LWM_TURN_SPEEDS + 2 * k, ((r & 0x1ff) as u16).wrapping_add(0xff00));
+    }
+    let life = match i as i32 {
+        2 => 0xb4,
+        1 => 0xf0,
+        3 => 120,
+        _ => nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu)) & 0xff,
+    };
+    cpu.write32(o + LWM_LIFE, life);
+}
+
+/// A piece of the wreck (0x0609aaa0): every 16 frames to 128... of its life count (+0x64) sparks
+/// at its place (0x0609ad20, by the count's low 5 bits); it falls: its speed z (+0x60) up by 0x51e,
+/// its place (+0x4c) by its speeds (+0x58, +0x5c, +0x60), its turns (+0x2c, +0x2e) by the words
+/// at +0x40 and +0x42. At a count of 0x12c it ends: by its number up to 3 in a burst (0x0609acd8,
+/// at its place, by its +0x30 turn), else in a glow (0x06058f34, size 1) there.
+const LWP_FALL: u32 = 0x51e;
+const LWP_END: u32 = 0x12c;
+const LWP_GLOW_SCALE: u32 = 0x1_0000;
+const LWP_GLOW_SCALE_AT: u32 = 44;
+
+pub fn last_wreck_piece_behaviour(cpu: &mut Cpu, o: u32) {
+    let n = cpu.read32(o + LWM_LIFE);
+    if n & 15 == 0 {
+        nested!(cpu, 0x0609_ad20, last_spark_make(cpu, o + POSITION, n & 31));
+    }
+    let v = cpu.read32(o + LWM_SPINS + 8).wrapping_add(LWP_FALL);
+    cpu.write32(o + LWM_SPINS + 8, v);
+    for k in 0..2 {
+        let a = cpu.read32(o + LWM_AT + 4 * k).wrapping_add(cpu.read32(o + LWM_SPINS + 4 * k));
+        cpu.write32(o + LWM_AT + 4 * k, a);
+    }
+    let z = cpu.read32(o + LWM_AT + 8).wrapping_add(v);
+    cpu.write32(o + LWM_AT + 8, z);
+    for k in 0..2 {
+        let a = cpu.read16(o + 0x2c + 2 * k).wrapping_add(cpu.read16(o + LWM_TURN_SPEEDS + 2 * k));
+        cpu.write16(o + 0x2c + 2 * k, a);
+    }
+    let n = cpu.read32(o + LWM_LIFE).wrapping_add(1);
+    cpu.write32(o + LWM_LIFE, n);
+    if n != LWP_END {
+        return;
+    }
+    let t = cpu.stack();
+    if cpu.read32(o + LWM_INDEX) as i32 <= 3 {
+        for k in [0, 4, 8] {
+            let v = cpu.read32(o + POSITION + k);
+            cpu.write32(t + k, v);
+        }
+        let a = cpu.read16(o + ANGLE) as i16 as i32 as u32;
+        nested!(cpu, 0x0609_acd8, last_burst(cpu, t, a));
+    } else {
+        for k in [0, 4, 8] {
+            let v = cpu.read32(o + POSITION + k);
+            cpu.write32(t + 12 + k, v);
+        }
+        cpu.write32(t + 12 + LWP_GLOW_SCALE_AT, LWP_GLOW_SCALE);
+        nested!(cpu, 0x0605_8f34, explosions::glow_set(cpu, t + 12));
+    }
+    cpu.write8(o + OBJ_MODE, TO_STOP);
+}
+
+/// SGL's window and the last boss's drawing: the window's set (0x0606713c), its parts' models (kind
+/// 58's, the pair for the mark byte then the model of the pair's for the flash) put each under the
+/// matrices of its place and turns.
+const SL_CUR_WINDOW: u32 = 0x0606_713c;
+const SL_CONVERT: u32 = 0x0606_750c;
+const SL_DISP_SPRITE: u32 = 0x0607_0e22;
+const LD_KIND: u32 = 58;
+const LD_POSE_POINT: u32 = 20;
+const LD_SCREEN_POINT: u32 = 0x060a_6058;
+
+/// The model of the last boss's file at `n` (the pair's, then its first).
+fn last_model(cpu: &mut Cpu, n: u32, which: u32) -> u32 {
+    let file = cpu.read32(kind(LD_KIND));
+    let models = cpu.read32(file + F_MODELS);
+    let pair = cpu.read32(models.wrapping_add(n << 2));
+    cpu.read32(pair.wrapping_add(which << 2))
+}
+
+/// Turns by three words at `at` (x, y, z).
+fn last_turn_xyz(cpu: &mut Cpu, at: u32) {
+    for (k, f) in [SL_ROT_X, SL_ROT_Y, SL_ROT_Z].into_iter().enumerate() {
+        let a = cpu.read16(at + 2 * k as u32) as i16 as i32 as u32;
+        cpu.call(f, &[a]);
+    }
+}
+
+/// A piece of wreck's draw (0x0609ab90; `d` its sprite, +0x10): its place (+0x4c) and turns
+/// (+0x44), its index's point of the pose and its turns, its own turns (+0x2c, +0x2e), its
+/// index's model (by the byte of 0x060a6064 at twice the index) put; its place worked out into
+/// +0x14 and its depth (+0x1c) a sixteenth of its z.
+pub fn last_wreck_draw(cpu: &mut Cpu, d: u32) {
+    let o = d.wrapping_sub(0x10);
+    let t = cpu.stack();
+    cpu.call(SL_CUR_WINDOW, &[0]);
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    cpu.write32(t, d + 68);
+    let (x, y, z) = (cpu.read32(d + 60), cpu.read32(d + 64), cpu.read32(d + 68));
+    cpu.call(SL_TRANSLATE, &[x, y, z]);
+    last_turn_xyz(cpu, d + 52);
+    let i = cpu.read32(o + LWM_INDEX);
+    let pose = LPB_POSE.wrapping_add(i.wrapping_mul(LD_POSE_POINT));
+    let (x, y, z) = (cpu.read32(pose), cpu.read32(pose + 4), cpu.read32(pose + 8));
+    cpu.call(SL_TRANSLATE, &[x, y, z]);
+    last_turn_xyz(cpu, pose + 12);
+    for at in [0x2c, 0x2e] {
+        let a = cpu.read16(o + at) as i16 as i32 as u32;
+        cpu.call(if at == 0x2c { SL_ROT_X } else { SL_ROT_Y }, &[a]);
+    }
+    let mark = cpu.read8(LP_MARKS.wrapping_add(i << 1)) as i8 as i32 as u32;
+    let model = last_model(cpu, mark, 0);
+    cpu.call(SL_PUT_POLYGON, &[model]);
+    cpu.call(SL_CONVERT, &[LD_SCREEN_POINT, d + 4]);
+    let z = cpu.read32(d + 68) as i32 >> 4;
+    cpu.write32(o + 0x1c, z as u32);
+    cpu.call(SL_POP_MATRIX, &[]);
+    cpu.call(SL_CUR_WINDOW, &[1]);
+}
+
+/// A burst of smoke puffs about `p` (puffs_around: the angle `a`, the points at 0x060a771c, 8 of
+/// them) and a glow of size 2 there (0x06058f34).
+const LBU_POINTS: u32 = 0x060a_771c;
+const LBU_COUNT: u32 = 8;
+const LBU_GLOW_SCALE: u32 = 0x2_0000;
+
+pub fn last_burst(cpu: &mut Cpu, p: u32, a: u32) {
+    let t = cpu.stack();
+    nested!(cpu, 0x0606_2940, actors::puffs_around(cpu, p, a as i16 as i32 as u32, LBU_POINTS, LBU_COUNT));
+    for k in [0, 4, 8] {
+        let v = cpu.read32(p + k);
+        cpu.write32(t + k, v);
+    }
+    cpu.write32(t + 44, LBU_GLOW_SCALE);
+    nested!(cpu, 0x0605_8f34, explosions::glow_set(cpu, t));
+}
+
+/// A spark (smoke, drift_effect's) at the place `p`, a random bit from 0 to 4 dots off in x and
+/// in y (a place 2 dots back, then 0 to 4 on), colour 0x90 (0x8090 when `n` is not 0), scales
+/// 1 less its z (a byte of it), its flags a random of 0x30 more; sound 18 when `n` is not 0.
+const LSP_RANGE: u32 = 0x40_0000;
+const LSP_BACK: u32 = 0xffe0_0000;
+const LSP_ANIMATION: u32 = 0x0607_3008;
+const LSP_COLOUR: u16 = 0x90;
+const LSP_COLOUR_N: u16 = 0x8090;
+const LSP_SOUND: u32 = 18;
+
+pub fn last_spark_make(cpu: &mut Cpu, p: u32, n: u32) {
+    let t = cpu.stack();
+    let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+    let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, LSP_RANGE, r));
+    let x = cpu.read32(p).wrapping_add(LSP_BACK).wrapping_add(m);
+    cpu.write32(t, x);
+    let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+    let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, LSP_RANGE, r));
+    let y = cpu.read32(p + 4).wrapping_add(LSP_BACK).wrapping_add(m);
+    cpu.write32(t + 4, y);
+    let z = cpu.read32(p + 8);
+    cpu.write32(t + 8, z);
+    cpu.write32(t + actors::E_SCRIPT, LSP_ANIMATION);
+    cpu.write16(t + actors::E_COLOUR, if n != 0 { LSP_COLOUR_N } else { LSP_COLOUR });
+    cpu.write16(t + actors::E_ANGLE, 0);
+    cpu.write32(t + actors::E_SPEED, 0);
+    let z = cpu.read32(p + 8);
+    nested!(cpu, 0x0600_8164, clib::ashiftrt_r4::<8>(cpu, z));
+    let s = 0x1_0000u32.wrapping_sub(((z as i32) >> 8) as u32);
+    cpu.write32(t + actors::E_SCALES + 4, s);
+    cpu.write32(t + actors::E_SCALES, s);
+    let e = nested!(cpu, 0x0605_7454, actors::drift_effect(cpu, t));
+    if e == 0 {
+        return;
+    }
+    let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu)) & 0x30;
+    let f = cpu.read32(e + FLAGS) | r;
+    cpu.write32(e + FLAGS, f);
+    if n != 0 {
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, LSP_SOUND));
+    }
+}
+
+/// The last boss's turns and place put (the beginning of its two draws; `d` its sprite, +0x10):
+/// the window 0, a matrix pushed, its place (+0xa0) and its turns (words, +0x74).
+fn last_boss_place_put(cpu: &mut Cpu, d: u32) {
+    let o = d.wrapping_sub(0x10);
+    cpu.call(SL_CUR_WINDOW, &[0]);
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    let (x, y, z) = (cpu.read32(o + LS_PLACE), cpu.read32(o + LS_PLACE + 4), cpu.read32(o + LS_PLACE + 8));
+    cpu.call(SL_TRANSLATE, &[x, y, z]);
+    last_turn_xyz(cpu, d + 100);
+}
+
+/// The wrecked boss's draw (0x0609b1f0): its part 0's model (the mark byte at 0x060a6064 and its
+/// first) put at its place and turns, its point 0 of the pose and that point's turns and its own
+/// (+0x2c, +0x2e); its place worked out into +0x14.
+pub fn last_wreck_boss_draw(cpu: &mut Cpu, d: u32) {
+    last_boss_place_put(cpu, d);
+    let o = d.wrapping_sub(0x10);
+    let (x, y, z) = (cpu.read32(LPB_POSE), cpu.read32(LPB_POSE + 4), cpu.read32(LPB_POSE + 8));
+    cpu.call(SL_TRANSLATE, &[x, y, z]);
+    last_turn_xyz(cpu, LPB_POSE + 12);
+    for (at, f) in [(0x2c, SL_ROT_X), (0x2e, SL_ROT_Y)] {
+        let a = cpu.read16(o + at) as i16 as i32 as u32;
+        cpu.call(f, &[a]);
+    }
+    let mark = cpu.read8(LP_MARKS) as i8 as i32 as u32;
+    let model = last_model(cpu, mark, 0);
+    cpu.call(SL_PUT_POLYGON, &[model]);
+    cpu.call(SL_CONVERT, &[LD_SCREEN_POINT, d + 4]);
+    cpu.call(SL_POP_MATRIX, &[]);
+    cpu.call(SL_CUR_WINDOW, &[1]);
+}
+
+/// The last boss's draw (0x0609afd8; `d` its sprite, +0x10): its place and turns put, then each of
+/// the pose's 16 points' parts under its own matrix: its model (the mark byte at 0x060a6064 and,
+/// when the flash byte after it was set (cleared as read), the pair's second) put. Then
+/// the flames: on even frames a character from 0x060741f8 plus the byte the pointer at 0x6a8 of the
+/// data at 0x060741f4 gives (its colour the base's plus 48, a scale of 0x5000 and 0x280000 deep); on
+/// odd frames the pointer at 8 (colour plus 112, 0x7000, 0x320000 deep; its second word 0x100); the scale
+/// grows by a random 0 to 15 times 3 256ths; four sprites (the points 4 to 7) are put, each at
+/// its point.
+const LDR_FLAME_KIND_AT: u32 = 0x0607_41f4;
+const LDR_FLAME_CHAR: u32 = 0x0607_41f8;
+const LDR_EVEN: (u32, u32, u32, u32) = (0x6a8, 0x5000, 0x28_0000, 48);
+const LDR_ODD: (u32, u32, u32, u32) = (8, 0x7000, 0x32_0000, 112);
+const LDR_POINTS: u32 = 16;
+
+pub fn last_boss_draw(cpu: &mut Cpu, d: u32) {
+    let t = cpu.stack();
+    last_boss_place_put(cpu, d);
+    for i in 0..LDR_POINTS {
+        cpu.call(SL_PUSH_MATRIX, &[]);
+        let pose = LPB_POSE + LD_POSE_POINT * i;
+        let (x, y, z) = (cpu.read32(pose), cpu.read32(pose + 4), cpu.read32(pose + 8));
+        cpu.call(SL_TRANSLATE, &[x, y, z]);
+        last_turn_xyz(cpu, pose + 12);
+        let flag = LP_MARKS + 2 * i + 1;
+        let flash = cpu.read8(flag) as i8 != 0;
+        if flash {
+            cpu.write8(flag, 0);
+        }
+        let mark = cpu.read8(LP_MARKS + 2 * i) as i8 as i32 as u32;
+        let model = last_model(cpu, mark, flash as u32);
+        cpu.call(SL_PUT_POLYGON, &[model]);
+        cpu.call(SL_POP_MATRIX, &[]);
+    }
+    let even = cpu.read32(LOOPS) & 1 == 0;
+    let (at, scale, deep, colour) = if even { LDR_EVEN } else { LDR_ODD };
+    let c = cpu.read16(CHAR_BASE).wrapping_add(colour as u16);
+    cpu.write16(t + 20, c);
+    cpu.write16(t + 18, if even { 0 } else { 0x100 });
+    let kinds = cpu.read32(LDR_FLAME_KIND_AT);
+    let byte = cpu.read32(kinds + at);
+    let ch = cpu.read16(LDR_FLAME_CHAR).wrapping_add(cpu.read8(byte) as u16);
+    cpu.write16(t + 16, ch);
+    let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu)) & 15;
+    cpu.write32(t + 12, scale.wrapping_add((r * 3) << 8));
+    cpu.write16(t + 22, 0);
+    cpu.write16(t + 24, 2);
+    for k in 4..8 {
+        let pose = LPB_POSE + LD_POSE_POINT * k;
+        let (x, y, z) = (cpu.read32(pose), cpu.read32(pose + 4), cpu.read32(pose + 8));
+        cpu.write32(t, x);
+        cpu.write32(t + 4, y);
+        cpu.write32(t + 8, z.wrapping_add(deep));
+        cpu.call(SL_DISP_SPRITE, &[t, t + 16, 0]);
+    }
+    cpu.call(SL_POP_MATRIX, &[]);
+    cpu.call(SL_CUR_WINDOW, &[1]);
+}
+
+/// The last boss made (0x0609b2f4): a numbered actor of 232 bytes (a number of the enemies'; none
+/// free, 0), its behaviour 0x06097628, flags +0xc80000, drawn by 0x0609afd8, side 1, its place
+/// 0, its life (+0x50 and +0x88) 0x1adb0 and the three lives (+0x8c, +0x90, +0x94) 0x11170, the
+/// stage's score and rate (0x060746f0, 0x060746f4) 0, its mode and step 0, its place (+0xa0) and
+/// turns (words, +0x74 +0x76 +0x78) from 0x060a76d8's, its pick (0x060a8988) the difficulty, the
+/// poses copied in (the 16-point one at 0x060a6088 and the 13-point one at 0x060a75c8), the
+/// lighting set (the table's ramp 28, floor 10, the light turned), its kind 58's models sorted
+/// (frames 11 to 18 by 2, 0 to 6 by 1). Its number.
+const LM_SIZE: u32 = 0xe8;
+const LM_FLAGS: u32 = 0xc8_0000;
+const LM_HITS: u32 = 0x060a_5fe6;
+const LM_LIFE: u32 = 0x1_adb0;
+const LM_LIVES: u32 = 0x1_1170;
+const LM_START: u32 = 0x060a_76d8;
+const LM_POSE_FROM: u32 = 0x060a_6088;
+const LM_POSE_B_FROM: u32 = 0x060a_75c8;
+const LM_SCORE_AT: u32 = 0x0607_46f4;
+const LM_LIGHT: u32 = 0xffff_e000;
+const LM_SORT: u32 = 0x0607_4750;
+const DIFFICULTY_BYTE: u32 = 0x0600_ed84;
+const LM_SORTS: [(u32, u32); 15] = [
+    (11, 2),
+    (12, 2),
+    (13, 2),
+    (14, 2),
+    (15, 2),
+    (16, 2),
+    (17, 2),
+    (18, 2),
+    (0, 1),
+    (1, 1),
+    (2, 1),
+    (3, 1),
+    (4, 1),
+    (5, 1),
+    (6, 1),
+];
+
+pub fn last_boss_make(cpu: &mut Cpu) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, 2)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, LM_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, NUMBERED_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + 0x10));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + HITS_AT));
+    cpu.write32(o + BEHAVIOUR, 0x0609_7628);
+    for k in [0, 4, 8] {
+        cpu.write32(o + POSITION + k, 0);
+    }
+    let f = cpu.read32(o + FLAGS) | LM_FLAGS;
+    cpu.write32(o + FLAGS, f);
+    cpu.write32(o + CORNERS_AT, 0x0609_afd8);
+    cpu.write8(o + BYTE_33, 0);
+    cpu.write8(o + NUMBER, n as u8);
+    let number = cpu.read8(o + NUMBER) as i8 as i32 as u32;
+    cpu.write32(NUMBERED.wrapping_add(number << 2), o);
+    cpu.write8(o + SIDE, 1);
+    cpu.write32(o + HITS_AT, LM_HITS);
+    cpu.write32(o + LP_LIFE, LM_LIFE);
+    cpu.write32(STAGE_RATE_AT, 0);
+    cpu.write32(LM_SCORE_AT, 0);
+    cpu.write32(o + LB_LIFE, LM_LIFE);
+    for at in [0x8c, 0x90, 0x94] {
+        cpu.write32(o + at, LM_LIVES);
+    }
+    cpu.write8(o + LS_STEP, 0);
+    cpu.write32(o + LS_COUNT, 0);
+    for k in [0, 4, 8] {
+        let v = cpu.read32(LM_START + k);
+        cpu.write32(o + LS_PLACE + k, v);
+    }
+    for (k, from) in [(0, 2), (2, 6), (4, 10)] {
+        let v = cpu.read16(LM_START + from);
+        cpu.write16(o + LS_TURNS + k, v);
+    }
+    cpu.write16(o + 0x7a, 0);
+    cpu.write16(o + 0x7c, 0);
+    cpu.write8(o + 0x6f, 0);
+    cpu.write8(o + 0x6e, 0);
+    cpu.write32(o + LQ_BOSS_MODE, 0);
+    let difficulty = cpu.read8(DIFFICULTY_BYTE) as i8 as i32 as u32;
+    cpu.write32(LP_PICK_AT, difficulty);
+    for k in 0..16 {
+        for j in 0..5 {
+            let v = cpu.read32(LM_POSE_FROM + 20 * k + 4 * j);
+            cpu.write32(LPB_POSE + 20 * k + 4 * j, v);
+        }
+    }
+    for k in 0..13 {
+        for j in 0..2 {
+            let v = cpu.read32(LM_POSE_B_FROM + 8 * k + 4 * j);
+            cpu.write32(LPB_POSE_B + 8 * k + 4 * j, v);
+        }
+    }
+    nested!(cpu, 0x0606_3168, gouraud::table_ramp(cpu, 28, 28, 28));
+    nested!(cpu, 0x0606_30e0, gouraud::table_floor(cpu, 10, 10, 10));
+    nested!(cpu, 0x0606_2fe8, gouraud::light_turned(cpu, LM_LIGHT, LM_LIGHT, 0));
+    for k in [16, 20, 24] {
+        cpu.write32(LM_SORT + k, 0);
+    }
+    for (frame, sort) in LM_SORTS {
+        nested!(cpu, 0x0606_3428, gouraud::model_sort(cpu, LD_KIND, frame, sort));
+    }
+    cpu.write8(o + LB_STEP, 0);
+    cpu.read8(o + NUMBER) as i8 as i32 as u32
 }
