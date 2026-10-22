@@ -27,8 +27,9 @@ Overlays (fingerprint, game mode, marathon segments, worktree and branch, where 
 - RANK (4635b7419f6fc1a7, the ranking after a game ends, f200000: about 54 functions run; the
   marathon reports label many of them with STG05's fingerprint; ../rsgun-rank, wip-rank):
   scaffolded (rank.rs, a marker in mod.rs).
-- STG03: never runs in the marathon (its input script does not reach it); nothing to check it
-  against until a run that plays it is recorded.
+- STG03: not in the marathon as far as its evidence shows (its overlay images are STG00
+  159bb713, STG01, STG02, STG04, STG05, RANK and 1410a40e, and no latest report has an unrewritten
+  `f_..._1410a40e` call); nothing to check it against until a run that plays it is recorded.
 Check each overlay's name with `states::overlay_name` before registering (a block registered
 under the wrong name never runs; its report shows only `f_...` names). The marathon reports in
 out/port/marathon-898fd01 label an address by one overlay's fingerprint only: in a segment where
