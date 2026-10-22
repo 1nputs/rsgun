@@ -53,6 +53,7 @@ mod states;
 mod stg00;
 mod stg01;
 mod stg02;
+mod stg04;
 mod system;
 mod text;
 mod timeline;
@@ -1985,4 +1986,5 @@ pub fn register(n: &mut Natives) {
         0x0609_f53c => sgl::sl_line_window0[table] -> (),
         0x0609_f54c => sgl::sl_map_rb[a] -> (),
     }
+    // STG04.BIN's code: `rewrites! { n; overlay "STG04"; ... }` here, from its first rewrite
 }
