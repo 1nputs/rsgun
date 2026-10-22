@@ -7730,6 +7730,11 @@ pub fn sl_rpara_init_set_stg04(cpu: &mut Cpu, tables: u32) {
     rpara_init_set(cpu, tables, |cpu| nested!(cpu, 0x0608_7b30, rpara_init(cpu)));
 }
 
+/// slRparaInitSet (STG02.BIN's copy, its own rpara_init's).
+pub fn sl_rpara_init_set_stg02(cpu: &mut Cpu, tables: u32) {
+    rpara_init_set(cpu, tables, |cpu| nested!(cpu, 0x060a_2558, rpara_init(cpu)));
+}
+
 fn rpara_init_set(cpu: &mut Cpu, tables: u32, init: impl Fn(&mut Cpu)) {
     let w = cpu.gbr();
     cpu.write32(w + ROTATION_TABLES, tables);
@@ -7911,6 +7916,13 @@ pub fn sl_map_rb_table(cpu: &mut Cpu, map: u32) {
     map_table(cpu, map, VDP2_IMAGE - IMAGE + MPABRB);
 }
 
+/// slMapRB from a table (STG02.BIN's copy, its own slMapRB's).
+pub fn sl_map_rb_table_stg02(cpu: &mut Cpu, map: u32) {
+    let first = ((cpu.read8(map) as i8 as i32) << 11) as u32;
+    nested!(cpu, 0x060a_28a4, sl_map_rb(cpu, first));
+    map_table(cpu, map, VDP2_IMAGE - IMAGE + MPABRB);
+}
+
 fn map_table(cpu: &mut Cpu, map: u32, at: u32) {
     let w = cpu.gbr();
     let one_word = cpu.read16(w + IMAGE + PNCR) & 0x8000 != 0;
@@ -7970,4 +7982,67 @@ pub fn sl_line_window0(cpu: &mut Cpu, table: u32) {
     cpu.write32(w + LWTA0, v);
     cpu.leave(&[(0, v), (4, table << 1)]);
     cpu.leave_t(table & 1 != 0);
+}
+
+/// slLineScrollTable0 (STG02.BIN's copy): NBG0's line scroll table at `table` (LSTA0, in words).
+const LSTA0: u32 = 0x160;
+
+pub fn sl_line_table_nbg0(cpu: &mut Cpu, table: u32) {
+    let w = cpu.gbr();
+    cpu.write32(w + LSTA0, table >> 1);
+    cpu.leave(&[(0, table >> 1)]);
+    cpu.leave_t(table & 1 != 0);
+}
+
+/// The current rotation parameter's (slCurRpara's) screen centre moved so that the screen
+/// point (`x`, `y`) lies at its start (STG02.BIN's copy): Mx and My are the point less the
+/// table's Px and Py (words at +0x3c and +0x3e, put in the high half). GBR is the table's while
+/// it works.
+const RP_PX_WORD: u32 = 0x3c;
+const RP_PY_WORD: u32 = 0x3e;
+const RP_MY: u32 = 0x48;
+
+pub fn sl_rpara_place(cpu: &mut Cpu, x: u32, y: u32) {
+    let w = cpu.gbr();
+    let table = cpu.read32(w + ROTATION_PARAMS);
+    let px = (cpu.read16(table + RP_PX_WORD) as i16 as i32 as u32) << 16;
+    let x = x.wrapping_sub(px);
+    cpu.write32(table + RP_MX, x);
+    let py = (cpu.read16(table + RP_PY_WORD) as i16 as i32 as u32) << 16;
+    let y = y.wrapping_sub(py);
+    cpu.write32(table + RP_MY, y);
+    cpu.leave(&[(0, y), (4, x), (5, y)]);
+}
+
+/// The current rotation parameter's matrix turned by `a` (STG02.BIN's copy): its busy byte
+/// cleared while the sine and cosine are made (sl_sin_cos), then C and D the sine and minus the
+/// sine, B and E the cosine, and the busy byte set.
+const RP_TURN_SIN: u32 = 40;
+const RP_TURN_MINUS_SIN: u32 = 32;
+const RP_TURN_COS: u32 = 28;
+const RP_TURN_COS_AGAIN: u32 = 44;
+
+pub fn sl_rpara_turn(cpu: &mut Cpu, a: u32) {
+    let w = cpu.gbr();
+    cpu.write8(w + ROTATION_BUSY, 0);
+    let table = cpu.read32(w + ROTATION_PARAMS);
+    nested!(cpu, SL_SIN_COS, sl_sin_cos(cpu, a));
+    let (s, c) = (cpu.reg(4), cpu.reg(5));
+    cpu.write32(table + RP_TURN_SIN, s);
+    let minus = s.wrapping_neg();
+    cpu.write32(table + RP_TURN_MINUS_SIN, minus);
+    cpu.write32(table + RP_TURN_COS, c);
+    cpu.write8(w + ROTATION_BUSY, 1);
+    cpu.write32(table + RP_TURN_COS_AGAIN, c);
+    cpu.leave(&[(0, 1), (4, minus), (7, table)]);
+}
+
+/// The current rotation parameter's scales Kx and Ky (+0x4c, +0x50) set to `x` and `y` (STG02.BIN's
+/// copy).
+pub fn sl_rpara_scale(cpu: &mut Cpu, x: u32, y: u32) {
+    let w = cpu.gbr();
+    let table = cpu.read32(w + ROTATION_PARAMS);
+    cpu.write32(table + 76, x);
+    cpu.write32(table + 80, y);
+    cpu.leave(&[(0, table), (1, 80)]);
 }
