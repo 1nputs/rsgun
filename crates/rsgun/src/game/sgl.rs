@@ -7717,6 +7717,15 @@ const RPARA_HALF_FROM: u32 = 0x80;
 const RPARA_WORD_FROM: u32 = 0x68;
 
 pub fn sl_rpara_init_set(cpu: &mut Cpu, tables: u32) {
+    rpara_init_set(cpu, tables, |cpu| nested!(cpu, 0x0608_0ec8, rpara_init(cpu)));
+}
+
+/// slRparaInitSet (STG01.BIN's copy, its own rpara_init's).
+pub fn sl_rpara_init_set_stg01(cpu: &mut Cpu, tables: u32) {
+    rpara_init_set(cpu, tables, |cpu| nested!(cpu, 0x0609_f260, rpara_init(cpu)));
+}
+
+fn rpara_init_set(cpu: &mut Cpu, tables: u32, init: impl Fn(&mut Cpu)) {
     let w = cpu.gbr();
     cpu.write32(w + ROTATION_TABLES, tables);
     cpu.write32(w + RPTA, tables >> 1);
@@ -7726,7 +7735,7 @@ pub fn sl_rpara_init_set(cpu: &mut Cpu, tables: u32) {
     cpu.leave(&[(2, half), (3, word)]);
     for table in [RPARA_A, RPARA_B] {
         cpu.leave(&[(0, table)]);
-        nested!(cpu, 0x0608_0ec8, rpara_init(cpu));
+        init(cpu);
     }
     // its GBR, pushed at the start, back
     cpu.sh2.gbr = w;
@@ -7878,4 +7887,82 @@ pub fn sl_map_rb(cpu: &mut Cpu, a: u32) {
     }
     cpu.leave(&[(0, v), (1, 63), (2, offset), (3, s), (4, page)]);
     cpu.leave_t(s & 1 == 0);
+}
+
+/// slMapRA and slMapRB from a table (STG01.BIN's copies): the rotation parameter's 16 planes' maps
+/// from `map` (a byte each, the map's number in 2 KB pages): the first set as the parameter's map
+/// (RA through slMapRbg0, RB through the copy's slMapRB), then each pair of planes' pages packed
+/// in a word of MPABRA's or MPABRB's image (halved with 2-word pattern names, quartered with 1x1
+/// cells: RBG0's pattern name control's top bit and character size).
+pub fn sl_map_ra_table(cpu: &mut Cpu, map: u32) {
+    let first = (cpu.read8(map) as u32) << 11;
+    nested!(cpu, 0x0607_1c4c, sl_map_rbg0(cpu, first));
+    map_table(cpu, map, VDP2_IMAGE - IMAGE + MPABRA);
+}
+
+pub fn sl_map_rb_table(cpu: &mut Cpu, map: u32) {
+    let first = ((cpu.read8(map) as i8 as i32) << 11) as u32;
+    nested!(cpu, 0x0609_f54c, sl_map_rb(cpu, first));
+    map_table(cpu, map, VDP2_IMAGE - IMAGE + MPABRB);
+}
+
+fn map_table(cpu: &mut Cpu, map: u32, at: u32) {
+    let w = cpu.gbr();
+    let one_word = cpu.read16(w + IMAGE + PNCR) & 0x8000 != 0;
+    let size = ((cpu.read8(w + CHCTLB) as i8 as i32 as u32) << 1) | one_word as u32;
+    let (mut a, mut b) = (0, 0);
+    for k in 0..8 {
+        a = cpu.read8(map + 2 * k) as u32;
+        b = cpu.read8(map + 2 * k + 1) as u32;
+        if size & 2 == 0 {
+            a >>= 2;
+            b >>= 2;
+        }
+        if size & 1 == 0 {
+            a >>= 1;
+            b >>= 1;
+        }
+        cpu.write16(at + 2 * k, (b << 8 | a) as u16);
+    }
+    cpu.leave(&[(0, size), (1, 0), (2, b << 8 | a), (3, at + 16), (4, b << 8), (6, map + 16)]);
+    cpu.leave_t(true);
+}
+
+/// The colour offsets enabled on the screens of `screens`, offset B on them (CLOFEN and CLOFSL
+/// both ORed with it; STG01.BIN's copy).
+pub fn sl_col_offset_b_on(cpu: &mut Cpu, screens: u32) {
+    let w = cpu.gbr();
+    let s = screens & 0xffff;
+    let v = cpu.read32(w + CLOFEN) | s | s << 16;
+    cpu.write32(w + CLOFEN, v);
+    cpu.leave(&[(0, v), (4, s << 16)]);
+}
+
+/// slScrWindow0 (STG01.BIN's copy): window 0's corners (x doubled unless the TV mode is
+/// high-resolution: TVMD's bit 1) in WPSX0-WPEY0, its line window table none (LWTA0).
+const WPSX0: u32 = 0x180;
+const WPEX0: u32 = 0x184;
+const LWTA0: u32 = 0x198;
+
+pub fn sl_scr_window0(cpu: &mut Cpu, left: u32, top: u32, right: u32, bottom: u32) {
+    let w = cpu.gbr();
+    let hi = cpu.read16(w + TVMD) & 2 != 0;
+    // T: TVMD's test, or the last doubling's carry
+    let t = !hi && right & 0x8000_0000 != 0;
+    let (left, right) = if hi { (left, right) } else { (left << 1, right << 1) };
+    cpu.write32(w + WPSX0, left << 16 | top & 0xffff);
+    cpu.write32(w + WPEX0, right << 16 | bottom & 0xffff);
+    cpu.write32(w + LWTA0, 0);
+    cpu.leave(&[(0, 0), (4, left), (6, right)]);
+    cpu.leave_t(t);
+}
+
+/// slLineWindow0 (STG01.BIN's copy): window 0's line window table at `table` (LWTA0: in words,
+/// its top bit kept as the enable).
+pub fn sl_line_window0(cpu: &mut Cpu, table: u32) {
+    let w = cpu.gbr();
+    let v = (table as i32 >> 1) as u32;
+    cpu.write32(w + LWTA0, v);
+    cpu.leave(&[(0, v), (4, table << 1)]);
+    cpu.leave_t(table & 1 != 0);
 }
