@@ -58,7 +58,10 @@ into the next brief for that overlay.
    mod.rs (a shared module change is its own commit); commit messages (subject, blank line,
    body, Co-Authored-By; no session links or names).
 2. The reports the agent names: every new function present as `overlay::name` with calls > 0 and
-   no `leaves memory otherwise` line (`grep -c 'stgNN::'`, `grep -c otherwise`).
+   no `leaves memory otherwise` line (`grep -c 'stgNN::'`, `grep -c otherwise`) in the LAST run of
+   each segment: list every report of the batch's runs, not only the ones the agent quotes. A fix
+   checked only by a short repro is rerun on the full segment before merging (an STG02 batch was
+   merged with its f090000 report still diverging; the full rerun confirmed the fix afterwards).
 3. No ROM data copied in: small constants the code uses are fine (literal-pool values, a few
    immediates); tables are read where the game keeps them. `grep "^const .*: \["` and look.
 4. Read a function or two for style and sense (docs a reader understands, fields named).
