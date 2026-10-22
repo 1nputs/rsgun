@@ -9,7 +9,8 @@ way the work is split, briefed, checked and merged.
 - **One orchestrator** (the main session, the strongest model available). It writes no overlay
   functions itself once batch agents are running. It scaffolds, briefs, reviews, merges, keeps
   the docs, and fixes what a batch could not.
-- **Two coding agents** at a time (Sonnet 5.5), each a fresh subagent for **one batch**: about
+- **Up to three coding agents** at a time (Sonnet 5.5), one per overlay, each a fresh subagent
+  for **one batch**: about
   20-25 functions of one overlay in address order, written, checked in compare mode, committed on
   its branch, reported, then the agent ends. The next batch is a new agent with a new brief, so
   no agent's context grows and usage stays even (long-lived agents hit the hourly limit; batch
@@ -17,8 +18,14 @@ way the work is split, briefed, checked and merged.
 - Each overlay has its own worktree and branch, `git worktree add ../rsgun-stgNN -b wip-stgNN main`,
   with `out/` and `build/` symlinked from the main checkout (`ln -s <main>/out <wt>/out`, same for
   build). One agent per worktree at a time.
-- Compare jobs: at most half the machine's cores in all. On 16 cores: each coding agent at most 3
-  at once, the orchestrator at most 2.
+- Compare jobs: a batch's time is mostly waiting on compare segments (16-40 minutes each), so
+  spare cores buy another agent, not more jobs per agent. With the machine to itself, leave two
+  cores for builds: on 16 cores, 14 jobs (4 per coding agent, 2 for the orchestrator); a job takes
+  about 100 MB. On a shared machine, half the cores.
+
+Measured (22 October, 7 Sonnet batches): about 25 functions, 55 minutes and 300k agent tokens a
+batch; two agents together about twice the rate of the orchestrator writing alone, with its
+context kept for review.
 
 ## Scaffolding (orchestrator, before an overlay's first batch)
 
