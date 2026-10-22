@@ -8046,3 +8046,161 @@ pub fn sl_rpara_scale(cpu: &mut Cpu, x: u32, y: u32) {
     cpu.write32(table + 80, y);
     cpu.leave(&[(0, table), (1, 80)]);
 }
+
+/// MAC.L @Rm+,@Rn+: the two words' signed product added to the 64-bit sum (held to 48 bits when
+/// SR's S is set), both pointers moved on a word.
+fn mac_l(cpu: &mut Cpu, sum: i64, m: &mut u32, n: &mut u32) -> i64 {
+    let b = cpu.read32(*m);
+    let a = cpu.read32(*n);
+    *n = n.wrapping_add(4);
+    *m = m.wrapping_add(4);
+    mac(cpu, sum, b, a)
+}
+
+/// SGL's matrix multiply (STG05.BIN's copy, 0x0608da34): the matrix at `r4` (3 rows of four words,
+/// 16.16) into the current matrix, in place, row by row as MAC.L adds the products; the
+/// registers, MAC and the two words of stack it pushes (and leaves) as the SH-2 code leaves them.
+/// Written step for step from the SH-2 code (tools/port/asm2rs.py).
+#[allow(unused_assignments, unused_variables, unused_mut, clippy::all)]
+pub fn sl_multi_matrix_stg05(cpu: &mut Cpu, b: u32) {
+    let w = cpu.gbr();
+    let [mut r0, mut r1, mut r2, mut r3, _, mut r5, mut r6, mut r7, ..] = cpu.sh2.r;
+    let mut r4 = b;
+    let mut r15 = cpu.stack();
+    let mut mac = (((cpu.sh2.mach as u64) << 32) | cpu.sh2.macl as u64) as i64;
+    r0 = cpu.read32(w.wrapping_add(28)); // 0608da34 mov.l @(28,gbr),r0
+    r6 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 0608da36 mov.l @r4+,r6
+    r7 = cpu.read32(r0); r0 = r0.wrapping_add(4); // 0608da38 mov.l @r0+,r7
+    mac = r6 as i32 as i64 * r7 as i32 as i64; // 0608da3a dmuls.l r6,r7
+    r1 = r0; // 0608da3c mov r0,r1
+    r1 = r1.wrapping_add(-4i32 as u32); // 0608da3e add #-4,r1
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608da40 mac.l @r4+,@r0+
+    r2 = cpu.read32(r1.wrapping_add(8)); // 0608da42 mov.l @(8,r1),r2
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608da44 mac.l @r4+,@r0+
+    r0 = r0.wrapping_add(-8i32 as u32); // 0608da46 add #-8,r0
+    r6 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 0608da48 mov.l @r4+,r6
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r2); // 0608da4a mov.l r2,@-r15
+    r2 = (mac >> 32) as u32; // 0608da4c sts mach,r2
+    r3 = mac as u32; // 0608da4e sts macl,r3
+    mac = r6 as i32 as i64 * r7 as i32 as i64; // 0608da50 dmuls.l r6,r7
+    r3 = (r2 << 16) | (r3 >> 16); // 0608da52 xtrct r2,r3
+    cpu.write32(r1.wrapping_add(0), r3); // 0608da54 mov.l r3,@(0,r1)
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608da56 mac.l @r4+,@r0+
+    r0 = cpu.read32(r1.wrapping_add(4)); // 0608da58 mov.l @(4,r1),r0
+    r2 = r15; // 0608da5a mov r15,r2
+    mac = mac_l(cpu, mac, &mut r4, &mut r2); // 0608da5c mac.l @r4+,@r2+
+    r6 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 0608da5e mov.l @r4+,r6
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r0); // 0608da60 mov.l r0,@-r15
+    r2 = (mac >> 32) as u32; // 0608da62 sts mach,r2
+    r3 = mac as u32; // 0608da64 sts macl,r3
+    mac = r6 as i32 as i64 * r7 as i32 as i64; // 0608da66 dmuls.l r6,r7
+    r3 = (r2 << 16) | (r3 >> 16); // 0608da68 xtrct r2,r3
+    r2 = r15; // 0608da6a mov r15,r2
+    mac = mac_l(cpu, mac, &mut r4, &mut r2); // 0608da6c mac.l @r4+,@r2+
+    cpu.write32(r1.wrapping_add(4), r3); // 0608da6e mov.l r3,@(4,r1)
+    mac = mac_l(cpu, mac, &mut r4, &mut r2); // 0608da70 mac.l @r4+,@r2+
+    r6 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 0608da72 mov.l @r4+,r6
+    r2 = (mac >> 32) as u32; // 0608da74 sts mach,r2
+    r3 = mac as u32; // 0608da76 sts macl,r3
+    mac = r6 as i32 as i64 * r7 as i32 as i64; // 0608da78 dmuls.l r6,r7
+    r3 = (r2 << 16) | (r3 >> 16); // 0608da7a xtrct r2,r3
+    cpu.write32(r1.wrapping_add(8), r3); // 0608da7c mov.l r3,@(8,r1)
+    mac = mac_l(cpu, mac, &mut r4, &mut r15); // 0608da7e mac.l @r4+,@r15+
+    r5 = cpu.read32(r1.wrapping_add(12)); // 0608da80 mov.l @(12,r1),r5
+    r0 = r1; // 0608da82 mov r1,r0
+    mac = mac_l(cpu, mac, &mut r4, &mut r15); // 0608da84 mac.l @r4+,@r15+
+    r4 = r4.wrapping_add(-48i32 as u32); // 0608da86 add #-48,r4
+    r7 = cpu.read32(r1.wrapping_add(16)); // 0608da88 mov.l @(16,r1),r7
+    r6 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 0608da8a mov.l @r4+,r6
+    r2 = (mac >> 32) as u32; // 0608da8c sts mach,r2
+    r3 = mac as u32; // 0608da8e sts macl,r3
+    mac = r6 as i32 as i64 * r7 as i32 as i64; // 0608da90 dmuls.l r6,r7
+    r0 = r0.wrapping_add(20i32 as u32); // 0608da92 add #20,r0
+    r3 = (r2 << 16) | (r3 >> 16); // 0608da94 xtrct r2,r3
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608da96 mac.l @r4+,@r0+
+    r3 = r3.wrapping_add(r5); // 0608da98 add r5,r3
+    cpu.write32(r1.wrapping_add(12), r3); // 0608da9a mov.l r3,@(12,r1)
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608da9c mac.l @r4+,@r0+
+    r2 = cpu.read32(r1.wrapping_add(24)); // 0608da9e mov.l @(24,r1),r2
+    r6 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 0608daa0 mov.l @r4+,r6
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r2); // 0608daa2 mov.l r2,@-r15
+    r2 = (mac >> 32) as u32; // 0608daa4 sts mach,r2
+    r3 = mac as u32; // 0608daa6 sts macl,r3
+    mac = r6 as i32 as i64 * r7 as i32 as i64; // 0608daa8 dmuls.l r6,r7
+    r3 = (r2 << 16) | (r3 >> 16); // 0608daaa xtrct r2,r3
+    r0 = r0.wrapping_add(-8i32 as u32); // 0608daac add #-8,r0
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608daae mac.l @r4+,@r0+
+    r2 = cpu.read32(r1.wrapping_add(20)); // 0608dab0 mov.l @(20,r1),r2
+    cpu.write32(r1.wrapping_add(16), r3); // 0608dab2 mov.l r3,@(16,r1)
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608dab4 mac.l @r4+,@r0+
+    r6 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 0608dab6 mov.l @r4+,r6
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r2); // 0608dab8 mov.l r2,@-r15
+    r0 = r15; // 0608daba mov r15,r0
+    r2 = (mac >> 32) as u32; // 0608dabc sts mach,r2
+    r3 = mac as u32; // 0608dabe sts macl,r3
+    mac = r6 as i32 as i64 * r7 as i32 as i64; // 0608dac0 dmuls.l r6,r7
+    r3 = (r2 << 16) | (r3 >> 16); // 0608dac2 xtrct r2,r3
+    cpu.write32(r1.wrapping_add(20), r3); // 0608dac4 mov.l r3,@(20,r1)
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608dac6 mac.l @r4+,@r0+
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608dac8 mac.l @r4+,@r0+
+    r6 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 0608daca mov.l @r4+,r6
+    r2 = (mac >> 32) as u32; // 0608dacc sts mach,r2
+    r3 = mac as u32; // 0608dace sts macl,r3
+    mac = r6 as i32 as i64 * r7 as i32 as i64; // 0608dad0 dmuls.l r6,r7
+    r3 = (r2 << 16) | (r3 >> 16); // 0608dad2 xtrct r2,r3
+    cpu.write32(r1.wrapping_add(24), r3); // 0608dad4 mov.l r3,@(24,r1)
+    mac = mac_l(cpu, mac, &mut r4, &mut r15); // 0608dad6 mac.l @r4+,@r15+
+    r5 = cpu.read32(r1.wrapping_add(28)); // 0608dad8 mov.l @(28,r1),r5
+    mac = mac_l(cpu, mac, &mut r4, &mut r15); // 0608dada mac.l @r4+,@r15+
+    r4 = r4.wrapping_add(-48i32 as u32); // 0608dadc add #-48,r4
+    r6 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 0608dade mov.l @r4+,r6
+    r7 = cpu.read32(r1.wrapping_add(32)); // 0608dae0 mov.l @(32,r1),r7
+    r2 = (mac >> 32) as u32; // 0608dae2 sts mach,r2
+    r3 = mac as u32; // 0608dae4 sts macl,r3
+    mac = r6 as i32 as i64 * r7 as i32 as i64; // 0608dae6 dmuls.l r6,r7
+    r0 = r1; // 0608dae8 mov r1,r0
+    r0 = r0.wrapping_add(36i32 as u32); // 0608daea add #36,r0
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608daec mac.l @r4+,@r0+
+    r3 = (r2 << 16) | (r3 >> 16); // 0608daee xtrct r2,r3
+    r3 = r3.wrapping_add(r5); // 0608daf0 add r5,r3
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608daf2 mac.l @r4+,@r0+
+    cpu.write32(r1.wrapping_add(28), r3); // 0608daf4 mov.l r3,@(28,r1)
+    r6 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 0608daf6 mov.l @r4+,r6
+    r0 = r0.wrapping_add(-8i32 as u32); // 0608daf8 add #-8,r0
+    r2 = (mac >> 32) as u32; // 0608dafa sts mach,r2
+    r3 = mac as u32; // 0608dafc sts macl,r3
+    mac = r6 as i32 as i64 * r7 as i32 as i64; // 0608dafe dmuls.l r6,r7
+    r3 = (r2 << 16) | (r3 >> 16); // 0608db00 xtrct r2,r3
+    cpu.write32(r1.wrapping_add(32), r3); // 0608db02 mov.l r3,@(32,r1)
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608db04 mac.l @r4+,@r0+
+    r2 = cpu.read32(r1.wrapping_add(36)); // 0608db06 mov.l @(36,r1),r2
+    r3 = cpu.read32(r1.wrapping_add(40)); // 0608db08 mov.l @(40,r1),r3
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608db0a mac.l @r4+,@r0+
+    r6 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 0608db0c mov.l @r4+,r6
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r3); // 0608db0e mov.l r3,@-r15
+    r15 = r15.wrapping_sub(4); cpu.write32(r15, r2); // 0608db10 mov.l r2,@-r15
+    r2 = (mac >> 32) as u32; // 0608db12 sts mach,r2
+    r3 = mac as u32; // 0608db14 sts macl,r3
+    mac = r6 as i32 as i64 * r7 as i32 as i64; // 0608db16 dmuls.l r6,r7
+    r0 = r15; // 0608db18 mov r15,r0
+    r3 = (r2 << 16) | (r3 >> 16); // 0608db1a xtrct r2,r3
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608db1c mac.l @r4+,@r0+
+    cpu.write32(r1.wrapping_add(36), r3); // 0608db1e mov.l r3,@(36,r1)
+    mac = mac_l(cpu, mac, &mut r4, &mut r0); // 0608db20 mac.l @r4+,@r0+
+    r6 = cpu.read32(r4); r4 = r4.wrapping_add(4); // 0608db22 mov.l @r4+,r6
+    r2 = (mac >> 32) as u32; // 0608db24 sts mach,r2
+    r3 = mac as u32; // 0608db26 sts macl,r3
+    mac = r6 as i32 as i64 * r7 as i32 as i64; // 0608db28 dmuls.l r6,r7
+    r3 = (r2 << 16) | (r3 >> 16); // 0608db2a xtrct r2,r3
+    cpu.write32(r1.wrapping_add(40), r3); // 0608db2c mov.l r3,@(40,r1)
+    mac = mac_l(cpu, mac, &mut r4, &mut r15); // 0608db2e mac.l @r4+,@r15+
+    r5 = cpu.read32(r1.wrapping_add(44)); // 0608db30 mov.l @(44,r1),r5
+    mac = mac_l(cpu, mac, &mut r4, &mut r15); // 0608db32 mac.l @r4+,@r15+
+    r2 = (mac >> 32) as u32; // 0608db34 sts mach,r2
+    r3 = mac as u32; // 0608db36 sts macl,r3
+    r3 = (r2 << 16) | (r3 >> 16); // 0608db38 xtrct r2,r3
+    r3 = r3.wrapping_add(r5); // 0608db3a add r5,r3
+    cpu.write32(r1.wrapping_add(44), r3); // 0608db3e mov.l r3,@(44,r1)
+    cpu.leave(&[(0, r0), (1, r1), (2, r2), (3, r3), (4, r4), (5, r5), (6, r6), (7, r7)]);
+    cpu.leave_mac(mac);
+}

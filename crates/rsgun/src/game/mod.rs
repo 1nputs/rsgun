@@ -289,8 +289,8 @@ const SR_PUSH: u8 = 20;
 /// and the others (and GBR, which the rewrite writes itself); slScrAutoDisp pushes PR first, then
 /// the others, and takes its frame by a subtraction; SGL's interrupt handlers save what they use,
 /// GBR, MACH, MACL and SR among it; SGL's routines run block by block (asm2sm.py) make their own
-/// pushes.
-const PROLOGUES: [(u32, &[u8], u32); 13] = [
+/// pushes; STG05's matrix multiply pushes and pops its scratch words as it goes.
+const PROLOGUES: [(u32, &[u8], u32); 14] = [
     (0x0606_e9fc, &[6, 7], 0),
     (0x0607_10b0, &[PR_PUSH, 9, 8], 0),
     (0x0606_e50c, &[8, PR_PUSH, 14, 13, 12, 11, 10, 9], 0),
@@ -304,6 +304,7 @@ const PROLOGUES: [(u32, &[u8], u32); 13] = [
     (0x0603_3658, &[], 0),
     (0x0603_3884, &[], 0),
     (0x0603_4cb0, &[PR_PUSH], 0),
+    (0x0608_da34, &[], 0),
 ];
 
 impl Prologue {
@@ -2546,6 +2547,7 @@ pub fn register(n: &mut Natives) {
         0x0608_d85c => stg05::attack_make[entry] -> u32,
         0x0608_d948 => stg05::attack_run[o] -> (),
         0x0608_da04 => stg05::attack_start[] -> u32,
+        0x0608_da34 => sgl::sl_multi_matrix_stg05[b] -> (),
         0x0608_db44 => sgl::sl_rpara_init_set_stg04[tables] -> (),
         0x0608_db78 => sgl::rpara_init[] -> (),
         0x0608_dbb4 => sgl::sl_make_ktable[table] -> (),
