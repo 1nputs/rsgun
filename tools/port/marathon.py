@@ -5,6 +5,13 @@ leave when their time runs out, so the game goes on to the end. For evidence of 
 (tools/port/check.sh's evidence runs), not for scoring.
 
     python3 tools/port/marathon.py [--frames N] > out/evidence/marathon-input.txt
+
+With --stage4 the same script takes stage 4 (STG03) at STG01's end instead of stage 2: the
+controls let go from 65500 and down pressed once at 66900, while the choice is open (it opens
+about 66800 and takes the cursor's place after 300 frames or at a button: the script's own from
+67000):
+    python3 tools/port/marathon.py --frames 230000 --stage4 > out/evidence/route4-input.txt
+(its run starts from the marathon's f060000 state; the plain script is --frames 230000 too).
 """
 import sys
 
@@ -18,6 +25,8 @@ WEAVE = ["left", "", "right", "", "right", "up", "left", "down"]
 def main():
     frames = 150_000
     args = sys.argv[1:]
+    stage4 = "--stage4" in args
+    args = [a for a in args if a != "--stage4"]
     if args[:1] == ["--frames"]:
         frames = int(args[1])
     events = {}  # frame -> player 1's controls from then on
@@ -49,6 +58,9 @@ def main():
             hold(f + 24, controls)
         step += 1
         f += 45
+    if stage4:
+        events = {f: c for f, c in events.items() if not 65500 <= f < 67000}
+        events.update({65500: "", 66900: "down", 66904: ""})
     print("# Through the whole game without skill: made by tools/port/marathon.py")
     for frame in sorted(events):
         print(f"{frame} {events[frame]}".rstrip())
