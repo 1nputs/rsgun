@@ -8501,3 +8501,662 @@ pub fn wb_downed(cpu: &mut Cpu, o: u32) {
         cpu.write8(o + OBJ_MODE, TO_STOP);
     }
 }
+
+// ---- the winged boss's arms -----------------------------------------------------------------------
+
+/// An arm (its own object; +0x6c the boss): which arm (+0x70, a byte: 0 and 3 the outer pair, which
+/// spit fire, 1 and 2 the inner, which breathe), its step (+0x71, a byte), its turns' rates and their
+/// goals (x: +0x84, +0x86; y: +0x88, +0x8a; z: +0x8c, +0x8e), its fall once downed (+0x80), a count
+/// (+0x164, a word), its hit flags (+0x15c). Each arm's place on the boss (12 bytes from +0x9c),
+/// its down flag on the boss (a byte from +0x88), and the boss's slots its attacks are kept in.
+const ARM_OF: u32 = 0x6c;
+const ARM_WHICH: u32 = 0x70;
+const ARM_STEP: u32 = 0x71;
+const ARM_TURN_X: u32 = 0x84;
+const ARM_TURN_Y: u32 = 0x88;
+const ARM_TURN_Z: u32 = 0x8c;
+const ARM_FALL: u32 = 0x80;
+const ARM_COUNT: u32 = 0x164;
+const ARM_HIT_FLAGS: u32 = 0x15c;
+const WB_ARM_PLACES: u32 = 0x9c;
+const WB_ARM_DOWN: u32 = 0x88;
+const WB_ARM_BELOW: u32 = 0xb0_0000;
+const WB_SLOT_1: u32 = 0x80;
+const WB_SLOT_2: u32 = 0x82;
+const WB_SLOT_3: u32 = 0x84;
+const WB_SLOT_4: u32 = 0x86;
+/// The acts that set each arm going (in slots 1-4: 0x11, 0x21, 0x31, 0x41).
+const ARM_ACTS: [u16; 4] = [0x11, 0x21, 0x31, 0x41];
+/// The inner arms' breath: the turn they rear back to (either way), the count it lasts.
+const ARM_REAR: [u32; 2] = [0x600, 0xffff_fa00];
+const ARM_BREATH_TIME: u16 = 160;
+/// The outer arms' fireballs (shells: bullets.rs's shell_set, kind 42 with frames 4 on): their
+/// sound, every so many frames by difficulty (bytes), their speed by difficulty, their flags.
+const ARM_SHOT_SOUND: u32 = 28;
+const ARM_SHOT_EVERY: u32 = 0x060a_088c;
+const ARM_SHOT_SPEEDS: u32 = 0x060a_08bc;
+const ARM_SHOT_FLAGS: u32 = 0x4_0000;
+const ARM_SHOT_KIND: u8 = 42;
+const ARM_SHOT_FRAME: u8 = 4;
+const ARM_SHOT_COLOUR: u16 = 0x30;
+const SHELL_LAUNCH: u32 = 0x2e;
+const SHELL_SPEED: u32 = 0x30;
+const SHELL_LAUNCH_SPEED: u32 = 0x34;
+const SHELL_KIND: u32 = 0x38;
+const SHELL_FUSE: u32 = 0x7c;
+const SHELL_BEHAVIOUR: u32 = 0x0608_e798;
+const SHELL_COLOURS: u32 = 0x28;
+/// The sounds of an arm and of a wing knocked off.
+const ARM_DOWN_SOUND: u32 = 17;
+
+/// Step 0: held until the boss fights (its step 4); then 1.
+pub fn arm_wait(cpu: &mut Cpu, o: u32) {
+    let boss = cpu.read32(o + ARM_OF);
+    if cpu.read8(boss + WB_STEP) == 4 {
+        cpu.write8(o + ARM_STEP, 1);
+    }
+}
+
+/// An outer arm's fireball: a shell whose fuse is never lit, cycling frames 4-35.
+pub fn arm_shot_behaviour(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0605_547c, bullets::shell_exec(cpu, o));
+    let frame = (cpu.read8(GAME_FRAMES_LOW) & 31) + ARM_SHOT_FRAME;
+    cpu.write8(o + SPRITE_FRAME, frame);
+    cpu.write8(o + SHELL_FUSE, 0);
+}
+
+/// Step 1: fighting, its back to the player. An inner arm rears back (its y turn's rate toward
+/// 0x600 either way, by 16); once its act is due (0x21 or 0x31), it is cleared, the arm breathes
+/// (step 2, its z turn's goal none, 160 frames). An outer arm turns its x toward 0x4800 less up to
+/// 0xfff at random, its y toward 0x1000 (arm 3: 0x2000), and sways (its z toward 4 dots, arm 3 -3,
+/// by 1/32); while its act (0x11 or 0x41) is kept, or the inner arm beside it is down, every so
+/// many frames a fireball from its mouth, about its back at random within 0x1000 either way, with a
+/// glow.
+pub fn arm_fight(cpu: &mut Cpu, o: u32) {
+    let boss = cpu.read32(o + ARM_OF);
+    let which = cpu.read8(o + ARM_WHICH);
+    if which > 3 {
+        return;
+    }
+    let player = nested!(cpu, 0x0605_6a58, aim::nearer_player(cpu, o + FLAGS));
+    let a = nested!(cpu, 0x0604_5e30, aim::angle_to(cpu, o, player));
+    let from = cpu.read16(o + TURN_Z) as u32;
+    let to = a.wrapping_add(0x8000) & 0xffff;
+    nested!(cpu, 0x0608_e100, wb_turn_toward(cpu, o + ARM_TURN_Z, o + ARM_TURN_Z + 2, from, to));
+    if which == 1 || which == 2 {
+        let acts = [cpu.read16(boss + WB_SLOT_2), cpu.read16(boss + WB_SLOT_3)];
+        let to = ARM_REAR[which as usize - 1];
+        let v = cpu.read16(o + ARM_TURN_Y) as i16 as i32 as u32;
+        let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, to, 16));
+        cpu.write16(o + ARM_TURN_Y, v as u16);
+        let which = cpu.read8(o + ARM_WHICH);
+        if (which == 1 && acts[0] == ARM_ACTS[1]) || (which == 2 && acts[1] == ARM_ACTS[2]) {
+            cpu.write16(boss + WB_SLOT_1 + 2 * which as u32, 0);
+            cpu.write8(o + ARM_STEP, 2);
+            cpu.write16(o + ARM_TURN_Z + 2, 0);
+            cpu.write16(o + ARM_COUNT, ARM_BREATH_TIME);
+            nested!(cpu, 0x0608_d7c0, breath_set(cpu, o));
+        }
+        return;
+    }
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    let from = cpu.read16(o + TURN_X) as u32;
+    let to = 0x4800u32.wrapping_sub(r & 0xfff) & 0xffff;
+    nested!(cpu, 0x0608_e100, wb_turn_toward(cpu, o + ARM_TURN_X, o + ARM_TURN_X + 2, from, to));
+    let acts = [cpu.read16(boss + WB_SLOT_1), cpu.read16(boss + WB_SLOT_4)];
+    let third = cpu.read8(o + ARM_WHICH) == 3;
+    let (to, sway) = if third { (0x2000, 0xfffd_0000) } else { (0x1000, 0x4_0000) };
+    let from = cpu.read16(o + TURN_Y) as u32;
+    nested!(cpu, 0x0608_e100, wb_turn_toward(cpu, o + ARM_TURN_Y, o + ARM_TURN_Y + 2, from, to));
+    let z = cpu.read32(o + POSITION + 8);
+    let z = nested!(cpu, 0x0604_6168, actors::approach(cpu, z, sway, 0x800));
+    cpu.write32(o + POSITION + 8, z);
+    let firing = match cpu.read8(o + ARM_WHICH) {
+        0 => acts[0] == ARM_ACTS[0] || cpu.read8(boss + WB_ARM_DOWN + 1) != 0,
+        3 => acts[1] == ARM_ACTS[3] || cpu.read8(boss + WB_ARM_DOWN + 2) != 0,
+        _ => false,
+    };
+    if !firing {
+        return;
+    }
+    let n = cpu.read16(o + ARM_COUNT).wrapping_sub(1);
+    cpu.write16(o + ARM_COUNT, n);
+    if n as i16 > 0 {
+        return;
+    }
+    let difficulty = cpu.read8(DIFFICULTY) as i8 as i32 as u32;
+    let every = cpu.read8(ARM_SHOT_EVERY.wrapping_add(difficulty));
+    cpu.write16(o + ARM_COUNT, every as u16);
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, ARM_SHOT_SOUND));
+    let d = cpu.stack();
+    let number = cpu.read8(o + NUMBER);
+    cpu.write8(d + bullets::S_NUMBER, number);
+    for k in [0, 4] {
+        let v = cpu.read32(o + ARM_MOUTH + k);
+        cpu.write32(d + bullets::S_POSITION + k, v);
+    }
+    cpu.write32(d + 8, 0);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    let angle = cpu.read16(o + TURN_Z).wrapping_add(0x1000).wrapping_sub((r & 0x1fff) as u16).wrapping_add(0x8000);
+    cpu.write16(d + bullets::S_ANGLE, angle);
+    cpu.write32(d + SHELL_SPEED, 0x1_0000);
+    cpu.write16(d + SHELL_LAUNCH, angle);
+    cpu.write16(d + SHELL_KIND, 0);
+    let difficulty = cpu.read8(DIFFICULTY) as i8 as i32 as u32;
+    let speed = cpu.read32(ARM_SHOT_SPEEDS.wrapping_add(difficulty << 2));
+    cpu.write32(d + SHELL_LAUNCH_SPEED, speed);
+    let shot = nested!(cpu, 0x0605_587c, bullets::shell_set(cpu, d));
+    if shot != 0 {
+        cpu.write32(shot + BEHAVIOUR, SHELL_BEHAVIOUR);
+        let flags = cpu.read32(shot + FLAGS) | ARM_SHOT_FLAGS;
+        cpu.write32(shot + FLAGS, flags);
+        cpu.write8(shot + SPRITE_FRAME, ARM_SHOT_FRAME);
+        cpu.write8(shot + SPRITE_KIND, ARM_SHOT_KIND);
+        let colour = cpu.read16(CHAR_BASE).wrapping_add(ARM_SHOT_COLOUR);
+        cpu.write16(shot + SHELL_COLOURS + 2, colour);
+        cpu.write16(shot + SHELL_COLOURS, colour);
+    }
+    nested!(cpu, 0x0608_cd98, gun_glow(cpu, o + ARM_HIT_FLAGS, o + TURN_Z, o + ARM_MOUTH, 0x8000));
+}
+
+/// Step 2: an inner arm breathing: its z turn's rate easing off (by a 16th of it), its y turn's to
+/// none (by 10); its count out, 1 again.
+pub fn arm_breathe(cpu: &mut Cpu, o: u32) {
+    let v = cpu.read16(o + ARM_TURN_Z) as i16 as i32;
+    let step = (v / 16) as i16 as i32;
+    let v = if step == 0 {
+        0
+    } else {
+        nested!(cpu, 0x0604_6168, actors::approach(cpu, v as u32, 0, step.unsigned_abs()))
+    };
+    cpu.write16(o + ARM_TURN_Z, v as u16);
+    let v = cpu.read16(o + ARM_TURN_Y) as i16 as i32 as u32;
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0, 10));
+    cpu.write16(o + ARM_TURN_Y, v as u16);
+    let n = cpu.read16(o + ARM_COUNT).wrapping_sub(1);
+    cpu.write16(o + ARM_COUNT, n);
+    if (n as i16) < 0 {
+        cpu.write8(o + ARM_STEP, 1);
+    }
+}
+
+/// Step 3: downed. Every third frame a smoke puff within 32 dots of it each way (3/4 to 1/2 as
+/// big at random); its y turn levelling (0x4000, an eighth, by 32), its x turn's rate easing to
+/// -0x300 (by 8) and its z turn's to none (by 16); falling back ever faster (to 4 dots a frame, by
+/// 1/256); ended 256 dots back.
+pub fn arm_downed(cpu: &mut Cpu, o: u32) {
+    let now = cpu.read32(GAME_FRAMES);
+    if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, now, 3)) == 0 {
+        let e = cpu.stack();
+        for k in [0, 4, 8] {
+            let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+            let off = 0x40u32.wrapping_sub(r & 0x7f).wrapping_mul(0x8000);
+            let v = cpu.read32(o + POSITION + k).wrapping_add(off);
+            cpu.write32(e + k, v);
+        }
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+        cpu.write32(e + 12, 0xa000u32.wrapping_sub((r & 7) << 11));
+        nested!(cpu, 0x0605_77d0, explosions::smoke_puff(cpu, e));
+        nested!(cpu, 0x0605_8278, explosions::twin_set(cpu, e));
+    }
+    let from = cpu.read16(o + TURN_Y) as u32;
+    wb_turn(cpu, o + ARM_TURN_Y, from, 0, 0x4000, 8, 32);
+    let v = cpu.read16(o + ARM_TURN_X) as i16 as i32 as u32;
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0xffff_fd00, 8));
+    cpu.write16(o + ARM_TURN_X, v as u16);
+    let v = cpu.read16(o + ARM_TURN_Z) as i16 as i32 as u32;
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0, 16));
+    cpu.write16(o + ARM_TURN_Z, v as u16);
+    let z = cpu.read32(o + POSITION + 8).wrapping_add(cpu.read32(o + ARM_FALL));
+    cpu.write32(o + POSITION + 8, z);
+    let fall = cpu.read32(o + ARM_FALL);
+    let fall = nested!(cpu, 0x0604_6168, actors::approach(cpu, fall, 0x4_0000, 0x100));
+    cpu.write32(o + ARM_FALL, fall);
+    if cpu.read32(o + POSITION + 8) as i32 > 0x100_0000 {
+        cpu.write8(o + OBJ_MODE, TO_STOP);
+    }
+}
+
+/// Hit flags' flash: set the frame after a hit (bit 0 to bit 1), cleared the frame after that.
+fn flash_step(cpu: &mut Cpu, at: u32) {
+    let flags = cpu.read16(at);
+    if flags & 2 != 0 {
+        cpu.write16(at, flags & !3);
+    }
+    let flags = cpu.read16(at);
+    if flags & 1 != 0 {
+        cpu.write16(at, flags | 2);
+    }
+}
+
+/// The winged boss's wings' knocked-off steps (words, 0 on: the left's +0x2d6, the right's +0x2d4)
+/// and their smoke's points (12 bytes each: the right's 5 from +0x1a8, the left's 11 from +0x1f8);
+/// the wings' lives (the right's +0x1f4, the left's +0x28c).
+const WB_RIGHT_OFF: u32 = 0x2d4;
+const WB_LEFT_OFF: u32 = 0x2d6;
+const WB_RIGHT_SMOKE: u32 = 0x1a8;
+const WB_LEFT_SMOKE: u32 = 0x1f8;
+const WB_RIGHT_LIFE: u32 = 0x1f4;
+const WB_LEFT_LIFE: u32 = 0x28c;
+const WB_DOWN_RATE: u32 = 40;
+const WB_DOWN_SCORE: u32 = 10_000;
+const WB_LAST_LAP: i16 = 7;
+const WING_DOWN_SOUND: u32 = 19;
+
+/// The winged boss's behaviour: its life on the boss gauge. Before step 6, downed once its life is
+/// out or its script has run through eight times: the bullets cleared, its laser's sound stopped,
+/// the stage's score (10000 and 40 more to the rate if shot down, else none), its core and both
+/// wings off (10 more to the rate for each wing already off). Each wing knocked off as its life
+/// runs out (sound 19). Fighting (steps 4 and 5), its script; then its step, its turns, its
+/// flashes, its wings' smoke along their points, its count.
+pub fn wb_behaviour(cpu: &mut Cpu, o: u32) {
+    let life = cpu.read32(o + WB_CORE_LIFE);
+    nested!(cpu, 0x0604_64b8, hud::boss_gauge_life(cpu, life));
+    let downed = cpu.read8(o + WB_STEP) <= 5
+        && (cpu.read32(o + WB_CORE_LIFE) as i32 <= 0 || cpu.read16(o + WB_LAPS) as i16 > WB_LAST_LAP);
+    if downed {
+        cpu.write8(o + WB_STEP, 6);
+        nested!(cpu, 0x0605_61e0, screen::bullets_cleared(cpu));
+        let control = cpu.read8(o + WB_LASER_CONTROL) as i8 as i32 as u32;
+        nested!(cpu, 0x0600_52e0, sound::se_stop(cpu, WB_LASER_SOUND, control));
+        let add = |cpu: &mut Cpu, n: u32| {
+            let rate = cpu.read32(STAGE_RATE_AT).wrapping_add(n);
+            cpu.write32(STAGE_RATE_AT, rate);
+        };
+        if cpu.read32(o + WB_CORE_LIFE) as i32 <= 0 {
+            add(cpu, WB_DOWN_RATE);
+            cpu.write32(STAGE_SCORE_AT, WB_DOWN_SCORE);
+        } else {
+            cpu.write32(STAGE_SCORE_AT, 0);
+        }
+        cpu.write32(o + WB_CORE_LIFE, 0);
+        let flags = cpu.read16(o + WB_CORE) | PART_OFF;
+        cpu.write16(o + WB_CORE, flags);
+        cpu.write16(o + WB_WAIT, 0);
+        for (off, wing) in [(WB_RIGHT_OFF, WB_RIGHT), (WB_LEFT_OFF, WB_LEFT)] {
+            let step = cpu.read16(o + off);
+            if step == 0 {
+                cpu.write16(o + off, step.wrapping_add(1));
+                let flags = cpu.read16(o + wing) | PART_OFF;
+                cpu.write16(o + wing, flags);
+            } else {
+                add(cpu, 10);
+            }
+        }
+    }
+    for (off, wing, life) in [(WB_RIGHT_OFF, WB_RIGHT, WB_RIGHT_LIFE), (WB_LEFT_OFF, WB_LEFT, WB_LEFT_LIFE)] {
+        let step = cpu.read16(o + off);
+        if step == 0 && cpu.read32(o + life) as i32 <= 0 {
+            cpu.write16(o + off, step.wrapping_add(1));
+            let flags = cpu.read16(o + wing) | PART_OFF;
+            cpu.write16(o + wing, flags);
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, WING_DOWN_SOUND));
+        }
+    }
+    if cpu.read8(o + WB_STEP).wrapping_sub(4) <= 1 {
+        nested!(cpu, 0x0608_e36c, wb_script(cpu, o));
+    }
+    match cpu.read8(o + WB_STEP) {
+        0 => nested!(cpu, 0x0608_e1e4, wb_come_down(cpu, o)),
+        1 => nested!(cpu, 0x0608_e224, wb_settle(cpu, o)),
+        2 => nested!(cpu, 0x0608_e300, wb_wait(cpu, o)),
+        3 => nested!(cpu, 0x0608_e328, wb_open(cpu, o)),
+        4 => nested!(cpu, 0x0608_e424, wb_fight(cpu, o)),
+        5 => nested!(cpu, 0x0608_e5c4, wb_laser_phase(cpu, o)),
+        6 => nested!(cpu, 0x0608_e698, wb_downed(cpu, o)),
+        step => unreachable!("winged boss step {step}"),
+    }
+    for (turn, rate) in [(TURN_X, WB_TURN_X), (TURN_Y, WB_TURN_Y), (TURN_Z, WB_TURN_Z)] {
+        let v = cpu.read16(o + turn).wrapping_add(cpu.read16(o + rate));
+        cpu.write16(o + turn, v);
+    }
+    for at in [WB_CORE, WB_RIGHT, WB_LEFT] {
+        flash_step(cpu, o + at);
+    }
+    for (off, points, last) in [(WB_RIGHT_OFF, WB_RIGHT_SMOKE, 4), (WB_LEFT_OFF, WB_LEFT_SMOKE, 10)] {
+        let step = cpu.read16(o + off) as i16 as i32;
+        if step == 0 || step - 1 > last {
+            continue;
+        }
+        let p = o + points + 12u32.wrapping_mul((step - 1) as u32);
+        if nested!(cpu, 0x0605_968c, explosions::smoke_and_sparks(cpu, p, 4)) as u8 != 0 {
+            let step = cpu.read16(o + off).wrapping_add(1);
+            cpu.write16(o + off, step);
+        }
+    }
+    let count = cpu.read16(o + WB_COUNT).wrapping_add(1);
+    cpu.write16(o + WB_COUNT, count);
+}
+
+/// An arm's behaviour: ended with the boss. While the boss is not yet fighting and the arm is up,
+/// held at its place on the boss (0xb0 dots below it) and turned as the boss is. Downed once its
+/// life or the boss's is out (step 3, off; 10 more to the stage's rate if shot down; its down flag
+/// on the boss; sound 17). Then its step, its turns, its flash.
+pub fn arm_behaviour(cpu: &mut Cpu, o: u32) {
+    let boss = cpu.read32(o + ARM_OF);
+    if cpu.read8(boss + OBJ_MODE) as i8 > 111 {
+        cpu.write8(o + OBJ_MODE, TO_STOP);
+        return;
+    }
+    if cpu.read16(boss + WB_FLAGS) & 1 != 0 && cpu.read8(o + ARM_STEP) <= 2 {
+        let place = |cpu: &mut Cpu| boss + WB_ARM_PLACES + 12 * cpu.read8(o + ARM_WHICH) as u32;
+        for k in [0, 4] {
+            let at = place(cpu);
+            let v = cpu.read32(at + k);
+            cpu.write32(o + POSITION + k, v);
+        }
+        let at = place(cpu);
+        let z = cpu.read32(at + 8).wrapping_sub(WB_ARM_BELOW);
+        cpu.write32(o + POSITION + 8, z);
+        for turn in [TURN_X, TURN_Y, TURN_Z] {
+            let v = cpu.read16(boss + turn);
+            cpu.write16(o + turn, v);
+        }
+    }
+    if cpu.read8(o + ARM_STEP) <= 2
+        && (cpu.read32(o + ARM_LIFE) as i32 <= 0 || cpu.read32(boss + WB_CORE_LIFE) as i32 <= 0)
+    {
+        cpu.write8(o + ARM_STEP, 3);
+        let flags = cpu.read16(o + ARM_HIT_FLAGS) | PART_OFF;
+        cpu.write16(o + ARM_HIT_FLAGS, flags);
+        if cpu.read32(o + ARM_LIFE) as i32 <= 0 {
+            let rate = cpu.read32(STAGE_RATE_AT).wrapping_add(10);
+            cpu.write32(STAGE_RATE_AT, rate);
+        }
+        let which = cpu.read8(o + ARM_WHICH) as u32;
+        cpu.write8(boss + WB_ARM_DOWN + which, 1);
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, ARM_DOWN_SOUND));
+    }
+    match cpu.read8(o + ARM_STEP) {
+        0 => nested!(cpu, 0x0608_e778, arm_wait(cpu, o)),
+        1 => nested!(cpu, 0x0608_e7cc, arm_fight(cpu, o)),
+        2 => nested!(cpu, 0x0608_eb18, arm_breathe(cpu, o)),
+        3 => nested!(cpu, 0x0608_eb94, arm_downed(cpu, o)),
+        step => unreachable!("winged boss arm step {step}"),
+    }
+    for (turn, rate) in [(TURN_X, ARM_TURN_X), (TURN_Y, ARM_TURN_Y), (TURN_Z, ARM_TURN_Z)] {
+        let v = cpu.read16(o + turn).wrapping_add(cpu.read16(o + rate));
+        cpu.write16(o + turn, v);
+    }
+    flash_step(cpu, o + ARM_HIT_FLAGS);
+}
+
+/// The winged boss's parts' points (their tables, as parts_set's: the core's 16 into +0xe0, the
+/// right wing's 6 into +0x1a8, the left's 12 into +0x1f8), its models (in the boss's model set's
+/// list: the core 4, the left wing 0x18, the right 0x14), its wings' guns' and stumps' places, its
+/// arms' places on it (whole-dot x, y, z, 6 bytes each, spread with its wings' opening by the
+/// signed bytes at 0x060a08fc for x and 0x060a0900 for z).
+const WB_CORE_POINTS: (u32, u32, u32) = (0x060a_0904, 16, 0xe0);
+const WB_RIGHT_POINTS: (u32, u32, u32) = (0x060a_0984, 6, 0x1a8);
+const WB_LEFT_POINTS: (u32, u32, u32) = (0x060a_09b4, 12, 0x1f8);
+const WB_CORE_MODEL: u32 = 0x04;
+const WB_LEFT_MODEL: u32 = 0x18;
+const WB_RIGHT_MODEL: u32 = 0x14;
+const WB_ARM_SPOTS: u32 = 0x060a_08e2;
+const WB_ARM_SPREAD_X: u32 = 0x060a_08fc;
+const WB_ARM_SPREAD_Z: u32 = 0x060a_0900;
+
+/// The model at the winged boss's models' `at` (the flashing one of a pair by its flags `f`).
+fn wb_model(cpu: &mut Cpu, at: u32, f: u16) -> u32 {
+    let set = cpu.read32(WB_MODEL_SET);
+    let models = cpu.read32(set + SHIP_MODELS);
+    let list = cpu.read32(models + at);
+    cpu.read32(list + 4 * (f & PART_FLASH) as u32)
+}
+
+/// At an object's place, turned (z, y, x): the matrix pushed.
+fn wb_frame(cpu: &mut Cpu, o: u32) {
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    let p = [0, 4, 8].map(|k| cpu.read32(o + POSITION + k));
+    cpu.call(SL_TRANSLATE, &p);
+    for (turn, rot) in [(TURN_Z, SL_ROT_Z), (TURN_Y, SL_ROT_Y), (TURN_X, SL_ROT_X)] {
+        let a = cpu.read16(o + turn) as i16 as i32 as u32;
+        cpu.call(rot, &[a]);
+    }
+}
+
+/// The winged boss's draw (its sprite `s`): in its frame, its parts' points brought into the world;
+/// unless its core is gone, the core (and its mouth 76 dots on), each wing while on (and its gun's
+/// place) or its stump's place once off. While it is not yet fighting, its arms' places, spread as
+/// its wings open.
+pub fn wb_draw(cpu: &mut Cpu, s: u32) {
+    let o = s.wrapping_sub(FLAGS);
+    wb_frame(cpu, o);
+    for (table, n, out) in [WB_CORE_POINTS, WB_RIGHT_POINTS, WB_LEFT_POINTS] {
+        ship_points(cpu, table, n, o + out);
+    }
+    let f = cpu.read16(o + WB_CORE);
+    if f & PART_GONE == 0 {
+        let model = wb_model(cpu, WB_CORE_MODEL, f);
+        cpu.call(SL_PUT_POLYGON, &[model]);
+        cpu.call(SL_CALC_POINT, &[0, 0, 0xffb4_0000, o + WB_MOUTH]);
+        let f = cpu.read16(o + WB_LEFT);
+        if f & PART_OFF == 0 {
+            let model = wb_model(cpu, WB_LEFT_MODEL, f);
+            cpu.call(SL_PUT_POLYGON, &[model]);
+            cpu.call(SL_CALC_POINT, &[0xffd2_0000, 0xffe8_0000, 0xfff0_0000, o + WB_LEFT_GUN]);
+        } else {
+            cpu.call(SL_CALC_POINT, &[0xfff4_0000, 0, 0xffe0_0000, o + WB_LEFT_STUMP]);
+        }
+        let f = cpu.read16(o + WB_RIGHT);
+        if f & PART_OFF == 0 {
+            let model = wb_model(cpu, WB_RIGHT_MODEL, f);
+            cpu.call(SL_PUT_POLYGON, &[model]);
+            cpu.call(SL_CALC_POINT, &[0x2e_0000, 0xffe8_0000, 0xfff0_0000, o + WB_RIGHT_GUN]);
+        } else {
+            cpu.call(SL_CALC_POINT, &[0xc_0000, 0, 0xffe0_0000, o + WB_RIGHT_STUMP]);
+        }
+    }
+    if cpu.read16(o + WB_FLAGS) & 1 != 0 {
+        for i in 0..4 {
+            let opening = cpu.read16(o + WB_OPENING) as i16 as i32 as u32;
+            let spread = |cpu: &mut Cpu, reach: u32, table: u32| {
+                let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, opening));
+                let v = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, s, reach));
+                let k = nested!(cpu, 0x0600_6a78, math::quotient(cpu, 3 * i, 3));
+                let c = cpu.read8(table.wrapping_add(k)) as i8 as i32 as u32;
+                v.wrapping_mul(c)
+            };
+            let dx = spread(cpu, 0x10_0000, WB_ARM_SPREAD_X);
+            let dz = spread(cpu, 0x20_0000, WB_ARM_SPREAD_Z);
+            let [x, y, z] = [0, 2, 4].map(|k| (cpu.read16(WB_ARM_SPOTS + 6 * i + k) as u32) << 16);
+            cpu.call(SL_CALC_POINT, &[x.wrapping_add(dx), y, z.wrapping_add(dz), o + WB_ARM_PLACES + 12 * i]);
+        }
+    }
+    cpu.call(SL_POP_MATRIX, &[]);
+}
+
+/// The arms' points (as parts_set's, into +0x90) and models, by arm: the left outer, the left
+/// inner, the right inner, the right outer.
+const ARM_POINTS: [(u32, u32); 4] = [(0x060a_0a14, 11), (0x060a_0a64, 10), (0x060a_0ab4, 9), (0x060a_0af4, 17)];
+const ARM_MODELS: [u32; 4] = [0x0c, 0x08, 0x00, 0x10];
+const ARM_PARTS: u32 = 0x90;
+
+/// An arm's draw: in its frame, its points brought into the world; unless it is gone, its model
+/// and its mouth's place (and the right outer arm's second, +0x174).
+fn arm_draw(cpu: &mut Cpu, s: u32, which: usize, mouths: &[[u32; 4]]) {
+    let o = s.wrapping_sub(FLAGS);
+    wb_frame(cpu, o);
+    let (table, n) = ARM_POINTS[which];
+    ship_points(cpu, table, n, o + ARM_PARTS);
+    let f = cpu.read16(o + ARM_HIT_FLAGS);
+    if f & PART_GONE == 0 {
+        let model = wb_model(cpu, ARM_MODELS[which], f);
+        cpu.call(SL_PUT_POLYGON, &[model]);
+        for &[x, y, z, out] in mouths {
+            cpu.call(SL_CALC_POINT, &[x, y, z, o + out]);
+        }
+    }
+    cpu.call(SL_POP_MATRIX, &[]);
+}
+
+/// The left outer arm's draw.
+pub fn arm_draw_0(cpu: &mut Cpu, s: u32) {
+    arm_draw(cpu, s, 0, &[[0, 0xfff8_0000, 0xffe8_0000, ARM_MOUTH]]);
+}
+
+/// The left inner arm's draw.
+pub fn arm_draw_1(cpu: &mut Cpu, s: u32) {
+    arm_draw(cpu, s, 1, &[[0, 0, 0xffe0_0000, ARM_MOUTH]]);
+}
+
+/// The right inner arm's draw.
+pub fn arm_draw_2(cpu: &mut Cpu, s: u32) {
+    arm_draw(cpu, s, 2, &[[0, 0, 0xffe0_0000, ARM_MOUTH]]);
+}
+
+/// The right outer arm's draw.
+pub fn arm_draw_3(cpu: &mut Cpu, s: u32) {
+    arm_draw(cpu, s, 3, &[[0x16_0000, 0x18_0000, 0xffdc_0000, ARM_MOUTH], [0x10_0000, 0xffe3_0000, 0xffe0_0000, 0x174]]);
+}
+
+/// The winged boss's set-up: model kind 40's frame 7 flipped; 384 dots up and 256 back, upside
+/// down and back to front, not yet fighting with its wings shut; its slots 0x10-0x40, its core
+/// 28000 and wings 8000 each, the stage's rate cleared; then its four arms (list 2, 0x180 bytes,
+/// numbered_exec's, each taking an enemy number but marking the boss's in the players' table): at
+/// their places across it, the outer pair 18000, the inner 16000. The boss gauge at 28000, sound
+/// 78. Stops where no number or object is free.
+const WB_BEHAVIOUR: u32 = 0x0608_ecd4;
+const WB_DRAW: u32 = 0x0608_f15c;
+const WB_SET_FLAGS: u32 = 0xc8_0000;
+const WB_FLIP_KIND: u32 = 40;
+const WB_FLIP_FRAME: u32 = 7;
+const WB_FLIP_BITS: u32 = 0x100;
+const WB_CORE_START: u32 = 28000;
+const WB_WING_START: u32 = 8000;
+const WB_SOUND: u32 = 78;
+const ARM_SIZE: u32 = 0x180;
+const ARM_BEHAVIOUR: u32 = 0x0608_efb8;
+const ARM_DRAWS: [u32; 4] = [0x0608_f450, 0x0608_f554, 0x0608_f654, 0x0608_f754];
+const ARM_XS: [u32; 4] = [0xff8e_0000, 0xffb2_0000, 0x4e_0000, 0x72_0000];
+const ARM_LIVES: [u32; 4] = [18000, 16000, 16000, 18000];
+
+pub fn wb_set(cpu: &mut Cpu, o: u32, n: u32) {
+    nested!(cpu, 0x0604_5cdc, models::model_flip_bits(cpu, WB_FLIP_KIND, WB_FLIP_FRAME, WB_FLIP_BITS));
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + BEAM_LIST));
+    cpu.write16(o + WB_COUNT, 0);
+    cpu.write16(o + WB_WAIT, 0);
+    cpu.write32(o + BEHAVIOUR, WB_BEHAVIOUR);
+    let flags = cpu.read32(o + FLAGS) | WB_SET_FLAGS;
+    cpu.write32(o + FLAGS, flags);
+    cpu.write32(o + MODEL, WB_DRAW);
+    cpu.write8(o + NUMBER, n as u8);
+    let number = cpu.read8(o + NUMBER) as i8 as i32;
+    cpu.write32(PLAYERS.wrapping_add((4 * number) as u32), o);
+    cpu.write16(o + WB_FLAGS, 1);
+    cpu.write16(o + WB_OPENING, 0);
+    cpu.write8(o + WB_STEP, 0);
+    for (k, v) in [(0, 0), (4, 0x180_0000), (8, 0x100_0000)] {
+        cpu.write32(o + POSITION + k, v);
+    }
+    for at in [0x8c, 0x90, WB_FALL] {
+        cpu.write32(o + at, 0);
+    }
+    cpu.write16(o + TURN_Y, 0x8000);
+    cpu.write16(o + TURN_X, 0xc001);
+    for at in [WB_TURN_X, WB_TURN_Y, WB_TURN_Z] {
+        cpu.write16(o + at, 0);
+        cpu.write16(o + at + 2, 0);
+    }
+    cpu.write16(o + WB_SCRIPT_AT, 0);
+    cpu.write16(o + WB_SLOTS, 0);
+    for (k, at) in [WB_SLOT_1, WB_SLOT_2, WB_SLOT_3, WB_SLOT_4].into_iter().enumerate() {
+        cpu.write16(o + at, 0x10 * (k as u16 + 1));
+    }
+    for k in 0..4 {
+        cpu.write8(o + WB_ARM_DOWN + k, 0);
+    }
+    for at in [WB_LAPS, WB_LASER_TIME, WB_MISSILES] {
+        cpu.write16(o + at, 0);
+    }
+    cpu.write8(o + WB_FAN, 0);
+    cpu.write32(STAGE_RATE_AT, 0);
+    cpu.write8(o + WB_LASER_CONTROL, 0);
+    cpu.write16(o + 0x290, 0);
+    cpu.write16(o + 0x292, 0);
+    let parts = [
+        (WB_CORE_POINTS, WB_CORE, WB_CORE_LIFE, WB_CORE_START, None),
+        (WB_RIGHT_POINTS, WB_RIGHT, WB_RIGHT_LIFE, WB_WING_START, Some(WB_RIGHT_OFF)),
+        (WB_LEFT_POINTS, WB_LEFT, WB_LEFT_LIFE, WB_WING_START, Some(WB_LEFT_OFF)),
+    ];
+    for ((table, count, points), state, life, start, off) in parts {
+        cpu.write16(o + state, 0);
+        cpu.write32(o + life, start);
+        if let Some(off) = off {
+            cpu.write16(o + off, 0);
+        }
+        let number = cpu.read8(o + NUMBER) as u32;
+        let (points, state, life) = (o + points, o + state, o + life);
+        cpu.nested_with_stack(&PARTS_SET_PROLOGUE, 0x0605_6ea4, &[table, number], |cpu| {
+            parts::parts_set(cpu, count, points, state, life, table, number)
+        });
+    }
+    for which in 0..4 {
+        let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, ENEMY_NUMBERS)) as i8;
+        if n == -1 {
+            return;
+        }
+        let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, ARM_SIZE)) as i8 as i32 as u32;
+        let a = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, NUMBERED_EXEC));
+        if a == 0 {
+            return;
+        }
+        nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, a + FLAGS));
+        nested!(cpu, 0x0604_6284, hits::hit_init(cpu, a + BEAM_LIST));
+        cpu.write32(a + BEHAVIOUR, ARM_BEHAVIOUR);
+        let flags = cpu.read32(a + FLAGS) | WB_SET_FLAGS;
+        cpu.write32(a + FLAGS, flags);
+        cpu.write8(a + NUMBER, n as u8);
+        let number = cpu.read8(a + NUMBER) as i8 as i32;
+        cpu.write32(PLAYERS.wrapping_add((4 * number) as u32), o);
+        cpu.write8(a + ARM_WHICH, which as u8);
+        cpu.write32(a + ARM_OF, o);
+        cpu.write32(a + ARM_FALL, 0);
+        for at in [ARM_TURN_X, ARM_TURN_Y, ARM_TURN_Z] {
+            cpu.write16(a + at, 0);
+            cpu.write16(a + at + 2, 0);
+        }
+        cpu.write16(a + 0x74, 0x80);
+        cpu.write16(a + ARM_HIT_FLAGS, 0);
+        cpu.write16(a + ARM_COUNT, 0);
+        cpu.write16(a + ARM_COUNT + 2, 0);
+        cpu.write8(a + ARM_STEP, 0);
+        cpu.write32(a + MODEL, ARM_DRAWS[which]);
+        for (k, v) in [(0, ARM_XS[which]), (4, 0), (8, 0)] {
+            cpu.write32(a + POSITION + k, v);
+        }
+        cpu.write32(a + ARM_LIFE, ARM_LIVES[which]);
+        let (table, count) = ARM_POINTS[which];
+        let number = cpu.read8(o + NUMBER) as u32;
+        let (points, state, life) = (a + ARM_PARTS, a + ARM_HIT_FLAGS, a + ARM_LIFE);
+        cpu.nested_with_stack(&PARTS_SET_PROLOGUE, 0x0605_6ea4, &[table, number], |cpu| {
+            parts::parts_set(cpu, count, points, state, life, table, number)
+        });
+        cpu.write16(a + 0x72, 0);
+        cpu.write32(a + POSITION + 8, 0);
+        cpu.write32(a + 0x78, 0);
+        cpu.write32(a + 0x7c, 0);
+    }
+    nested!(cpu, 0x0604_64d8, hud::boss_gauge_set(cpu, WB_CORE_START));
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, WB_SOUND));
+}
+
+/// The winged boss made (numbered: list 2, 0x2dc bytes, numbered_exec's; an enemy's number): its
+/// number, or 0 if none was free.
+const WB_SIZE: u32 = 0x2dc;
+
+pub fn wb_make(cpu: &mut Cpu) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, ENEMY_NUMBERS)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, WB_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, NUMBERED_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0608_f878, wb_set(cpu, o, n as i32 as u32));
+    n as i32 as u32
+}
+
