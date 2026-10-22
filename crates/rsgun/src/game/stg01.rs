@@ -13250,7 +13250,7 @@ fn leave(cpu: &mut Cpu, o: u32, l: &Leaver) {
         6 => {
             let v = (cpu.read16(o + TURN_Y) as i16 as i32).wrapping_add(0x8000);
             nested!(cpu, 0x0600_815e, clib::ashiftrt_r4::<11>(cpu, v as u32));
-            if v == 16 {
+            if v >> 11 == 16 {
                 cpu.write8(o + LEAVE_STEP, 7);
                 return;
             }
