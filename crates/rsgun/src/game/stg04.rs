@@ -2,8 +2,145 @@
 //! its timeline's events, its drones (the swoopers and the gunners) and their launchers.
 
 use super::actors::{E_ANGLE, E_COLOUR, E_POSITION, E_SCALES, E_SCRIPT, E_SPEED};
-use super::globals::{GAME_FLAGS, GAME_FRAMES, HELD};
-use super::{actors, aim, bullets, files, gouraud, hits, hud, kinds, math, models, effects, nested, objects, palette, player, ribbons, results, screen, sgl, sound, sprites, text, Cpu};
+use super::globals::{bios_setting_is_1, GAME_FLAGS, GAME_FRAMES, GAME_MODE, HELD};
+use super::{actors, aim, bullets, files, gouraud, hits, dma, hud, kinds, math, models, effects, nested, objects, palette, player, ribbons, results, screen, sgl, sound, sprites, states, text, timeline, Cpu};
+
+// ---- the stage's mode ----------------------------------------------------------------------------
+
+/// The director's slots the mode uses (as STG05's mode uses them): its step, the load (a local
+/// written back each time), the settings kept (the buffer +0x6c, the room's top +0x70, VDP1's next
+/// character place +0x74, its next character and colour +0x78 and +0x7c), the demo's input
+/// (+0x54), the mode's music (+0xa4).
+const MODE_STEP: u32 = 0x64;
+const MODE_LOAD: u32 = 0x68;
+const KEPT: u32 = 0x6c;
+const PLACE: u32 = 0x70;
+const VDP1_PLACE: u32 = 0x74;
+const NEXT_CHAR: u32 = 0x78;
+const NEXT_COLOUR: u32 = 0x7c;
+const DEMO_INPUT: u32 = 0x54;
+const MUSIC: u32 = 0xa4;
+/// The room the mode takes from the top of the play's room, and that top.
+const ROOM: u32 = 0x4_4040;
+const ROOM_TOP: u32 = 0x0607_4050;
+const NEXT_RATE: u32 = 0x0603_2e40;
+const STAGE_RATE: u32 = 0x2_0000;
+/// The sound data files loaded at once (the defaults' set-up after the first, the music's number
+/// after the third), and the two model kinds read and put in place.
+const SOUND_FILES: [u32; 5] = [1, 0x11, 0x10, 0x2c, 0x2b];
+const MODE_KINDS: [u32; 2] = [0x20, 0x33];
+/// The stages' screen data files (the stages' SCRDAT files): this stage's, the fourth entry of
+/// the table; the screen's scroll table, its timeline, its stage sound effects, the mode after
+/// the play and after a demo, the game mode of a demo; the demo's input files (BIOS setting not
+/// 1, and 1).
+const SCREEN_FILE: u32 = 0x0607_35b0 + 0xc;
+const SCROLLS: u32 = 0x0608_9dd8;
+const EVENTS: u32 = 0x0608_7fa0;
+const SOUND_EFFECTS: u32 = 0x0608_9e38;
+const STAGE_SE_TABLE: u32 = 0x0600_edd4;
+const NEXT_MODE: u32 = 0x0600_ed70;
+const AFTER_DEMO: u8 = 0;
+const AFTER_PLAY: u8 = 11;
+const DEMO: u8 = 15;
+const DEMO_FILES: [u32; 2] = [0x0600_8c48, 0x0600_8c18];
+
+/// The mode's code (the director calls it each frame until it gives 1): the settings kept, the
+/// sound data loaded, the stage's two model kinds read into the buffer and put in place, the
+/// screen data file loaded into the buffer; once DMA is idle the screen started; the timeline
+/// made (in a demo, its input file read after the buffer), the settings given back; 1.
+pub fn stg04_mode(cpu: &mut Cpu, game: u32) -> u32 {
+    let mut load = cpu.read32(game + MODE_LOAD);
+    let mut done = 0;
+    match cpu.read8(game + MODE_STEP) {
+        0 => {
+            states::keep_mode_settings(cpu, game, ROOM);
+            cpu.write8(game + MODE_STEP, 1);
+        }
+        1 => {
+            for (k, n) in SOUND_FILES.into_iter().enumerate() {
+                let buffer = cpu.read32(game + KEPT);
+                nested!(cpu, 0x0600_4b18, sound::load_sound_file(cpu, n, buffer));
+                if k == 0 {
+                    nested!(cpu, 0x0600_49cc, sound::sound_setup_default(cpu));
+                }
+                if k == 2 {
+                    cpu.write16(game + MUSIC, 7);
+                }
+            }
+            let top = cpu.read32(ROOM_TOP);
+            cpu.write32(game + PLACE, top);
+            cpu.write8(game + MODE_STEP, 9);
+        }
+        9 => {
+            for k in MODE_KINDS {
+                let buffer = cpu.read32(game + KEPT);
+                nested!(cpu, 0x0604_58cc, kinds::model_kind_read(cpu, k, buffer));
+                let vram = cpu.read32(game + VDP1_PLACE);
+                let first = cpu.read16(game + NEXT_CHAR) as i16 as i32 as u32;
+                let colour = cpu.read16(game + NEXT_COLOUR) as u32;
+                let next = nested!(cpu, 0x0604_5950, kinds::model_kind_install(cpu, k, vram, first, colour));
+                cpu.write32(game + VDP1_PLACE, next);
+                let file = cpu.read32(KINDS + K_SIZE * k);
+                let chars = cpu.read16(game + NEXT_CHAR).wrapping_add(cpu.read16(file + KF_CHARS));
+                cpu.write16(game + NEXT_CHAR, chars);
+                if k == MODE_KINDS[1] {
+                    let colours = cpu.read16(game + NEXT_COLOUR).wrapping_add(cpu.read16(file + KF_COLOURS));
+                    cpu.write16(game + NEXT_COLOUR, colours);
+                }
+                let past = cpu.read32(file);
+                cpu.write32(game + KEPT, past);
+            }
+            let name = cpu.read32(SCREEN_FILE);
+            load = nested!(cpu, 0x0600_5e40, files::load_file(cpu, name));
+            if load != 0 {
+                cpu.write32(NEXT_RATE, STAGE_RATE);
+                let buffer = cpu.read32(game + KEPT);
+                nested!(cpu, 0x0600_603c, files::start_load(cpu, load, buffer));
+                cpu.write8(game + MODE_STEP, 10);
+            }
+        }
+        10 => {
+            if nested!(cpu, 0x0600_6074, files::load_done(cpu, load)) != 0 {
+                cpu.write8(game + MODE_STEP, 11);
+            }
+        }
+        11 => {
+            if nested!(cpu, 0x0600_46b8, dma::dma_check(cpu)) == 0 {
+                let room = nested!(cpu, 0x0605_fe78, states::stage_table(cpu, 3));
+                let screen_room = cpu.read32(game + PLACE).wrapping_sub(room);
+                cpu.write32(game + PLACE, screen_room);
+                let buffer = cpu.read32(game + KEPT);
+                nested!(cpu, 0x0605_e3e0, screen::screen_start(cpu, SCROLLS, buffer, screen_room));
+                cpu.write8(game + MODE_STEP, 12);
+            }
+        }
+        12 => cpu.write8(game + MODE_STEP, 13),
+        13 => cpu.write8(game + MODE_STEP, 14),
+        14 => {
+            nested!(cpu, 0x0605_7354, timeline::timeline_set(cpu, EVENTS));
+            cpu.write32(STAGE_SE_TABLE, SOUND_EFFECTS);
+            if cpu.read8(GAME_MODE) == DEMO {
+                let buffer = cpu.read32(game + KEPT);
+                cpu.write32(game + DEMO_INPUT, buffer);
+                let name = DEMO_FILES[bios_setting_is_1(cpu) as usize];
+                let buffer = cpu.read32(game + KEPT);
+                let size = nested!(cpu, 0x0600_5f10, files::read_file(cpu, name, buffer));
+                let past = cpu.read32(game + KEPT).wrapping_add(size);
+                cpu.write32(game + KEPT, past);
+                cpu.write8(NEXT_MODE, AFTER_DEMO);
+            } else {
+                cpu.write32(game + DEMO_INPUT, 0);
+                cpu.write8(NEXT_MODE, AFTER_PLAY);
+            }
+            states::give_back_mode_settings(cpu, game);
+            cpu.write8(game + MODE_STEP, 15);
+        }
+        15 => done = 1,
+        _ => {}
+    }
+    cpu.write32(game + MODE_LOAD, load);
+    done
+}
 
 // ---- the stage's events --------------------------------------------------------------------------
 
@@ -1990,4 +2127,871 @@ pub fn animation_step(cpu: &mut Cpu, o: u32) {
     }
     let ticks = cpu.read32(o + A_TICKS).wrapping_add(1);
     cpu.write32(o + A_TICKS, ticks);
+}
+
+// ---- the boss's drone patterns -------------------------------------------------------------------
+
+/// A drone's spec (see [`drone_setup`]) also has its flags at +0x14: bit 0 the second side, bit 4
+/// (16) from a pattern's flags' bit 6.
+const SPEC_FLAGS: u32 = 0x14;
+/// The two places drones start at across (longs from 0x06089ee0: the one the pattern's flag 16
+/// picks and the other).
+const DRONE_X: u32 = 0x0608_9ee0;
+/// The drone makers (each makes a numbered drone from a spec and gives it a behaviour) and the
+/// behaviours the patterns give.
+const MAKER_A: u32 = 0x0608_60c8;
+const MAKER_B: u32 = 0x0608_6618;
+const GUN_BEHAVIOUR: u32 = 0x0608_5d4c;
+const PATTERN_BEHAVIOUR_C: u32 = 0x0608_6210;
+/// A pattern's object: its ticks (+0x98), its step (+0x9c) and its cycle (+0xa0).
+const P_TICKS: u32 = 0x98;
+const P_STEP: u32 = 0x9c;
+const P_CYCLE: u32 = 0xa0;
+/// The camera's height (its y).
+const CAMERA_Y: u32 = CAMERA + CAM_POSITION + 4;
+
+/// A drone made from a spec built on the stack by `flags` (bit 4 (16): the drone starts at the
+/// second place across, not the first; bit 5 (32): from below with its turn half way round, not
+/// from above; bit 6 (64): its spec's flags 16; bits 0-1: its type) and `behaviour`: `maker` is
+/// called with the spec.
+pub fn make_drone(cpu: &mut Cpu, flags: u32, behaviour: u32, maker: u32) {
+    let s = cpu.stack();
+    let (x, mut spec_flags) = if flags & 16 == 0 { (cpu.read32(DRONE_X + 4), 1) } else { (cpu.read32(DRONE_X), 0) };
+    cpu.write32(s + SPEC_POSITION, x);
+    if flags & 64 != 0 {
+        spec_flags |= 16;
+    }
+    cpu.write32(s + SPEC_FLAGS, spec_flags);
+    let (y, turn) = if flags & 32 == 0 { (0x00c0_0000, 0) } else { (0xff40_0000, 0x8000) };
+    cpu.write32(s + SPEC_POSITION + 4, y);
+    cpu.write16(s + SPEC_TURN, turn);
+    cpu.write32(s + SPEC_POSITION + 8, 0);
+    cpu.write16(s + SPEC_TYPE, (flags & 3) as u16);
+    cpu.write32(s + SPEC_BEHAVIOUR, behaviour);
+    cpu.call_returning(0x0608_2daa, maker, &[s]);
+}
+
+/// A pattern of gun drones: every 32nd tick, except that at tick 96 of 128 its cycle goes on, a drone
+/// whose type is the tick's bits 7 and 8 (mixed up by which side the camera is on) and whose side
+/// is the cycle's; its ticks up one.
+pub fn drone_pattern_a(cpu: &mut Cpu, o: u32) {
+    let ticks = cpu.read32(o + P_TICKS);
+    if ticks & 31 == 0 {
+        if ticks & 127 == 96 {
+            let c = cpu.read32(o + P_CYCLE).wrapping_add(1);
+            cpu.write32(o + P_CYCLE, c);
+        } else {
+            let above = cpu.read32(CAMERA_Y) as i32 > 0;
+            nested!(cpu, 0x0600_8166, super::clib::ashiftrt_r4::<7>(cpu, ticks));
+            let k = ((ticks as i32 >> 7) & 3) as usize;
+            let mut flags = if above { [32, 48, 16, 0][k] } else { [16, 0, 32, 48][k] };
+            if cpu.read32(o + P_CYCLE) & 1 != 0 {
+                flags |= 2;
+            }
+            nested!(cpu, 0x0608_2d44, make_drone(cpu, flags, GUN_BEHAVIOUR, MAKER_A));
+        }
+    }
+    let t = cpu.read32(o + P_TICKS).wrapping_add(1);
+    cpu.write32(o + P_TICKS, t);
+}
+
+/// A pattern of four gun drones every 128th tick (the types 0 to 3 of its cycle's side: the cycle
+/// or'd with 16, 0, 48 and 32), its cycle on one (3 back to 0); its ticks up one.
+pub fn drone_pattern_b(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(o + P_TICKS) & 127 == 0 {
+        for with in [16, 0, 48, 32] {
+            let flags = cpu.read32(o + P_CYCLE) | with;
+            nested!(cpu, 0x0608_2d44, make_drone(cpu, flags, GUN_BEHAVIOUR, MAKER_A));
+        }
+        let c = cpu.read32(o + P_CYCLE);
+        cpu.write32(o + P_CYCLE, c.wrapping_add(1));
+        if c.wrapping_add(1) as i32 > 2 {
+            cpu.write32(o + P_CYCLE, c.wrapping_sub(2));
+        }
+    }
+    let t = cpu.read32(o + P_TICKS).wrapping_add(1);
+    cpu.write32(o + P_TICKS, t);
+}
+
+/// A pattern of pairs of drones every 16th tick: a step (0 to 5; past 2 the cycle's side turns the
+/// other way), its cycle (0 to 2) and the camera's side choose the flags of the first (type from
+/// the cycle's next) and the second (from the cycle); each made with the maker at 0x06086618.
+pub fn drone_pattern_c(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(o + P_TICKS) & 15 == 0 {
+        let step = cpu.read32(o + P_STEP) as i32;
+        let cycle = cpu.read32(o + P_CYCLE) as i32;
+        let this = if step > 2 {
+            if cycle + 2 > 2 { cycle - 1 } else { cycle + 2 }
+        } else if cycle == 1 {
+            0
+        } else {
+            cycle
+        };
+        let mut next = if cycle + 1 > 2 { cycle - 2 } else { cycle + 1 };
+        if next == 1 && step > 2 {
+            next = 0;
+        }
+        let step = step + 1;
+        cpu.write32(o + P_STEP, step as u32);
+        if step > 5 {
+            cpu.write32(o + P_STEP, 0);
+            let c = cpu.read32(o + P_CYCLE);
+            cpu.write32(o + P_CYCLE, c.wrapping_add(2));
+            if c.wrapping_add(2) as i32 > 2 {
+                cpu.write32(o + P_CYCLE, c.wrapping_sub(1));
+            }
+        }
+        let mut flags = next as u32;
+        if cpu.read32(CAMERA_Y) as i32 > 0 {
+            flags |= 32;
+        }
+        flags |= 64;
+        nested!(cpu, 0x0608_2d44, make_drone(cpu, flags, PATTERN_BEHAVIOUR_C, MAKER_B));
+        let mut flags = if cpu.read32(CAMERA_Y) as i32 > 0 { 48 } else { 16 };
+        flags |= this as u32;
+        flags |= 64;
+        nested!(cpu, 0x0608_2d44, make_drone(cpu, flags, PATTERN_BEHAVIOUR_C, MAKER_B));
+    }
+    let t = cpu.read32(o + P_TICKS).wrapping_add(1);
+    cpu.write32(o + P_TICKS, t);
+}
+
+/// A pattern of drones with the behaviour `behaviour`: every 16th tick, except that at tick 48 of 64
+/// its cycle goes on (past 2 back to 0), a drone whose side is the tick's bit 6 and the camera's
+/// (its flags 32 and 48 above the camera's middle, 16 and 0 below), its cycle's type, and flags 64
+/// except the first time of three (its step 0 to 2); its ticks up one.
+pub fn drone_pattern_d(cpu: &mut Cpu, o: u32, behaviour: u32) {
+    let ticks = cpu.read32(o + P_TICKS);
+    if ticks & 15 == 0 {
+        if ticks & 63 == 48 {
+            let c = cpu.read32(o + P_CYCLE);
+            cpu.write32(o + P_CYCLE, c.wrapping_add(1));
+            if c.wrapping_add(1) as i32 > 2 {
+                cpu.write32(o + P_CYCLE, c.wrapping_sub(2));
+            }
+        } else {
+            let mut flags = if cpu.read32(CAMERA_Y) as i32 > 0 {
+                if ticks & 64 == 0 { 32 } else { 48 }
+            } else if ticks & 64 == 0 {
+                16
+            } else {
+                0
+            };
+            flags |= cpu.read32(o + P_CYCLE);
+            let step = cpu.read32(o + P_STEP);
+            if step != 0 {
+                flags |= 64;
+            }
+            cpu.write32(o + P_STEP, step.wrapping_add(1));
+            if step.wrapping_add(1) == 3 {
+                cpu.write32(o + P_STEP, 0);
+            }
+            nested!(cpu, 0x0608_2d44, make_drone(cpu, flags, behaviour, MAKER_B));
+        }
+    }
+    let t = cpu.read32(o + P_TICKS).wrapping_add(1);
+    cpu.write32(o + P_TICKS, t);
+}
+
+/// The pattern of drones [`drone_pattern_d`] makes with the behaviour at 0x060862e4.
+pub fn drone_pattern_e(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_3030, drone_pattern_d(cpu, o, 0x0608_62e4));
+}
+
+/// The same with the behaviour at 0x060864e0.
+pub fn drone_pattern_f(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_3030, drone_pattern_d(cpu, o, 0x0608_64e0));
+}
+
+// ---- the boss's gates ----------------------------------------------------------------------------
+
+/// A gate (an object): its step (+0x72, a byte), the move of its script's entry (+0x73), its
+/// counter (+0x8c) and wait (+0x88), the place of its script's next entry (+0xa4; entries of 16
+/// bytes), the side it is at (+0x7e), two parts (objects: +0xb8 and +0xbc; each's place across is
+/// at +0x40), the places it has them at (+0xc0, +0xc4), the places it takes them to (+0xc8, +0xcc),
+/// the places it kept (+0xd0, +0xd4) and its linked object (+0xd8).
+const G_STEP: u32 = 0x72;
+const G_MOVE: u32 = 0x73;
+const G_TIME: u32 = 0x8c;
+const G_WAIT: u32 = 0x88;
+const G_SCRIPT: u32 = 0xa4;
+const G_SIDE: u32 = 0x7e;
+const G_PARTS: [u32; 2] = [0xb8, 0xbc];
+const G_AT: [u32; 2] = [0xc0, 0xc4];
+const G_TO: [u32; 2] = [0xc8, 0xcc];
+const G_KEPT: [u32; 2] = [0xd0, 0xd4];
+const G_LINK: u32 = 0xd8;
+const PART_AT: u32 = 0x40;
+/// A gate's counters the script's entries set (bytes +0x74 and +0x75, and the longs after them).
+const G_BYTE_A: u32 = 0x74;
+const G_BYTE_B: u32 = 0x75;
+
+/// A gate's part `n` (0 or 1) put at the gate's place `from` (+0xc0/+0xc4 or +0xc8/+0xcc) plus
+/// `add`, if it has the part.
+fn gate_part_set(cpu: &mut Cpu, o: u32, n: usize, from: u32, add: u32) {
+    let part = cpu.read32(o + G_PARTS[n]);
+    if part != 0 {
+        let v = cpu.read32(o + from).wrapping_add(add);
+        cpu.write32(part + PART_AT, v);
+    }
+}
+
+/// A gate's step on one.
+fn gate_step_next(cpu: &mut Cpu, o: u32) {
+    let n = cpu.read8(o + G_STEP).wrapping_add(1);
+    cpu.write8(o + G_STEP, n);
+}
+
+/// A gate's parts eased: its counter on by `step` to at most 0x10000, each part's place across the
+/// ease from the place it has to the place it goes to by the counter.
+pub fn gate_ease(cpu: &mut Cpu, o: u32, step: u32) {
+    let t = cpu.read32(o + G_TIME).wrapping_add(step);
+    cpu.write32(o + G_TIME, t);
+    if t as i32 > 0x1_0000 {
+        cpu.write32(o + G_TIME, 0x1_0000);
+    }
+    for n in 0..2 {
+        if cpu.read32(o + G_PARTS[n]) != 0 {
+            let from = cpu.read32(o + G_AT[n]);
+            let to = cpu.read32(o + G_TO[n]);
+            let t = cpu.read32(o + G_TIME);
+            let r = nested!(cpu, 0x0606_2ebc, math::ease(cpu, from, to, t));
+            let part = cpu.read32(o + G_PARTS[n]);
+            cpu.write32(part + PART_AT, r);
+        }
+    }
+}
+
+/// A gate eased 0x200 a frame; when its counter reaches 0x10000 its script goes on.
+pub fn gate_ease_next(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_3170, gate_ease(cpu, o, 0x200));
+    if cpu.read32(o + G_TIME) == 0x1_0000 {
+        nested!(cpu, 0x0608_38c8, gate_next_entry(cpu, o));
+    }
+}
+
+/// A gate eased 0x80 a frame; when its counter reaches 0x10000 it goes back to 0 and the script
+/// goes on.
+pub fn gate_ease_restart(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_3170, gate_ease(cpu, o, 0x80));
+    if cpu.read32(o + G_TIME) == 0x1_0000 {
+        cpu.write32(o + G_TIME, 0);
+        nested!(cpu, 0x0608_38c8, gate_next_entry(cpu, o));
+    }
+}
+
+/// The gate's second and third steps' ending: the counter, the bytes +0x74 and +0x75 cleared.
+fn gate_bytes_clear(cpu: &mut Cpu, o: u32) {
+    cpu.write32(o + G_TIME, 0);
+    cpu.write8(o + G_BYTE_A, 0);
+    cpu.write8(o + G_BYTE_B, 0);
+}
+
+/// A gate's steps (by its step, +0x72): 0 the parts shaken out by 0x20000 every other frame for 61
+/// frames (then their goals 0x200000 apart); 1 and 2 eased 0x800 a frame (the places and goals
+/// swapped back after 1; the sound 74 after 2, the bytes cleared); 3 shaken again by 0x10000 for
+/// 31 frames; 4 waiting 60 frames for the script's next entry.
+pub fn gate_steps_a(cpu: &mut Cpu, o: u32) {
+    match cpu.read8(o + G_STEP) {
+        0 => {
+            let odd = cpu.read32(o + G_TIME) & 1 != 0;
+            let (a, b) = if odd { (0x2_0000, 0xfffe_0000) } else { (0, 0) };
+            gate_part_set(cpu, o, 0, G_AT[0], a);
+            gate_part_set(cpu, o, 1, G_AT[1], b);
+            let t = cpu.read32(o + G_TIME).wrapping_add(1);
+            cpu.write32(o + G_TIME, t);
+            if t != 61 {
+                return;
+            }
+            for n in 0..2 {
+                let v = cpu.read32(o + G_TO[n]);
+                cpu.write32(o + G_KEPT[n], v);
+            }
+            let (a, b) = (cpu.read32(o + G_AT[0]), cpu.read32(o + G_AT[1]));
+            cpu.write32(o + G_TO[0], a.wrapping_add(0x20_0000));
+            cpu.write32(o + G_TO[1], b.wrapping_sub(0x20_0000));
+            cpu.write32(o + G_TIME, 0);
+            gate_step_next(cpu, o);
+        }
+        1 => {
+            nested!(cpu, 0x0608_3170, gate_ease(cpu, o, 0x800));
+            if cpu.read32(o + G_TIME) != 0x1_0000 {
+                return;
+            }
+            gate_swap_places(cpu, o);
+            cpu.write32(o + G_TIME, 0);
+            gate_step_next(cpu, o);
+        }
+        2 => {
+            nested!(cpu, 0x0608_3170, gate_ease(cpu, o, 0x800));
+            if cpu.read32(o + G_TIME) != 0x1_0000 {
+                return;
+            }
+            gate_bytes_clear(cpu, o);
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, GATE_SOUND));
+            gate_step_next(cpu, o);
+        }
+        3 => {
+            let odd = cpu.read32(o + G_TIME) & 1 != 0;
+            let (a, b) = if odd { (0x1_0000, 0xffff_0000) } else { (0, 0) };
+            gate_part_set(cpu, o, 0, G_TO[0], a);
+            gate_part_set(cpu, o, 1, G_TO[1], b);
+            let t = cpu.read32(o + G_TIME).wrapping_add(1);
+            cpu.write32(o + G_TIME, t);
+            if t == 31 {
+                cpu.write32(o + G_TIME, 0);
+                gate_step_next(cpu, o);
+            }
+        }
+        4 => {
+            let t = cpu.read32(o + G_TIME).wrapping_add(1);
+            cpu.write32(o + G_TIME, t);
+            if t == 60 {
+                nested!(cpu, 0x0608_38c8, gate_next_entry(cpu, o));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The sound a gate plays as it closes.
+const GATE_SOUND: u32 = 74;
+
+/// The places a gate has and the places it goes to taken from the others and given back: the
+/// places the goals, the goals the kept.
+fn gate_swap_places(cpu: &mut Cpu, o: u32) {
+    for n in 0..2 {
+        let v = cpu.read32(o + G_TO[n]);
+        cpu.write32(o + G_AT[n], v);
+    }
+    for n in 0..2 {
+        let v = cpu.read32(o + G_KEPT[n]);
+        cpu.write32(o + G_TO[n], v);
+    }
+}
+
+/// The same steps for one part only, the one `side` (0 or 1) picks (the second part's shakes and
+/// goals the other way): 0, 1, 2 (the sound 74 only), 3, then 4: after 30 frames drones made
+/// by the function at 0x06084edc (its flags 2 when the camera is above 0, 1 for the second side)
+/// whose result, if any, plays a sound 75; the counter and bytes cleared; 5 waiting 90 frames
+/// for the script's next entry.
+pub fn gate_steps_b(cpu: &mut Cpu, o: u32, side: u32) {
+    let n = (side != 0) as usize;
+    match cpu.read8(o + G_STEP) {
+        0 => {
+            let odd = cpu.read32(o + G_TIME) & 1 != 0;
+            let add = if !odd {
+                0
+            } else if n == 0 {
+                0x2_0000
+            } else {
+                0xfffe_0000
+            };
+            gate_part_set(cpu, o, n, G_AT[n], add);
+            let t = cpu.read32(o + G_TIME).wrapping_add(1);
+            cpu.write32(o + G_TIME, t);
+            if t != 61 {
+                return;
+            }
+            for k in 0..2 {
+                let v = cpu.read32(o + G_TO[k]);
+                cpu.write32(o + G_KEPT[k], v);
+            }
+            if n == 0 {
+                cpu.write32(o + G_TO[0], 0x90_0000);
+            } else {
+                cpu.write32(o + G_TO[1], 0xff70_0000);
+            }
+            cpu.write32(o + G_TIME, 0);
+            gate_step_next(cpu, o);
+        }
+        1 => {
+            nested!(cpu, 0x0608_3170, gate_ease(cpu, o, 0x800));
+            if cpu.read32(o + G_TIME) != 0x1_0000 {
+                return;
+            }
+            gate_swap_places(cpu, o);
+            cpu.write32(o + G_TIME, 0);
+            gate_step_next(cpu, o);
+        }
+        2 => {
+            nested!(cpu, 0x0608_3170, gate_ease(cpu, o, 0x800));
+            if cpu.read32(o + G_TIME) != 0x1_0000 {
+                return;
+            }
+            cpu.write32(o + G_TIME, 0);
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, GATE_SOUND));
+            gate_step_next(cpu, o);
+        }
+        3 => {
+            let odd = cpu.read32(o + G_TIME) & 1 != 0;
+            let add = if !odd {
+                0
+            } else if n == 0 {
+                0x1_0000
+            } else {
+                0xffff_0000
+            };
+            gate_part_set(cpu, o, n, G_TO[n], add);
+            let t = cpu.read32(o + G_TIME).wrapping_add(1);
+            cpu.write32(o + G_TIME, t);
+            if t == 31 {
+                cpu.write32(o + G_TIME, 0);
+                gate_step_next(cpu, o);
+            }
+        }
+        4 => {
+            let t = cpu.read32(o + G_TIME).wrapping_add(1);
+            cpu.write32(o + G_TIME, t);
+            if t != 30 {
+                return;
+            }
+            let mut flags = if cpu.read32(CAMERA_Y) as i32 > 0 { 2 } else { 0 };
+            if n != 0 {
+                flags |= 1;
+            }
+            let made = cpu.call(0x0608_4edc, &[o, flags]);
+            if made != 0 {
+                nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 75));
+            }
+            gate_bytes_clear(cpu, o);
+            gate_step_next(cpu, o);
+        }
+        5 => {
+            let t = cpu.read32(o + G_TIME).wrapping_add(1);
+            cpu.write32(o + G_TIME, t);
+            if t == 90 {
+                nested!(cpu, 0x0608_38c8, gate_next_entry(cpu, o));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The gate's steps for its left part.
+pub fn gate_steps_left(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_3494, gate_steps_b(cpu, o, 0));
+}
+
+/// The gate's steps for its right part.
+pub fn gate_steps_right(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_3494, gate_steps_b(cpu, o, 1));
+}
+
+/// A gate's first step: at step 0 and counter 0 the side it is at (+0x7e) is chosen by chance: the
+/// first (goals 0x280000 and -0x700000) or the second (0x700000 and -0x280000); then the steps for
+/// that side.
+pub fn gate_steps_random(cpu: &mut Cpu, o: u32) {
+    if cpu.read8(o + G_STEP) == 0 && cpu.read32(o + G_TIME) == 0 {
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0));
+        if r & 1 == 0 {
+            cpu.write32(o + G_TO[0], 0x28_0000);
+            cpu.write32(o + G_TO[1], 0xff90_0000);
+            cpu.write8(o + G_SIDE, 0);
+        } else {
+            cpu.write32(o + G_TO[0], 0x70_0000);
+            cpu.write32(o + G_TO[1], 0xffd8_0000);
+            cpu.write8(o + G_SIDE, 1);
+        }
+    }
+    let side = cpu.read8(o + G_SIDE) as i8 as i32 as u32;
+    nested!(cpu, 0x0608_3494, gate_steps_b(cpu, o, side));
+}
+
+/// A gate's script's next entry (16 bytes at its place +0xa4: the move at +0, the linked object's
+/// step at +1 (-1: unchanged), the bytes +0x74 and +0x75 at +2 and +3 (-1: unchanged), its wait at +4,
+/// its goals at +8 and +12): a first byte of -1 ends the script (the function at 0x06083110).
+/// Taken: the move, the wait, the linked object's step (and its +0x11 cleared), the places the
+/// parts have, the goals, the step and counter 0, the bytes (their counters too), the place on 16.
+pub fn gate_next_entry(cpu: &mut Cpu, o: u32) {
+    let e = cpu.read32(o + G_SCRIPT);
+    let mv = cpu.read8(e) as i8;
+    if mv == -1 {
+        cpu.call(0x0608_3110, &[o]);
+        return;
+    }
+    cpu.write8(o + G_MOVE, mv as u8);
+    let wait = cpu.read32(e + 4);
+    cpu.write32(o + G_WAIT, wait);
+    let link = cpu.read32(o + G_LINK);
+    if link != 0 {
+        let e = cpu.read32(o + G_SCRIPT);
+        let step = cpu.read8(e + 1);
+        if step as i8 != -1 {
+            cpu.write8(link + 0x10, step);
+            let link = cpu.read32(o + G_LINK);
+            cpu.write8(link + 0x11, 0);
+        }
+    }
+    for n in 0..2 {
+        if cpu.read32(o + G_PARTS[n]) != 0 {
+            let part = cpu.read32(o + G_PARTS[n]);
+            let v = cpu.read32(part + PART_AT);
+            cpu.write32(o + G_AT[n], v);
+        }
+    }
+    let e = cpu.read32(o + G_SCRIPT);
+    let (a, b) = (cpu.read32(e + 8), cpu.read32(e + 12));
+    cpu.write32(o + G_TO[0], a);
+    cpu.write32(o + G_TO[1], b);
+    cpu.write8(o + G_STEP, 0);
+    cpu.write32(o + G_TIME, 0);
+    let e = cpu.read32(o + G_SCRIPT);
+    let byte = cpu.read8(e + 2);
+    if byte as i8 != -1 {
+        cpu.write8(o + G_BYTE_A, byte);
+        cpu.write32(o + 0x94, 0);
+    }
+    let e = cpu.read32(o + G_SCRIPT);
+    let byte = cpu.read8(e + 3);
+    if byte as i8 != -1 {
+        cpu.write8(o + G_BYTE_B, byte);
+        cpu.write32(o + P_TICKS, 0);
+        cpu.write32(o + P_STEP, 0);
+        cpu.write32(o + P_CYCLE, 0);
+    }
+    let e = cpu.read32(o + G_SCRIPT);
+    cpu.write32(o + G_SCRIPT, e.wrapping_add(16));
+}
+
+/// The camera's height kept in an object (+0xb4).
+pub fn note_camera_y(cpu: &mut Cpu, o: u32) {
+    let y = cpu.read32(CAMERA_Y);
+    cpu.write32(o + 0xb4, y);
+}
+
+// ---- the gate boss and its markers ---------------------------------------------------------------
+
+/// The gate boss (a gate: see above): its step (+0x71), its life (+0x50), the leader pointer the
+/// markers follow, the table of its moves, tables of the functions its two bytes call, where it
+/// was seen on the screen (the middle of two points converted) and the camera's place for it
+/// (+0xa8, +0xac, +0xb0).
+const B_STEP: u32 = 0x71;
+const B_LIFE: u32 = 0x50;
+const B_LIFE_AT_START: u32 = 700_000;
+const B_HIT: u32 = 0x0608_8034;
+const B_SCRIPTS: u32 = 0x0608_8a04;
+const B_MOVES: u32 = 0x0608_8364;
+const B_BYTE_A_MOVES: u32 = 0x0608_8340;
+const B_BYTE_B_MOVES: u32 = 0x0608_834c;
+const B_POINTS: u32 = 0x0608_8a24;
+const B_OUT: u32 = 0x0608_a310;
+const B_FAR_POINT: u32 = 0x0608_8a18;
+const B_MIDDLE: u32 = 0x0608_9ee0;
+const B_VIEW_WORD: u32 = 0x0607_476a;
+const B_KILL_SCORE: u32 = 10_000;
+/// The score awarded in the stage's counters (a long and its total).
+const B_KILLS: u32 = 0x0607_46f0;
+const B_KILLS_TOTAL: u32 = 0x0607_46f4;
+
+/// The gate boss's behaviour: the camera's height kept; step 0 made (its camera mover linked, the
+/// hit set, scales 1, life 700000, not faded, its script by the stage's phase, its first entry,
+/// its life gauge) then 1: while its life is above 0 the gauge shown, the function of its move
+/// (+0x73) run, the drones' animation, the functions of its two bytes, its wait counted down (at
+/// 0 the script's next entry); at 0 the kill scored (10000 to the weapon's shooter) and the
+/// function at 0x06083110. Then drawn: the camera's matrix, two points converted, and the
+/// view's word kept, a far point converted and the middle of two of the points (x, then y) kept
+/// for the markers.
+pub fn gate_boss_behaviour(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_39cc, note_camera_y(cpu, o));
+    let step = cpu.read8(o + B_STEP) as i8;
+    if step == 0 {
+        let mover = nested!(cpu, 0x0608_2b7c, camera_mover_set(cpu));
+        cpu.write32(o + G_LINK, mover);
+        cpu.write32(o + HIT, B_HIT);
+        cpu.write32(o + 0x24, ONE);
+        cpu.write32(o + 0x20, ONE);
+        cpu.write32(o + B_LIFE, B_LIFE_AT_START);
+        let flags = cpu.read32(o + FLAGS) & !FADED;
+        cpu.write32(o + FLAGS, flags);
+        let phase = cpu.read32(STAGE_PHASE);
+        let script = cpu.read32(B_SCRIPTS.wrapping_add(phase << 2));
+        cpu.write32(o + G_SCRIPT, script);
+        nested!(cpu, 0x0608_38c8, gate_next_entry(cpu, o));
+        nested!(cpu, 0x0604_64d8, hud::boss_gauge_set(cpu, B_LIFE_AT_START));
+        let n = cpu.read8(o + B_STEP).wrapping_add(1);
+        cpu.write8(o + B_STEP, n);
+    }
+    if step == 0 || step == 1 {
+        let life = cpu.read32(o + B_LIFE);
+        if life as i32 > 0 {
+            nested!(cpu, 0x0604_64b8, hud::boss_gauge_life(cpu, life));
+            let mv = cpu.read8(o + G_MOVE) as i8 as i32 as u32;
+            let f = cpu.read32(B_MOVES.wrapping_add(mv << 2));
+            cpu.call_returning(0x0608_3aae, f, &[o]);
+            nested!(cpu, 0x0608_2c10, animation_step(cpu, o));
+            let a = cpu.read8(o + G_BYTE_A) as i8 as i32 as u32;
+            let f = cpu.read32(B_BYTE_A_MOVES.wrapping_add(a << 2));
+            cpu.call_returning(0x0608_3ac4, f, &[o]);
+            let b = cpu.read8(o + G_BYTE_B) as i8 as i32 as u32;
+            let f = cpu.read32(B_BYTE_B_MOVES.wrapping_add(b << 2));
+            cpu.call_returning(0x0608_3ad4, f, &[o]);
+            let n = cpu.read32(o + G_WAIT).wrapping_sub(1);
+            cpu.write32(o + G_WAIT, n);
+            if n == 0 {
+                nested!(cpu, 0x0608_38c8, gate_next_entry(cpu, o));
+            }
+        } else {
+            cpu.write32(B_KILLS_TOTAL, 100_000);
+            let n = cpu.read32(B_KILLS).wrapping_add(60);
+            cpu.write32(B_KILLS, n);
+            let hit = cpu.read32(o + 0x40);
+            let shooter = cpu.read8(hit + 0x32) as i8 as i32 as u32;
+            let weapon = cpu.read8(hit + 0x55) as i8 as i32 as u32;
+            nested!(cpu, 0x0604_3108, hits::score_kill(cpu, shooter, weapon, o, B_KILL_SCORE));
+            cpu.call(0x0608_3110, &[o]);
+            return;
+        }
+    }
+    let [x, y, z] = [0xa8, 0xac, 0xb0].map(|k| cpu.read32(o + k));
+    nested!(cpu, 0x0608_201c, camera_matrix(cpu, x, y, z));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0606_db7c, sgl::sl_load_matrix(cpu, CAMERA_MATRIX));
+    nested!(cpu, 0x0606_750c, sgl::sl_convert(cpu, B_POINTS, B_OUT));
+    nested!(cpu, 0x0606_750c, sgl::sl_convert(cpu, B_POINTS + 12, B_OUT + 8));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    let w = cpu.read16(B_VIEW_WORD);
+    cpu.write16(o + 0x30, w);
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0606_db7c, sgl::sl_load_matrix(cpu, SCENERY_MATRIX));
+    nested!(cpu, 0x0606_750c, sgl::sl_convert(cpu, B_FAR_POINT, o + 0x14));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    let (a, b) = (cpu.read32(0x0608_a290), cpu.read32(B_OUT + 8));
+    cpu.write32(B_MIDDLE, (a.wrapping_add(b) as i32 >> 1) as u32);
+    let (a, b) = (cpu.read32(0x0608_a290 + 0x40), cpu.read32(B_OUT));
+    cpu.write32(B_MIDDLE + 4, (a.wrapping_add(b) as i32 >> 1) as u32);
+}
+
+/// A marker (an object, +0x3c a byte: the set of points it shows): it ends when the leader (the
+/// object at 0x06089edc) is past mode 111, and while the leader's +0x70 is 3 converts the set's
+/// first point and its eight others (12 bytes each) through the camera's matrix at its place
+/// (+0x40, +0x44).
+const LEADER_AT: u32 = 0x0608_9edc;
+const MARKER_SET: u32 = 0x3c;
+const MARKER_POINT: u32 = 0x0608_8f00;
+const MARKER_POINTS: u32 = 0x0608_8f18;
+const MARKER_OUT: u32 = 0x0608_a360;
+const MARKER_OUTS: u32 = 0x0608_a290;
+pub fn marker_behaviour(cpu: &mut Cpu, o: u32) {
+    let leader = cpu.read32(LEADER_AT);
+    if cpu.read8(leader + 3) as i8 > 111 {
+        cpu.write8(o + 3, 112);
+    }
+    let leader = cpu.read32(LEADER_AT);
+    if cpu.read8(leader + 0x70) as i8 != 3 {
+        return;
+    }
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0606_db7c, sgl::sl_load_matrix(cpu, CAMERA_MATRIX));
+    let (x, y) = (cpu.read32(o + 0x40), cpu.read32(o + 0x44));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, 0));
+    let k = cpu.read8(o + MARKER_SET) as i8 as i32 as u32;
+    nested!(cpu, 0x0606_750c, sgl::sl_convert(cpu, MARKER_POINT + 12 * k, MARKER_OUT + 8 * k));
+    for i in 0..8 {
+        let p = MARKER_POINTS + 12 * i + 96 * k;
+        let out = MARKER_OUTS + 8 * i + 64 * k;
+        nested!(cpu, 0x0606_750c, sgl::sl_convert(cpu, p, out));
+    }
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+}
+
+/// A marker's draw (`s` its sprite: its place +0x30, +0x34 and its set +0x2c): the scenery's model's
+/// polygons of each of the set's entries (8 bytes: a place across, then the frame, until a
+/// frame of -1) that are on the screen, each put at (0, its place, -0x100000) from the sprite's
+/// place.
+const MARKER_SETS: u32 = 0x0608_9088;
+pub fn marker_draw(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 0));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0606_db7c, sgl::sl_load_matrix(cpu, SCENERY_MATRIX));
+    let (x, y) = (cpu.read32(s + 0x30), cpu.read32(s + 0x34));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, 0));
+    let at = cpu.stack();
+    cpu.write32(at, 0);
+    cpu.write32(at + 8, 0xfff0_0000);
+    let k = cpu.read8(s + 0x2c) as i8 as i32 as u32;
+    let mut e = cpu.read32(MARKER_SETS.wrapping_add(k << 2));
+    if cpu.read32(e + 4) as i32 != -1 {
+        loop {
+            nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+            let v = cpu.read32(e);
+            cpu.write32(at + 4, v);
+            let seen = nested!(cpu, 0x0606_e9fc, sgl::sl_check_on_screen(cpu, at, 0x80_0000)) as i32;
+            if seen > 0 {
+                let [px, py, pz] = [0, 4, 8].map(|j| cpu.read32(at + j));
+                nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, px, py, pz));
+                let file = cpu.read32(KINDS + K_SIZE * SCENERY_MODEL);
+                let frames = cpu.read32(file + MODEL_FRAMES);
+                let frame = cpu.read32(e + 4);
+                let polygons = cpu.read32(frames.wrapping_add(frame << 2));
+                let pd = cpu.read32(polygons);
+                nested!(cpu, 0x0606_745c, sgl::sl_put_polygon(cpu, pd));
+            }
+            e = e.wrapping_add(8);
+            nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+            if cpu.read32(e + 4) as i32 == -1 {
+                break;
+            }
+        }
+    }
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 1));
+}
+
+/// A marker made (list 2, 0x48 bytes, the plain exec) after `p`'s place (+0x14, +0x18) and
+/// +0x32, its set `set` (+0x3c), its behaviour and draw above, flags 0xc00000 (not culled, not
+/// lit). The marker, or 0.
+pub fn marker_set(cpu: &mut Cpu, p: u32, set: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 0x48)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PLAIN_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + FLAGS));
+    cpu.write32(o + BEHAVIOUR, 0x0608_3db4);
+    let flags = cpu.read32(o + FLAGS) | 0x00c0_0000;
+    cpu.write32(o + FLAGS, flags);
+    cpu.write32(o + 0x34, 0x0608_3e9c);
+    let (x, y) = (cpu.read32(p + 0x14), cpu.read32(p + 0x18));
+    cpu.write32(o + 0x14, x);
+    cpu.write32(o + 0x18, y);
+    cpu.write32(o + 0x1c, 0);
+    cpu.write8(o + 0x33, 0);
+    let b = cpu.read8(p + 0x32);
+    cpu.write8(o + 0x32, b);
+    cpu.write8(o + MARKER_SET, set as u8);
+    o
+}
+const PLAIN_EXEC: u32 = 0x0604_dcb4;
+
+/// The first colour of the kind `k`'s table entry `j` (8 bytes each, the table at +4 of the kind's
+/// 16): the byte at its place added to the kind's word at +8, kept in two words (0x06089102 and
+/// 0x0608910e).
+pub fn kind_colour_pair(cpu: &mut Cpu, k: u32, j: u32) {
+    let k = k as u8 as i8 as i32 as u32;
+    let j = j as u8 as u32;
+    let kind = KINDS.wrapping_add(k << 4);
+    let table = cpu.read32(kind + 4);
+    let entry = cpu.read32(table.wrapping_add(j << 3));
+    let base = cpu.read8(entry) as u32;
+    let first = cpu.read16(kind + 8) as i16 as i32 as u32;
+    let v = first.wrapping_add(base) as u16;
+    cpu.write16(0x0608_9102, v);
+    cpu.write16(0x0608_910e, v);
+}
+
+/// A colour kept in two words (0x06089106 and 0x06089112).
+pub fn colour_pair_set(cpu: &mut Cpu, v: u32) {
+    cpu.write16(0x0608_9106, v as u16);
+    cpu.write16(0x0608_9112, v as u16);
+}
+
+/// Whether (x, y) is off the screen's play field (more than 0xd00000 across or 0x900000 down).
+pub fn off_field(cpu: &mut Cpu, x: u32, y: u32) -> u32 {
+    let _ = cpu;
+    let abs = |v: u32| if (v as i32) < 0 { v.wrapping_neg() as i32 } else { v as i32 };
+    (abs(x) > 0xd0_0000 || abs(y) > 0x90_0000) as u32
+}
+
+/// A spark (an object after a parent, +0x3c): its place (+0x14, +0x18) and turn (+0x30) the parent's
+/// (+0x8c, +0x90, +0x30); it ends when the parent is past mode 111 and has +0x6f, or when it has
+/// none and its +0x40 is not above 0 (the parent's end otherwise lets it go); its +0x44 counts down,
+/// then its +0x40 falls by 0xc00 while above 0; on frames odd (flag 0x100: sprite colours at 32,
+/// else 48) its colours kept, the table's entry (+0x88) chosen by the frame's bit 0 and its
+/// +0x2f by bit 1; its scales 1 plus chance, its speed (the function at 0x0608409c) by +0x40
+/// times a distance by chance.
+pub fn spark_behaviour(cpu: &mut Cpu, o: u32) {
+    let parent = cpu.read32(o + 0x3c);
+    if parent != 0 {
+        let (x, y) = (cpu.read32(parent + 0x8c), cpu.read32(parent + 0x90));
+        cpu.write32(o + 0x14, x);
+        cpu.write32(o + 0x18, y);
+        let w = cpu.read16(parent + 0x30);
+        cpu.write16(o + 0x30, w);
+        if cpu.read8(parent + 3) as i8 > 111 {
+            let end = cpu.read8(parent + 0x6f);
+            if end != 0 {
+                cpu.write8(o + 3, 112);
+                return;
+            }
+            cpu.write32(o + 0x3c, end as u32);
+        }
+    } else if cpu.read32(o + 0x40) as i32 <= 0 {
+        cpu.write8(o + 3, 112);
+        return;
+    }
+    let c = cpu.read32(o + 0x44);
+    if c != 0 {
+        cpu.write32(o + 0x44, c.wrapping_sub(1));
+    } else {
+        let v = cpu.read32(o + 0x40);
+        if v as i32 > 0 {
+            cpu.write32(o + 0x40, v.wrapping_sub(0xc00));
+        }
+    }
+    let frame = cpu.read32(0x0600_ebd4);
+    let add = if frame & 1 != 0 { 32 } else { 48 };
+    let mut flags = cpu.read32(o + FLAGS);
+    if frame & 1 != 0 {
+        flags |= 0x100;
+    } else {
+        flags &= !0x100;
+    }
+    cpu.write32(o + FLAGS, flags);
+    let v = (cpu.read16(CHAR_BASE) as i16 as i32 as u32).wrapping_add(add);
+    cpu.write16(o + 0x2a, v as u16);
+    cpu.write16(o + 0x28, v as u16);
+    nested!(cpu, 0x0608_4050, colour_pair_set(cpu, v & 0xffff));
+    let frame = cpu.read32(0x0600_ebd4);
+    let table = cpu.read32(0x0608_9118 + ((frame & 1) << 2));
+    cpu.write32(o + 0x88, table);
+    cpu.write8(o + 0x2f, if frame & 2 != 0 { 0xc3 } else { 0xc4 });
+    let (far, mut scale) = if cpu.read32(o + FLAGS) & 0x100 != 0 {
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0)) & 0xffff;
+        let extra = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, r, 0x4_0000));
+        (0xc_8000u32.wrapping_add(extra), 0x1_0000u32)
+    } else {
+        (0xa_0000, 0xc000)
+    };
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0)) & 0xffff;
+    let extra = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, r, 0x4000));
+    scale = scale.wrapping_add(extra);
+    let at = cpu.read32(o + 0x40);
+    let d = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, far, at));
+    nested!(cpu, 0x0608_409c, spark_speed(cpu, o, d));
+    cpu.write32(o + 0x24, scale);
+    cpu.write32(o + 0x20, scale);
+}
+
+/// A spark's speed `v` along its turn (a word at +0x30): its steps (0x200000 times the turn's sine
+/// and cosine) taken from its place until it is off the field (the places and the dots they
+/// took (-0x200000 each) kept: +0x48 v, 0, +0x54 -v, 0, +0x60 v, +0x64 the dots, +0x6c -v, +0x70
+/// the dots).
+pub fn spark_speed(cpu: &mut Cpu, o: u32, v: u32) {
+    let s = cpu.stack();
+    cpu.write32(s, v);
+    let (mut x, mut y) = (cpu.read32(o + 0x14), cpu.read32(o + 0x18));
+    let mut dots = 0u32;
+    let angle = cpu.read16(o + 0x30) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, angle));
+    let dx = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x20_0000, sin));
+    cpu.write32(s + 4, dx);
+    let angle = cpu.read16(o + 0x30) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, angle));
+    let dy = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x20_0000, cos)).wrapping_neg();
+    while nested!(cpu, 0x0608_406c, off_field(cpu, x, y)) == 0 {
+        dots = dots.wrapping_add(0xffe0_0000);
+        let dx = cpu.read32(s + 4);
+        y = y.wrapping_add(dy);
+        x = x.wrapping_add(dx);
+    }
+    let v = cpu.read32(s);
+    cpu.write32(o + 0x48, v);
+    cpu.write32(o + 0x4c, 0);
+    cpu.write32(o + 0x54, v.wrapping_neg());
+    cpu.write32(o + 0x58, 0);
+    cpu.write32(o + 0x60, v);
+    cpu.write32(o + 0x64, dots);
+    cpu.write32(o + 0x6c, v.wrapping_neg());
+    cpu.write32(o + 0x70, dots);
 }

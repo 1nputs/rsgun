@@ -2126,6 +2126,7 @@ pub fn register(n: &mut Natives) {
     }
     // STG04.BIN's code (fingerprint 5c18364ee98aacb1, the fourth stage)
     rewrites! { n; overlay "STG04";
+        0x0608_0000 => stg04::stg04_mode[game] -> u32,
         0x0608_034c => stg04::message_event[e] -> u32,
         0x0608_03a0 => stg04::kinds_event[e] -> u32,
         0x0608_05c8 => stg04::boss_event[e] -> u32,
@@ -2180,6 +2181,32 @@ pub fn register(n: &mut Natives) {
         0x0608_2b7c => stg04::camera_mover_set[] -> u32,
         0x0608_2bac => stg04::pulse_shot[o] -> (),
         0x0608_2c10 => stg04::animation_step[o] -> (),
+        0x0608_2d44 => stg04::make_drone[flags, behaviour, maker] -> (),
+        0x0608_2dc4 => stg04::drone_pattern_a[o] -> (),
+        0x0608_2e94 => stg04::drone_pattern_b[o] -> (),
+        0x0608_2f30 => stg04::drone_pattern_c[o] -> (),
+        0x0608_3030 => stg04::drone_pattern_d[o, behaviour] -> (),
+        0x0608_30d8 => stg04::drone_pattern_e[o] -> (),
+        0x0608_30f4 => stg04::drone_pattern_f[o] -> (),
+        0x0608_3170 => stg04::gate_ease[o, step] -> (),
+        0x0608_31fc => stg04::gate_ease_next[o] -> (),
+        0x0608_3238 => stg04::gate_steps_a[o] -> (),
+        0x0608_3454 => stg04::gate_ease_restart[o] -> (),
+        0x0608_3494 => stg04::gate_steps_b[o, side] -> (),
+        0x0608_3718 => stg04::gate_steps_left[o] -> (),
+        0x0608_3730 => stg04::gate_steps_right[o] -> (),
+        0x0608_3748 => stg04::gate_steps_random[o] -> (),
+        0x0608_38c8 => stg04::gate_next_entry[o] -> (),
+        0x0608_39cc => stg04::note_camera_y[o] -> (),
+        0x0608_39e4 => stg04::gate_boss_behaviour[o] -> (),
+        0x0608_3db4 => stg04::marker_behaviour[o] -> (),
+        0x0608_3e9c => stg04::marker_draw[s] -> (),
+        0x0608_3f7c => stg04::marker_set[p, set] -> u32,
+        0x0608_4010 => stg04::kind_colour_pair[k, j] -> (),
+        0x0608_4050 => stg04::colour_pair_set[v] -> (),
+        0x0608_406c => stg04::off_field[x, y] -> u32,
+        0x0608_409c => stg04::spark_speed[o, v] -> (),
+        0x0608_415c => stg04::spark_behaviour[o] -> (),
     }
     // STG05.BIN's code (fingerprint 2adefae5540dd556, the last stage)
     rewrites! { n; overlay "STG05";
