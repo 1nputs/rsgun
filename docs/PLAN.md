@@ -21,7 +21,8 @@ against the oracle (Mednafen) frame by frame, the way `md-recomp` did NHL '94 an
   SCSP). The specification is Sega's hardware manuals plus what the oracle shows.
 - **Smooth 60.** A logic frame every vertical blank; the arcade's slowdown is not reproduced (later
   a toggle, with a cost model). Lockstep resyncs after the oracle's lag frames.
-- **One agent** at a time beside the lead.
+- **One agent** at a time beside the lead. (21 October: two, each on its own overlay in its own
+  worktree; CLAUDE.md has the rules.)
 - **Names**: the repository and game are `rsgun`; the runtime crate is `stv` for now.
 
 ## The architecture
