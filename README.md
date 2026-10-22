@@ -9,7 +9,7 @@ code (`--native`): a mechanical translation of every function the evidence saw, 
 ROM into `build/port` and never committed, being replaced function by function with a rewrite meant
 to be read (`crates/rsgun/src/game`: the game's own names where its leftovers give them, its state
 named). Every call of either is checked against the SH-2 code it replaces (`tools/port/check.sh`).
-The plan and the living guide are in `../playbook/rsgun/`.
+The plan and the living guide are in `docs/` (start with `docs/HANDOFF.md`).
 
 ```
 crates/stv          the ST-V as a library (no game knowledge)
@@ -22,6 +22,11 @@ You need your own copy of MAME's `rsgun` set and the ST-V BIOS set (`rsgun.zip`,
 `roms/` here or in `../roms/`. Nothing derived from them is committed.
 
 ## Setup
+
+On Debian or Ubuntu, `tools/setup_debian.sh` does all of it (packages, Rust, the steps below, the
+translation, Ghidra's drafts). To move to another machine, `tools/carry.sh` packs the ROMs and what
+is made from them into one tarball (for your own machines only), and `tools/setup_debian.sh
+carry.tar` starts from it. By hand:
 
 ```
 tools/setup_venv.sh                    # .venv: Capstone, Pillow
@@ -83,6 +88,9 @@ game runs a frame a refresh; otherwise by the clock at 59.94.
 | `tools/rom/coffscan.py`, `coffdump.py`, `textruns.py`, `blockmap.py` | find and read what the cart's padding holds |
 
 The oracle is Mednafen 1.32.1 (GPL-2.0+), patched by `tools/patches/mednafen/` (`mkpatch.sh` remakes
-the patch from `ref/`): a development tool, never shipped or linked into the port. The port is MIT.
+the patch from `ref/`): a development tool, never shipped or linked into the port. The patch and the
+oracle's stand-alone SCSP and VDP1 (`tools/scsp/`, `tools/vdp1/`, built against Mednafen's source)
+are, like Mednafen, GPL-2.0+; everything else is MIT (`LICENSE`). No ROM or anything made from one
+is in the repository: bring your own copy of the game.
 
 Setup also needs Rust (stable, 2024 edition).

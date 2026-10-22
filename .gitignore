@@ -1,16 +1,21 @@
 # ROMs are never committed; everything is made from the user's own copy in roms/
-/roms/
+/roms
 *.zip
 *.bin
 *.ic8
 # reference material and tools fetched by tools/fetch_refs.sh
-/ref/
-# build products and run output (everything derived from the ROM lives here)
-/build/
-/out/
+/ref
+# build products and run output (everything derived from the ROM lives here; also as symlinks)
+/build
+/out
 # local Python environment (tools/setup_venv.sh)
-/.venv/
+/.venv
 __pycache__/
 *.o
 *.so
-/target/
+/target
+# ROM-derived files wherever they land: save states, pictures, sound, the carry-over tarball
+*.state
+*.tar
+*.ppm
+*.wav
