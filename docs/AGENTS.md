@@ -62,6 +62,9 @@ into the next brief for that overlay.
    each segment: list every report of the batch's runs, not only the ones the agent quotes. A fix
    checked only by a short repro is rerun on the full segment before merging (an STG02 batch was
    merged with its f090000 report still diverging; the full rerun confirmed the fix afterwards).
+   Every segment that runs a new function must be among them: grep the new addresses in all the
+   overlay's segments' marathon reports (an STG05 batch ran f170000-f190000 but one function also
+   ran in f200000; the orchestrator ran it before merging).
 3. No ROM data copied in: small constants the code uses are fine (literal-pool values, a few
    immediates); tables are read where the game keeps them. `grep "^const .*: \["` and look.
 4. Read a function or two for style and sense (docs a reader understands, fields named).
