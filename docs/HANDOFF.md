@@ -4,91 +4,43 @@ Read this first. `PLAN.md` beside it has the owner's decisions and the phases, `
 game asks of the hardware; the method is md-recomp's playbook (`md-recomp/playbook/PLAYBOOK.md`, a
 sibling project: not needed to carry on). Paths are from the repository's root.
 
-**Now (22 October 2026).** Everything the game runs is readable Rust now but its stage overlays
-(and, on purpose, the .control interrupt layer and the BIOS's own services). Overlays done:
-TITLE, OPENING, STG00, STG01 (`crates/rsgun/src/game/stg01.rs`, stage 3, the first stage
-played): every STG01 function the marathon runs is rewritten (main bbb0f2c and the batch after
-it: the stage boss's arms' attacks, guns, beam, blasts and maker). STG01's functions no segment
-runs are left to the SH-2 code (cpu.call where a rewrite calls them): 0x0608e044, 0x0609a888,
-0x0609b8a4, 0x0609b8d0, 0x0609c400, 0x0609cf60, 0x0609d25c, 0x0609d2a4, 0x0609d83c, 0x0609d984,
-0x0609db48, 0x0609dc58, 0x0609ddb4, 0x0609de74, 0x0609e0d8, 0x0609e2e8, 0x0609d124,
-0x0609ee24, 0x0609ef70 and the other never-called ones. Two agents work at once (21 October):
-STG01 on wip-stg01 (../rsgun-stg01), STG02 on wip-stg02 (../rsgun-stg02). Left after them:
-STG04 (5c18364ee98aacb1, game mode 10, runs about f160000-f170000), STG05 (2adefae5540dd556,
-game mode 11, f170000-f200000: under way on wip-stg04, its worktree ../rsgun-stg04, from
-0x06081514), RANK (4635b7419f6fc1a7); check each name with `states::overlay_name` before
-registering (a block registered under the wrong overlay never runs, and its report shows only
-`f_...` names). The marathon
-reports in out/port/marathon-898fd01 label an address by one overlay's fingerprint only: a
-function shown as another overlay's (f_ADDR_1a653c... in an STG01 segment) may be STG01's; check
-the compare runs' own reports. How each function is done, step by step: section 6, step 1, "The
-overlay loop". The branch is main.
+**Now (22 October 2026, afternoon).** Everything the game runs is readable Rust now but its stage
+overlays (and, on purpose, the .control interrupt layer and the BIOS's own services). The work is
+split as docs/AGENTS.md describes: this session orchestrates, two Sonnet agents do one batch each.
 
-State as of 21 October 2026 (night): main = d2162fe, fast-forwarded from wip-b6 after the gate
-below; check.sh on main every call equal; the whole-game check (`check_marathon.sh 7`, reports
-in out/port/marathon-d2162fe, 2 h 48 at 7 jobs) every call equal in all 21 segments, about 10
-billion calls: the first whole game with no divergence at all. Rewritten: the game's part of .control but the interrupt layer (528 of 535 called;
-the 7 left on purpose), the main image's game code all of it (the start-up, the top level, the
-protection check: d2162fe), SGL's library but two internal routines and SGL's core but six (none
-called by native code: their rewritten callers have them inline; 0x06033654 is the empty wait),
-Sega's sound library's set-up. Left: the overlays (849 functions called in the marathon, about 5
-million calls; waiting on step 1's question), the BIOS's services (the machine's code, not the
-game's), and a readable pass over the routines asm2sm.py generated (the slave's polygon
-pipeline, the VDP set-up). After the BIOS's handover a native run interprets nothing of the
-game's or SGL's code (section 6, step 4). The batches since the last whole-game check (43902ed):
-ba5a819, c046d1b, 2c43ff5 (the slave's drawing), 57a0824 (SGL's core: slInitSystem, the slave's
-loops, the PCM streams; native timing, section 5), d2162fe: each equal on f000000, the attract
-mode, play1, backup and the stretches it runs in (f010000-f050000, f080000, f100000,
-f140000-f190000); the native check (play1 and the attract mode at --cpu-speed 16) on the
-interpreter's pictures at c046d1b, 2c43ff5 (the attract mode), 57a0824 and d2162fe.
-On wip-b6 after d2162fe: the readable pass over asm2sm.py's routines. Committed (01598f8):
-the slave's frame draw (4: the depth lists bucket-sorted into the SCU's indirect DMA table), its
-screen set-up (8) with the pair clearer and the shade tables, SGL's drawing set-up, and the VDP
-set-up with its font cells, rotation tables, DMA copy and colours (still spending the SH-2 code's
-time block by block). Then the slave's handlers got a contract of their own: compare mode
-checked r8-r14 at each return, which SGL's handlers leave differently on every early out; a
-native run with every register the slave's loop does not set filled with garbage before each
-handler (out/port/poison) ended play1 and the attract mode on the interpreter's pictures, so no
-handler reads what another left, and `-> slave` (stv's Contract::Keeps: r4 and r15) checks
-memory and the place in the commands only. With it, the turned sprite (24: VDP1's zoom point
-picks where the place is on the sprite) and the polygon command (20: about 2000 instructions,
-now a point loop, the polygon loop and three stages by the attribute's kind) are written out.
-SGL quirks kept: the corner stage's Gouraud test reads r5, which the depth stage leaves as the
-near limit, its half or 0x3ff (and the stack's place after the normal for the previous
-polygon's depth); the draw-in's loop for x below -512 branches back to its bound's negation
-(the bound turns each pass: a negative x halved twice at a time); a polygon command with no
-points pops what it never pushed (not seen run: nothing done). The polygon command first had
-199 calls of play1's 12,528 diverging from frame 3265 (a corner order): the dump
-(STV_COMPARE_DUMP) showed a drawn-in point's place, and the toggling bound was the cause.
-main = 898fd01 since (21 October, afternoon): check.sh every call equal; the whole-game check
-on it (out/port/marathon-898fd01) every call equal in all 21 segments. On wip-b6 after it: 72d140e, the runtime's speed
-(section 4, "Speed": 4.7 ms a frame in play, every output the same); then the matrix inverse
-(0x06071d2c, slInversMatrix's) written out: the three steps of one elimination (`inverse_step`:
-each other column reduced, the translation at 8 fraction bits, the pivot's column divided, the
-pivot its reciprocal), the first two pivots the biggest of their column with the row swapped
-up, the swaps undone on the columns, and r0-r7, MAC and T left as the SH-2 code leaves them on
-each of its paths; equal on play1, the attract mode, f040000 and f160000 (11,887 calls) and
-the native check. Still as asm2rs.py wrote them: the two-scale sprite put (its early outs each
-leave other registers) and the PCM streams (only their idle path runs).
-Earlier: main at a4ef96e (wip-b6 merged after
-check_native and the play1/attract/backup compares, all equal; check.sh on main equal; the
-whole-game check `check_marathon.sh 7` on it: 18 of 21 segments every call equal, three with
-obj_exec leaving memory otherwise (f080000 from frame 83079, f140000 at 147907, f200000 at
-206358). All three were stale stack slots read by structs the overlays build on the stack and
-leave fields of unset (section 3, "Stale stack"): fixed on wip-b6 (c2a051f, 43902ed: obj_exec's
-loop registers, draw's corner loop, the actor execs' r8, turn_toward's frame), each equal past
-its frame. The whole-game check of wip-b6 at 43902ed (out/port/marathon-b6z, binary out/port/b6z)
-runs; ba5a819 came after (slTan, the matrix inverse, the two-scale sprite put: equal on play1,
-f010000, f040000). Branch wip-b6 (scratch worktree) goes on from there: the game's part of .control (0x06040000-0x06066000) is
-rewritten but for the interrupt layer (540 of 547), the main image's game code all of it (what
-is left below 0x06033000 is the BIOS's code in RAM, 0x06000C00-0x06003000, not the game's), GCC's
-shift helpers, and SGL's matrix stack, turns (slRotX/Y/Z and their SC forms, their sine and
-cosine), slTranslate/slScale/slCalcPoint/slLoad-/slGetMatrix, slPutPolygon, slPutSprite and the
-DMA polygon put, slAtan, slCurWindow, slConvert, the BGON bits. Earlier sweeps found a rewrite
-registered `-> ()` whose SH-2 function leaves a result its callers use (`void_results.py`),
-stale stack reads of pushed registers (section 3, "Stale stack"), SGL's register hand-on
-(section 5) and a function rewritten twice whose second registration silently replaced the
-first (`rewrites!` now refuses that).
+Overlays (fingerprint, game mode, marathon segments, worktree and branch, where it stands):
+- TITLE, OPENING, STG00: done.
+- STG01 (259ec12a68feaeb3, stage 3, f000000-f060000 and f200000; ../rsgun-stg01, wip-stg01): done.
+  Every function the marathon runs is rewritten. Left to the SH-2 code (never run): 0x0608e044,
+  0x0609a888, 0x0609b8a4, 0x0609b8d0, 0x0609c400, 0x0609cf60, 0x0609d124, 0x0609d25c,
+  0x0609d2a4, 0x0609d83c, 0x0609d984, 0x0609db48, 0x0609dc58, 0x0609ddb4, 0x0609de74,
+  0x0609e0d8, 0x0609e2e8, 0x0609ee24, 0x0609ef70 and the never-called ones.
+- STG02 (1a653c2164fc4f52, f060000-f130000; ../rsgun-stg02, wip-stg02): through 0x0609b2f4 and
+  the early events; next 0x0609b5a8 (f060000), about 120 left. Held back, uncommitted in the
+  worktree (never run): stage_boss_event 0x06097610, last_part_lost 0x060979cc, twelve mid-boss
+  steps 0x0608a054-0x0608b0c0.
+- STG04 (5c18364ee98aacb1, game mode 10, f150000-f170000; ../rsgun-stg04, wip-stg04):
+  0x0608034c-0x060818d4 done; next 0x06081914. Its mode at 0x06080000 shows in those reports
+  under fingerprint 1410a40e (a load-time state?): find which segment runs it as STG04's.
+- STG05 (2adefae5540dd556, game mode 11, f170000-f200000; ../rsgun-stg05, wip-stg05):
+  0x06080000-0x0608345c done; next 0x060835b4, about 150 left.
+- RANK (4635b7419f6fc1a7): not started.
+Check each overlay's name with `states::overlay_name` before registering (a block registered
+under the wrong name never runs; its report shows only `f_...` names). The marathon reports in
+out/port/marathon-898fd01 label an address by one overlay's fingerprint only: in a segment where
+two overlays run, check your own compare runs' reports. How each function is done: section 6,
+step 1, "The overlay loop". The branch is main.
+
+Before the overlays (history in `git log`): the main image's game code, the game's part of
+.control but its interrupt layer, SGL's library and core, and Sega's sound library's set-up were
+rewritten and checked; after the BIOS's handover a native run interprets nothing of the game's or
+SGL's code (section 6, step 4). The last whole-game check before the overlay work
+(`check_marathon.sh 7`, reports in out/port/marathon-898fd01, the reference the overlay work
+reads) had every call equal in all 21 segments. The native check runs play1 and the attract mode
+at `--cpu-speed 16` against the interpreter's pictures. `check.sh` is the quick gate on main.
+Left besides the overlays: the BIOS's services (the machine's code, not the game's), and a
+readable pass over the routines asm2sm.py generated (the slave's polygon pipeline, the VDP
+set-up). When the overlays are done, run the whole-game check again on main.
 
 ## 1. Layout and constraints
 
@@ -582,27 +534,7 @@ start reach the Trial Ride tutorial with the ship moving and firing. Gameplay fr
 
 ## 6. Next steps, in order
 
-1. wip-b6, checked batch by batch where each batch runs (a 3000-frame compare from the stretch's
-   state, or play1; the stretches a function runs in are in the last sweep's reports, as
-   region.py-style counts of the evidence tell): since a4ef96e every batch has been equal on its
-   stretches (b6p-b6s: the stage pictures' and fonts' loaders, the title screen, the wounded
-   body's maker, model groups and parts, the bullets' clearing flash, GCC's shifts, the colour
-   blend, a player's start and end, SGL's conversions, the cpu.call sites made nested calls,
-   SGL's turns, SC turns and their sine and cosine, slPutSprite, the DMA polygon put, slPriority,
-   slColOffsetA/B, the 64-bit root, slLookAt, the on-screen check, the C library's division):
-   committed as 44f7847; then slDispSprite, SGL's VDP2 setters (window and line scroll controls,
-   colour rates, the scroll screens' places and zooms, the colour offsets' enable, CCCTL,
-   SFCCMD's fields), the 32-bit roots and slDivFX (aed694c), and the stale-stack fixes the
-   whole-game check of main found (c2a051f, 43902ed). Not seen run
-   in any stretch (only the full marathon checks them): the heavy bullet's maker,
-   depth_box_set, the burst's star draw, angle_behind, the blown_up variants, the burster (and
-   its score hand-off) and spreader makers, thrust, ships_hidden, the ribbon's homing and
-   waving movers, the hyper sword and aura, set_offset_a, the platform and its riders, the
-   mesh toggle, fill_words, the puffs about a point, the spinner's set-up; obj_set_before is in
-   no evidence at all. Next: the whole-game check of wip-b6 at 43902ed (`RSGUN=out/port/b6z/rsgun
-   tools/port/check_marathon.sh 7 10000 out/port/marathon-b6z`, running: a 3000-frame sweep
-   misses what only shows later in a stretch, as the three stale slots did), check_native.sh
-   and the play1/attract/backup compares, then merge into main.
+1. The overlays ("the overlay loop"; docs/AGENTS.md for how batches are split and merged).
    Overlays (21 October): the second way, which commits nothing taken from the ROM. stv's
    registry asks the client to name each fingerprint the window shows (`Natives::namer`, asked
    once a fingerprint), and a rewrite registered for a name (`rewrites! { n; overlay "STG01"; ...
@@ -656,8 +588,8 @@ start reach the Trial Ride tutorial with the ship moving and firing. Gameplay fr
    (f000000 without --load-state: from power on; in bash write the start as `$((10#$n))`, a
    leading 0 is octal). The report's first line counts calls equal and diverged; each function
    has a line `ADDR name calls N equal N diverged N too long N`, and a divergence a line `ADDR at
-   frame F: ...` naming what differed. On this laptop (4 cores) a segment took 25-30 minutes,
-   four at once; write the next functions meanwhile. A batch is committed when every new
+   frame F: ...` naming what differed. A segment takes 16-40 minutes (16 cores, 8 jobs
+   at once in all); write the next functions meanwhile. A batch is committed when every new
    function it ran is equal (hold back, uncommitted, the ones no segment ran).
    Where STG01 stands (22 October): done (see the top). Its last part, the stage boss
    (0x0609bcc4-0x0609f028, frames 40000-50000): the boss object (its parts' numbers +0x70-+0x75,

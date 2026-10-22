@@ -2,7 +2,8 @@
 
 Radiant Silvergun (Sega ST-V) rewritten as readable Rust, every rewrite checked call by call
 against the game's own SH-2 code in compare mode. Read `docs/HANDOFF.md` first: its top says where
-the work is and what comes next; `docs/PLAN.md` has the owner's decisions.
+the work is and what comes next; `docs/PLAN.md` has the owner's decisions; `docs/AGENTS.md` how the
+work is split between agents.
 
 ## Rules
 
@@ -12,13 +13,15 @@ the work is and what comes next; `docs/PLAN.md` has the owner's decisions.
   They live in `roms/`, `build/` and `out/` (git-ignored). Game knowledge (names, field offsets,
   addresses, constants the code uses) is fine in `crates/rsgun`; none in `crates/stv`.
 - The oracle (Mednafen, GPL) is a development tool: never shipped, never linked, never translated.
-- Two agents may work at once (the owner's decision, 21 October), each in its own git worktree and
-  branch (`git worktree add ../rsgun-NAME -b wip-NAME`; link `out/` and `build/` from the main
-  checkout), each on its own overlay: its own file in `crates/rsgun/src/game` and its own
-  `rewrites!` block, compare reports in `out/port/NAME-*`. A change to a shared module (aim.rs,
-  actors.rs, ...) is kept small and committed on its own, so the other merges it easily. Merge into
-  main only fast-forward or after a rebase, and only checked work. No subagents. Run at most half
-  the machine's cores' worth of compare segments at once, so both agents' builds keep moving.
+- Agents (the owner's decision, 22 October; docs/AGENTS.md has the whole process): the main
+  session orchestrates (scaffolds overlays, briefs, reviews, merges, keeps the docs) and runs two
+  coding subagents (Sonnet), each a fresh agent for one batch of one overlay in its own git
+  worktree and branch (`git worktree add ../rsgun-NAME -b wip-NAME`; link `out/` and `build/` from
+  the main checkout), compare reports in `out/port/NAME-*`. A change to a shared module (aim.rs,
+  actors.rs, ...) is kept small and committed on its own. Merge into main only fast-forward or
+  after a rebase, and only checked work, by the orchestrator. Run at most half the machine's
+  cores' worth of compare segments at once (on 16 cores: 3 per coding agent, 2 for the
+  orchestrator).
 - Commit after each finished, checked batch and go straight on; stop only for a decision the owner
   must make. Commits are made as `git -c user.name=1nputs -c user.email=1nputs@protonmail.com
   commit`, end with the Co-Authored-By line Claude Code gives, and carry no session links and no
