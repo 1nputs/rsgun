@@ -1,8 +1,8 @@
 //! STG05.BIN's code, which the last stage's mode (game mode 11) runs in the overlay window
 //! (fingerprint 2adefae5540dd556): its mode's code, its enemies and scenery, its scrolls.
 
-use super::globals::{GAME_FRAMES, LOOPS};
-use super::{actors, aim, bg, player, bullets, camera, clib, dma, effects, explosions, files, gouraud, hits, hud, kinds, math, models, nested, objects, palette, parts, results, ribbons, rings, screen, sgl, sound, sprites, states, text, timeline, Cpu};
+use super::globals::{BIOS_SETTING, GAME_FRAMES, LOOPS};
+use super::{actors, aim, bg, director, player, bullets, camera, clib, dma, effects, explosions, files, gouraud, hits, hud, kinds, math, models, nested, objects, palette, parts, results, ribbons, rings, screen, sgl, sound, sprites, states, text, timeline, Cpu};
 
 /// The director's slots the mode uses (states.rs's, as STG01's mode uses them): its step, the
 /// load (a local written back each time), the settings kept (the buffer +0x6c, the room's top
@@ -5296,11 +5296,11 @@ fn block_clear(cpu: &mut Cpu, b: u32, place: u32, y: u32) {
 pub fn screen_set(cpu: &mut Cpu, s: u32) {
     cpu.call(0x0606_e23c, &[0x12_0005]);
     nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, SCREEN_PALETTE, 0x110, 0x20));
-    cpu.call(0x0608_de54, &[0, 0, 0x160, 0xdf]);
+    nested!(cpu, 0x0608_de54, sgl::sl_scr_window0(cpu, 0, 0, 0x160, 0xdf));
     cpu.call(0x0606_e17c, &[7, 2]);
-    cpu.call(0x0608_de74, &[0xa5e3_fa80]);
+    nested!(cpu, 0x0608_de74, sgl::sl_line_window0(cpu, 0xa5e3_fa80));
     nested!(cpu, 0x0608_a07c, screen_places_clear(cpu));
-    cpu.call(0x0608_dcd4, &[3]);
+    nested!(cpu, 0x0608_dcd4, sgl::sl_rpara_mode(cpu, 3));
     block_clear(cpu, BLOCK_A, 0x80_0000, 0);
     block_clear(cpu, BLOCK_B, 0, 0xff00_0000);
     cpu.write32(BLOCK_C + 4, 0);
@@ -5385,11 +5385,11 @@ pub fn screen_frame(cpu: &mut Cpu, s: u32) {
     cpu.write32(BLOCK_B + 16, spin);
     cpu.call(SL_PUSH_MATRIX, &[]);
     cpu.call(0x0606_db7c, &[VIEW_MATRIX]);
-    cpu.call(0x0608_dce4, &[0]);
+    nested!(cpu, 0x0608_dce4, sgl::sl_cur_rpara(cpu, 0));
     nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, BLOCK_A));
     let z = 0xfe00_0000u32.wrapping_sub(cpu.read32(LIGHT_Z));
     cpu.write32(BLOCK_B + 20, z);
-    cpu.call(0x0608_dce4, &[1]);
+    nested!(cpu, 0x0608_dce4, sgl::sl_cur_rpara(cpu, 1));
     nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, BLOCK_B));
     cpu.call(SL_POP_MATRIX, &[]);
     nested!(cpu, 0x0608_a09c, beam_draw(cpu, s));
@@ -5572,7 +5572,7 @@ pub fn lens_behaviour(cpu: &mut Cpu, o: u32) {
             nested!(cpu, 0x0605_e9d8, screen::stop_fades(cpu));
             nested!(cpu, 0x0605_e6dc, screen::set_fade_offset(cpu, 0xe0, 0xe0, 0xe0));
             nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, 0, 0, 0, 0x200));
-            cpu.call(0x0608_de24, &[3]);
+            nested!(cpu, 0x0608_de24, sgl::sl_sprite_cc_condition(cpu, 3));
             cpu.write8(o + MODE, 1);
             lens_run(cpu, o);
         }
@@ -5732,9 +5732,9 @@ pub fn drop_frame(cpu: &mut Cpu, o: u32) {
     cpu.write32(BLOCK_B + 16, b);
     cpu.call(SL_PUSH_MATRIX, &[]);
     nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
-    cpu.call(ROTATION_SIDE, &[0]);
+    nested!(cpu, ROTATION_SIDE, sgl::sl_cur_rpara(cpu, 0));
     nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, BLOCK_A));
-    cpu.call(ROTATION_SIDE, &[1]);
+    nested!(cpu, ROTATION_SIDE, sgl::sl_cur_rpara(cpu, 1));
     nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, BLOCK_B));
     cpu.call(SL_POP_MATRIX, &[]);
     nested!(cpu, 0x0608_a09c, beam_draw(cpu, o));
@@ -5806,7 +5806,7 @@ pub fn world_set(cpu: &mut Cpu, s: u32) {
     for k in [0x20, 0x24, 0x28, 0x2c, 0x30] {
         cpu.write32(s + k, 0);
     }
-    cpu.call(0x0608_dd04, &[0x25e4_4000]);
+    nested!(cpu, 0x0608_dd04, sgl::sl_map_rb(cpu, 0x25e4_4000));
     nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, 0x0609_1c94, 16, 0x80));
     nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, 0x0609_1c74, 0x100, 16));
     cpu.call(0x0606_e17c, &[0, 3]);
@@ -5946,12 +5946,12 @@ pub fn world_frame(cpu: &mut Cpu, o: u32) {
     cpu.write32(BLOCK_A + 16, a);
     cpu.call(SL_PUSH_MATRIX, &[]);
     nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
-    cpu.call(ROTATION_SIDE, &[0]);
+    nested!(cpu, ROTATION_SIDE, sgl::sl_cur_rpara(cpu, 0));
     nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, BLOCK_A));
     cpu.call(SL_POP_MATRIX, &[]);
     cpu.call(SL_PUSH_MATRIX, &[]);
     nested!(cpu, 0x0608_b00c, world_view(cpu));
-    cpu.call(ROTATION_SIDE, &[1]);
+    nested!(cpu, ROTATION_SIDE, sgl::sl_cur_rpara(cpu, 1));
     nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, BLOCK_B));
     cpu.call(SL_POP_MATRIX, &[]);
     nested!(cpu, 0x0608_b078, world_scroll(cpu));
@@ -5989,8 +5989,8 @@ pub fn world_colours(cpu: &mut Cpu) {
 pub fn world_start(cpu: &mut Cpu, o: u32) {
     cpu.write8(o + 8, 0);
     cpu.write32(o + 32, 0);
-    cpu.call(0x0608_dcd4, &[1]);
-    cpu.call(ROTATION_SIDE, &[1]);
+    nested!(cpu, 0x0608_dcd4, sgl::sl_rpara_mode(cpu, 1));
+    nested!(cpu, ROTATION_SIDE, sgl::sl_cur_rpara(cpu, 1));
     cpu.write32(WORLD + 24, 0x80);
     nested!(cpu, 0x0606_1620, text::message_set(cpu, 0x0609_1468));
     cpu.write8(0x0600_ed90, 1);
@@ -6052,7 +6052,7 @@ pub fn timer_start(cpu: &mut Cpu, o: u32) {
     cpu.write32(o + 52, 0xe10);
     cpu.write8(o + 8, 0);
     cpu.write32(o + 32, 0);
-    cpu.call(0x0608_da04, &[]);
+    nested!(cpu, 0x0608_da04, attack_start(cpu));
 }
 
 /// The timer's frame (the scroll object `o`): a frame off the time, shown; the motion, the second
@@ -6150,13 +6150,13 @@ pub fn part_set_up(cpu: &mut Cpu, o: u32) {
     for (screen, v) in [(1, 0), (0, 0), (3, 3)] {
         cpu.call(0x0606_e17c, &[screen, v]);
     }
-    cpu.call(0x0608_de54, &[0, 0x20, 0x15f, 0xdf]);
+    nested!(cpu, 0x0608_de54, sgl::sl_scr_window0(cpu, 0, 0x20, 0x15f, 0xdf));
     nested!(cpu, 0x0606_e2b6, sgl::sl_char_nbg3(cpu, 0, 0));
     nested!(cpu, 0x0606_e2f4, sgl::sl_page_nbg3(cpu, 0x25e7_8000, 0x600, 0x8000));
-    cpu.call(0x0608_dea4, &[0]);
-    cpu.call(0x0608_deb4, &[0x25e6_8000, 0x25e6_8000, 0x25e6_8000, 0x25e6_8000]);
+    nested!(cpu, 0x0608_dea4, sgl::sl_plane_nbg3(cpu, 0));
+    nested!(cpu, 0x0608_deb4, sgl::sl_map_nbg3(cpu, 0x25e6_8000, 0x25e6_8000, 0x25e6_8000, 0x25e6_8000));
     nested!(cpu, 0x0605_eee4, screen::fill_cells(cpu, 0, 0x25e6_8000, 64, 64));
-    cpu.call(0x0608_df74, &[0, 0]);
+    nested!(cpu, 0x0608_df74, sgl::sl_scr_pos_nbg3(cpu, 0, 0));
     nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 2, 7));
     nested!(cpu, 0x0606_dd4c, sgl::vram_split(cpu, 2));
     nested!(cpu, 0x0606_dd6c, sgl::sl_scr_auto_disp(cpu, 15));
@@ -6241,3 +6241,969 @@ pub fn picture_load(cpu: &mut Cpu, o: u32, base: u32, table: u32) {
 }
 
 static PICTURE_CELLS_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
+
+// ---- the picture scene (the last pictures, one plane then the other) -----------------------------------
+
+/// The picture scene's object `o`: its step byte (+8), whether it is the last picture (+9), the
+/// plane in use (+0x20), the picture's load (+0x24), the picture's number (+0x28), the fade's
+/// count (+0x2c), the wait (+0x30) and the fade's step (+0x34).
+const PIC_STEP: u32 = 8;
+const PIC_LAST: u32 = 9;
+const PIC_PLANE: u32 = 0x20;
+const PIC_LOAD: u32 = 0x24;
+const PIC_NUMBER: u32 = 0x28;
+const PIC_COUNT: u32 = 0x2c;
+const PIC_WAIT: u32 = 0x30;
+const PIC_RATE: u32 = 0x34;
+/// The pictures' tables, by the BIOS setting's region (bits 12-15 one or not): the files' names and
+/// each picture's 40-byte entry (the wait +0, the fade's step +4, the plane's view +0x18, 4 words).
+const PIC_FILES_ONE: u32 = 0x0609_2004;
+const PIC_ENTRIES_ONE: u32 = 0x0609_20b0;
+const PIC_FILES: u32 = 0x0609_207c;
+const PIC_ENTRIES: u32 = 0x0609_2538;
+const PIC_ENTRY: u32 = 40;
+const PIC_VIEW: u32 = 24;
+/// The planes' views (4 words: zoom, x, ...), plane A's and plane B's.
+const VIEW_A: u32 = 0x0607_47e0;
+const VIEW_B: u32 = 0x0607_47b0;
+/// The load's buffer, and the fade's end.
+const LOAD_BUFFER: u32 = 0x0607_40e4;
+const FADE_FULL: u32 = 0x1_0000;
+/// The last picture's text (typewriter: its text, place, flags, blink), where it is shown.
+const PIC_TEXT: u32 = 0x0608_c33c;
+const PIC_TEXT_AT: u32 = 0x25e7_e692;
+const PIC_TEXT_FLAGS: u32 = 0xc000_0001;
+/// The scene's two codes left to the SH-2 code: the set-up before picture 3 and the sound of the
+/// picture before the last text's (12, 13 in region one).
+const PIC_SET_UP: u32 = 0x0608_ba60;
+const PIC_SOUND: u32 = 0x0608_bf58;
+
+/// The picture scene's step (its object `o`): the ships held still; past step 1 the start pressed
+/// ends the scene (step 7). Then by the step: 0 starts picture n's file loading; 1 and 2 put it in
+/// its plane once loaded (1 fades in: the plane on, a fade from white); 3 waits for the long
+/// copies (picture 3: the set-up); 4 takes the picture's view, wait and fade step and starts the next
+/// picture loading, or (none left) marks the last; 5 fades the one plane over the other by the
+/// count (colour rate by the eased count) and swaps them at the full count; 6 waits then goes back to
+/// 2 or ends the scene. The planes drift 0x40000 a frame in x (the other way on odd frames) up to
+/// picture 8. The planes' frames.
+pub fn slides_step(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0606_16b8, player::ships_still(cpu));
+    if cpu.read8(o + PIC_STEP) as i8 > 1 && nested!(cpu, 0x0606_1780, player::start_pressed(cpu)) != 0 {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+        cpu.write8(o + PIC_STEP, 7);
+    }
+    let one = (cpu.read32(BIOS_SETTING) >> 12) & 15 == 1;
+    let (names, entries) = if one { (PIC_FILES_ONE, PIC_ENTRIES_ONE) } else { (PIC_FILES, PIC_ENTRIES) };
+    let step = cpu.read8(o + PIC_STEP);
+    match step {
+        0 => slides_load(cpu, o, names),
+        1 | 2 => {
+            let load = cpu.read32(o + PIC_LOAD);
+            if nested!(cpu, 0x0600_6074, files::load_done(cpu, load)) != 0 {
+                let buffer = cpu.read32(LOAD_BUFFER);
+                nested!(cpu, 0x0608_c254, picture_load(cpu, o, buffer, entries));
+                if step == 1 {
+                    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x2_000d));
+                    nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, 0, 0, 0, 0x8000));
+                    cpu.write8(o + PIC_STEP, 4);
+                } else {
+                    slides_next(cpu, o);
+                }
+            }
+        }
+        3 => {
+            if nested!(cpu, 0x0605_ed84, screen::long_copies_on(cpu)) == 0 {
+                if cpu.read32(o + PIC_NUMBER) == 3 {
+                    cpu.call(PIC_SET_UP, &[]);
+                }
+                slides_next(cpu, o);
+            }
+        }
+        4 => {
+            let n = cpu.read32(o + PIC_NUMBER);
+            let e = entries + PIC_ENTRY * n;
+            let view = if cpu.read32(o + PIC_PLANE) == 0 { VIEW_A } else { VIEW_B };
+            for k in 0..4 {
+                let v = cpu.read32(e + PIC_VIEW + 4 * k);
+                cpu.write32(view + 4 * k, v);
+            }
+            let wait = cpu.read32(e);
+            cpu.write32(o + PIC_WAIT, wait);
+            let rate = cpu.read32(e + 4);
+            cpu.write32(o + PIC_RATE, rate);
+            cpu.write32(o + PIC_NUMBER, n + 1);
+            if cpu.read32(names + 4 * (n + 1)) != 0 {
+                slides_load(cpu, o, names);
+            } else {
+                cpu.write32(o + PIC_COUNT, 0);
+                cpu.write8(o + PIC_LAST, 1);
+                slides_next(cpu, o);
+            }
+        }
+        5 => slides_fade(cpu, o, one),
+        6 => {
+            let wait = cpu.read32(o + PIC_WAIT).wrapping_sub(1);
+            cpu.write32(o + PIC_WAIT, wait);
+            if wait == 0 {
+                if cpu.read8(o + PIC_LAST) == 0 {
+                    cpu.write8(o + PIC_STEP, 2);
+                } else {
+                    nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+                    cpu.write8(o + PIC_STEP, 7);
+                }
+            }
+        }
+        _ => {}
+    }
+    if cpu.read32(o + PIC_NUMBER) as i32 <= 8 {
+        for view in [VIEW_A, VIEW_B] {
+            let odd = cpu.read32(GAME_FRAMES) & 1 != 0;
+            let x = cpu.read32(view + 4).wrapping_add(if odd { 0x4_0000 } else { 0xfffc_0000 });
+            cpu.write32(view + 4, x);
+        }
+    }
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+}
+
+fn slides_next(cpu: &mut Cpu, o: u32) {
+    let s = cpu.read8(o + PIC_STEP).wrapping_add(1);
+    cpu.write8(o + PIC_STEP, s);
+}
+
+/// The picture n's file loading started (the next step once it has: the fade's count cleared).
+fn slides_load(cpu: &mut Cpu, o: u32, names: u32) {
+    let n = cpu.read32(o + PIC_NUMBER);
+    let name = cpu.read32(names + 4 * n);
+    let load = nested!(cpu, 0x0600_5e40, files::load_file(cpu, name));
+    if load == 0 {
+        return;
+    }
+    cpu.write32(NEXT_RATE, 0x800);
+    let buffer = cpu.read32(LOAD_BUFFER);
+    nested!(cpu, 0x0600_603c, files::start_load(cpu, load, buffer));
+    cpu.write32(o + PIC_LOAD, load);
+    cpu.write32(o + PIC_COUNT, 0);
+    slides_next(cpu, o);
+}
+
+/// Step 5: the count 0 starts the fade (the sound of its picture, both planes on, colour
+/// calculation 1); then the plane's colour rate goes by the eased count, and the count up by the
+/// step; at the full count the last picture's text starts, the plane on alone, the count cleared,
+/// the planes swapped and the next step. Picture 1 only counts.
+fn slides_fade(cpu: &mut Cpu, o: u32, one: bool) {
+    let n = cpu.read32(o + PIC_NUMBER);
+    let count = cpu.read32(o + PIC_COUNT);
+    if n == 1 && count != FADE_FULL {
+        return slides_count(cpu, o);
+    }
+    if count == FADE_FULL {
+        if one && n == 12 {
+            nested!(cpu, 0x0606_14b0, text::typewriter_set(cpu, PIC_TEXT, PIC_TEXT_AT, PIC_TEXT_FLAGS, 90));
+        }
+        let plane = cpu.read32(o + PIC_PLANE);
+        nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, if plane == 0 { 0x2_000d } else { 0x1_000e }));
+        cpu.write32(o + PIC_COUNT, 0);
+        cpu.write32(o + PIC_PLANE, plane ^ 1);
+        slides_next(cpu, o);
+        return;
+    }
+    if count == 0 {
+        if n == if one { 13 } else { 12 } {
+            cpu.call(PIC_SOUND, &[]);
+        }
+        nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 15));
+        nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 1));
+    }
+    let count = cpu.read32(o + PIC_COUNT);
+    let t = if cpu.read32(o + PIC_PLANE) == 0 { 0xffff_u32.wrapping_sub(count) } else { count };
+    let rate = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0, 0x20_0000, t));
+    nested!(cpu, 0x0606_e45c, sgl::sl_col_rate(cpu, 1, rate >> 16));
+    slides_count(cpu, o);
+}
+
+fn slides_count(cpu: &mut Cpu, o: u32) {
+    let c = cpu.read32(o + PIC_COUNT).wrapping_add(cpu.read32(o + PIC_RATE));
+    cpu.write32(o + PIC_COUNT, c);
+}
+
+/// The picture scene's end: the display flag set, the mode done.
+pub fn slides_end(cpu: &mut Cpu) {
+    cpu.write8(0x0600_edcc, 1);
+    nested!(cpu, 0x0604_0c64, director::mode_done(cpu));
+}
+
+/// The scene's frame: its step, the ships held still.
+pub fn slides_frame(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_c34c, slides_step(cpu, o));
+    nested!(cpu, 0x0606_16b8, player::ships_still(cpu));
+}
+
+// ---- the last attack's shots and orbs, made by its timeline --------------------------------------------
+
+/// The shots' and orbs' objects (their sprite from +0x10 as the objects above; the number +0x32 is the
+/// place in the table of numbered objects): the sprite's colours +0x28 and +0x2a, its kind +0x2e,
+/// the draw +0x34, the hit's table +0x3c, the fields +0x48 and +0x4c (set to -1), +0x54 and +0x55
+/// (1 and 5), the shot's table +0x70 of its hits (a pair, by the side of the screen it is on),
+/// the script +0x6c (2 bytes an entry: the frame, then how many frames; 0xff ends) with its
+/// wait +0x74 and place +0x75, the side +0x76 (the frame's parity it shows on), the angle +0x78,
+/// the speed's parts +0x80 and +0x84. An orb has instead its state +0x6c, its distance +0x74, the
+/// distance it stops at +0x78 and its angle +0x30.
+const NUMBER_BYTE: u32 = 0x32;
+const SHOT_TURN_SET: u16 = 0x8000;
+const SHOT_SCRIPT: u32 = 0x6c;
+const SHOT_HITS: u32 = 0x70;
+const SHOT_WAIT: u32 = 0x74;
+const SHOT_AT: u32 = 0x75;
+const SHOT_SIDE: u32 = 0x76;
+const SHOT_MOVE: u32 = 0x80;
+/// The shots' tables: the side flipped for each shot made (a long's last byte), their hit pairs, the
+/// flash's frame in the kind 0's frames, and the draw, behaviour and maker.
+const SHOT_SIDES: u32 = 0x0609_2770;
+const SHOT_HIT_PAIR: u32 = 0x0609_2804;
+const PUFF_FRAME: u32 = 0x6b0;
+const SHOT_DRAW: u32 = 0x0608_c898;
+const SHOT_BEHAVIOUR: u32 = 0x0608_ca5c;
+const SHOT_ORB_BEHAVIOUR: u32 = 0x0608_cb8c;
+const ATTACK_BEHAVIOUR: u32 = 0x0608_d758;
+const ATTACK_EXEC: u32 = 0x0608_d948;
+
+/// Whether the point `p` (x +0, y +4) is off the shots' area (x between -0xae0000 and 0xae0000,
+/// y between -0x6c0000 and 0x6e0000): 1, else 0.
+pub fn shot_off_area(cpu: &mut Cpu, p: u32) -> u32 {
+    let (x, y) = (cpu.read32(p) as i32, cpu.read32(p + 4) as i32);
+    if y <= 0xff94_0000u32 as i32 || y > 0x6d_ffff || x > 0xad_ffff {
+        return 1;
+    }
+    (x <= 0xff52_0000u32 as i32) as u32
+}
+
+/// The shot's script step (its object `o`): the wait (+0x74) counted down; at 0 the place (+0x75, a
+/// signed byte) goes on (back to 0 at the 0xff mark), the frame (+0x2f) is the script entry's first
+/// byte and the wait its second.
+pub fn shot_script(cpu: &mut Cpu, o: u32) {
+    let wait = cpu.read8(o + SHOT_WAIT).wrapping_sub(1);
+    cpu.write8(o + SHOT_WAIT, wait);
+    if wait as i8 != 0 {
+        return;
+    }
+    let at = cpu.read8(o + SHOT_AT).wrapping_add(1);
+    cpu.write8(o + SHOT_AT, at);
+    let script = cpu.read32(o + SHOT_SCRIPT);
+    let entry = |cpu: &mut Cpu| script.wrapping_add((cpu.read8(o + SHOT_AT) as i8 as i32 * 2) as u32);
+    let e = entry(cpu);
+    if cpu.read8(e) == 0xff {
+        cpu.write8(o + SHOT_AT, 0);
+    }
+    let e = entry(cpu);
+    let frame = cpu.read8(e);
+    cpu.write8(o + FRAME, frame);
+    let e = entry(cpu);
+    let wait = cpu.read8(e + 1);
+    cpu.write8(o + SHOT_WAIT, wait);
+}
+
+/// A flash put at (`x`, `y`): kind 0's frame 214 (its first character on the kind's), the colour the
+/// character base's and `colour` more, the attributes 0x1080, a random one of the flip bits (0x32)
+/// as its direction, at depth 0xa70000: SGL's sprite put on the frame.
+pub fn puff_draw(cpu: &mut Cpu, x: u32, y: u32, colour: u32) {
+    let d = cpu.stack();
+    let flip = nested!(cpu, 0x0604_5d90, math::random(cpu, 0)) & 0x32;
+    cpu.write32(d, x);
+    cpu.write32(d + 4, y);
+    cpu.write32(d + 8, 0x00a7_0000);
+    cpu.write32(d + 12, 0xffff);
+    let frames = cpu.read32(KINDS + 4);
+    let frame = cpu.read32(frames + PUFF_FRAME);
+    let first = cpu.read16(KINDS + 8) as i16 as i32 as u32;
+    let ch = first.wrapping_add(cpu.read8(frame) as u32);
+    cpu.write16(d + 16, ch as u16);
+    nested!(cpu, 0x0600_813a, clib::ashiftrt_r4::<24>(cpu, flip));
+    cpu.write16(d + 18, ((flip as i32 >> 24) as u32 & 0xc0 | 0x1080) as u16);
+    let colour = (colour & 0xffff).wrapping_add(cpu.read16(CHAR_BASE) as i16 as i32 as u32);
+    cpu.write16(d + 20, colour as u16);
+    cpu.write16(d + 22, 0);
+    cpu.write16(d + 24, flip as u16);
+    nested!(cpu, 0x0606_75ac, sgl::sl_put_sprite(cpu, d, d + 16, 0));
+}
+
+/// A shot's draw (its object `o`): the sprite of its kind (+0x1e) and frame (+0x1f), at its x and y
+/// (the object's +4 and +8 as the draw's place) at depth 0xa80000, attribute 0x80, its colour word
+/// (+0x18), the direction 2 and the angle in +0x20.
+pub fn shot_draw(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    let x = cpu.read32(o + 4);
+    cpu.write32(d, x);
+    let y = cpu.read32(o + 8);
+    cpu.write32(d + 4, y);
+    cpu.write32(d + 8, 0x00a8_0000);
+    cpu.write32(d + 12, 0xffff);
+    let kind = KINDS.wrapping_add((cpu.read8(o + 0x1e) as i8 as i32 as u32).wrapping_mul(16));
+    let n = cpu.read8(o + 0x1f) as u32;
+    let frames = cpu.read32(kind + 4);
+    let frame = cpu.read32(frames + 8 * n);
+    let ch = (cpu.read16(kind + 8) as i16 as i32 as u32).wrapping_add(cpu.read8(frame) as u32);
+    cpu.write16(d + 16, ch as u16);
+    cpu.write16(d + 18, 0x80);
+    let colour = cpu.read16(o + 0x18);
+    cpu.write16(d + 20, colour);
+    cpu.write16(d + 22, 0);
+    cpu.write16(d + 24, 2);
+    let angle = cpu.read16(o + 0x20) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_75ac, sgl::sl_put_sprite(cpu, d, d + 16, angle));
+}
+
+/// A shot's set-up (its new object `o`, the shot's description `spec`: the number (byte +0), its
+/// x, y and z, the colour word (+16: bit 15 sets the turn, the rest added to the colour base), the
+/// script (+20), the table of hits (+24), the angle (+28)): the sprite and hit set, the flags
+/// 0x20c00000, the draw, the number, place, angle in +0x78 (and the turn if asked), the side taken
+/// from the sides' long (whose last byte is flipped for the next), the hit's table and the
+/// first of its pair by the side of the screen, the sprite's colours, the script's counts, and
+/// the script's first step.
+pub fn shot_set_up(cpu: &mut Cpu, o: u32, spec: u32) {
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + HIT));
+    let f = cpu.read32(o + FLAGS) | 0x00c0_0000;
+    cpu.write32(o + FLAGS, f);
+    cpu.write32(o + DRAW, SHOT_DRAW);
+    let f = cpu.read32(o + FLAGS) | 0x2000_0000;
+    cpu.write32(o + FLAGS, f);
+    let number = cpu.read8(spec);
+    cpu.write8(o + NUMBER_BYTE, number);
+    for k in [0, 4, 8] {
+        let v = cpu.read32(spec + 4 + k);
+        cpu.write32(o + POSITION + k, v);
+    }
+    let angle = cpu.read16(spec + 28);
+    cpu.write16(o + 120, angle);
+    let word = cpu.read16(spec + 16);
+    if word & SHOT_TURN_SET != 0 {
+        cpu.write16(o + TURN, angle);
+    }
+    let side = cpu.read8(SHOT_SIDES + 3);
+    cpu.write8(o + SHOT_SIDE, side);
+    let flipped = cpu.read32(SHOT_SIDES) ^ 1;
+    cpu.write32(SHOT_SIDES, flipped);
+    cpu.write8(o + BYTE_33, 8);
+    let hits = cpu.read32(spec + 24);
+    cpu.write32(o + SHOT_HITS, hits);
+    let hit = if (cpu.read32(o + POSITION) as i32) < 0 { cpu.read32(hits) } else { cpu.read32(hits + 4) };
+    cpu.write32(o + HIT, hit);
+    cpu.write8(o + 84, 1);
+    cpu.write8(o + 85, 5);
+    cpu.write32(o + 72, 0xffff_ffff);
+    cpu.write32(o + 76, 0xffff_ffff);
+    cpu.write8(o + SPRITE_KIND, 0);
+    let colour = ((cpu.read16(spec + 16) & 0x7fff) as u32).wrapping_add(cpu.read16(CHAR_BASE) as i16 as i32 as u32);
+    cpu.write16(o + COLOUR_B, colour as u16);
+    cpu.write16(o + SPRITE_COLOUR, colour as u16);
+    cpu.write32(o + 124, 0);
+    let script = cpu.read32(spec + 20);
+    cpu.write32(o + SHOT_SCRIPT, script);
+    cpu.write8(o + SHOT_WAIT, 1);
+    cpu.write8(o + SHOT_AT, 0xff);
+    nested!(cpu, 0x0608_c78c, shot_script(cpu, o));
+}
+
+/// A shot's behaviour (its object `o`): off the area it ends; else its hit's table is the pair's
+/// by the side of the screen (x below 0 first), its sprite shows on the frames whose parity is
+/// its side (flag 0x80000), it moves by its speed (+0x80, +0x84), and its script goes on.
+pub fn shot_behaviour(cpu: &mut Cpu, o: u32) {
+    if nested!(cpu, 0x0608_c74c, shot_off_area(cpu, o + POSITION)) != 0 {
+        cpu.write8(o + MODE, ENDING);
+        return;
+    }
+    let pair = cpu.read32(o + SHOT_HITS);
+    let hit = if (cpu.read32(o + POSITION) as i32) < 0 { cpu.read32(pair) } else { cpu.read32(pair + 4) };
+    cpu.write32(o + HIT, hit);
+    let parity = (cpu.read8(GAME_FRAMES + 3) & 1) as i32;
+    let f = cpu.read32(o + FLAGS);
+    let f = if parity == cpu.read8(o + SHOT_SIDE) as i8 as i32 { f | 0x8_0000 } else { f & 0xfff7_ffff };
+    cpu.write32(o + FLAGS, f);
+    let x = cpu.read32(o + POSITION).wrapping_add(cpu.read32(o + SHOT_MOVE));
+    cpu.write32(o + POSITION, x);
+    let y = cpu.read32(o + POSITION + 4).wrapping_add(cpu.read32(o + SHOT_MOVE + 4));
+    cpu.write32(o + POSITION + 4, y);
+    nested!(cpu, 0x0608_c78c, shot_script(cpu, o));
+}
+
+/// A shot made (list 2, 0x98 bytes, the actors' exec) from `spec`; its move the speed (+32) turned
+/// by the angle: +0x80 = speed * sin, +0x84 = - speed * cos. The object, or 0.
+pub fn shot_make(cpu: &mut Cpu, spec: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 0x98)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, ACTOR_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0608_c92c, shot_set_up(cpu, o, spec));
+    cpu.write32(o + BEHAVIOUR, SHOT_BEHAVIOUR);
+    let angle = cpu.read16(spec + 28) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, angle));
+    let speed = cpu.read32(spec + 32);
+    let x = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, speed, sin));
+    cpu.write32(o + SHOT_MOVE, x);
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, angle));
+    let speed = cpu.read32(spec + 32);
+    let y = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, speed, cos));
+    cpu.write32(o + SHOT_MOVE + 4, y.wrapping_neg());
+    o
+}
+
+/// An orb's behaviour (its object `o`): off the screen it ends; state 0 (opening) takes 0x800 a
+/// frame off the scale (+0x20) down to 0x2000 and then drops the shadow flag (0x80000) and goes on
+/// to 1; state 1 grows the distance (+0x74) by 0x1000 a frame up to its stop (+0x78); then (states
+/// from 1) the orb moves by the distance on its angle (+0x30): x by the sine, y by the cosine
+/// back.
+pub fn orb_behaviour(cpu: &mut Cpu, o: u32) {
+    if nested!(cpu, 0x0605_6a24, aim::off_screen(cpu, o + SPRITE)) as u8 != 0 {
+        cpu.write8(o + MODE, ENDING);
+        return;
+    }
+    match cpu.read32(o + ORB_STATE) {
+        0 => {
+            let scale = cpu.read32(o + SCALE_X).wrapping_add(-0x800i32 as u32);
+            cpu.write32(o + SCALE_X, scale);
+            if scale == 0x2000 {
+                let f = cpu.read32(o + FLAGS) & 0xfff7_ffff;
+                cpu.write32(o + FLAGS, f);
+                let s = cpu.read32(o + ORB_STATE) + 1;
+                cpu.write32(o + ORB_STATE, s);
+            }
+        }
+        1 => {
+            let d = cpu.read32(o + ORB_DISTANCE) as i32;
+            let stop = cpu.read32(o + ORB_STOP) as i32;
+            if d < stop {
+                let d = d.wrapping_add(0x1000);
+                cpu.write32(o + ORB_DISTANCE, d as u32);
+                let stop = cpu.read32(o + ORB_STOP) as i32;
+                if d > stop {
+                    cpu.write32(o + ORB_DISTANCE, stop as u32);
+                }
+            }
+        }
+        _ => {}
+    }
+    let angle = cpu.read16(o + TURN) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, angle));
+    let r = cpu.read32(o + ORB_DISTANCE);
+    let dx = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, r, sin));
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, angle));
+    let r = cpu.read32(o + ORB_DISTANCE);
+    let dy = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, r, cos));
+    let x = cpu.read32(o + POSITION).wrapping_add(dx);
+    cpu.write32(o + POSITION, x);
+    let y = cpu.read32(o + POSITION + 4).wrapping_sub(dy);
+    cpu.write32(o + POSITION + 4, y);
+}
+const ORB_STATE: u32 = 0x6c;
+const ORB_DISTANCE: u32 = 0x74;
+const ORB_STOP: u32 = 0x78;
+
+/// The angle from the object `o` to the player `delay` frames ago (the player's place by
+/// aim::target, in the frame), 0x4000 on, as a signed 16 bits.
+pub fn orb_heading(cpu: &mut Cpu, o: u32, delay: u32) -> u32 {
+    let d = cpu.stack();
+    nested!(cpu, 0x0604_0ccc, aim::target(cpu, o, delay, d));
+    let dx = cpu.read32(d).wrapping_sub(cpu.read32(o + POSITION));
+    cpu.write32(d, dx);
+    let dy = cpu.read32(d + 4).wrapping_sub(cpu.read32(o + POSITION + 4));
+    cpu.write32(d + 4, dy);
+    let a = nested!(cpu, 0x0606_780c, sgl::sl_atan(cpu, dx, dy));
+    (a as i16 as i32).wrapping_add(0x4000) as i16 as i32 as u32
+}
+
+/// An orb made (list 2, 0x7c bytes, the actors' exec) from `spec` (x, y, z, the number (byte +30), the
+/// colour (+32), the distance it stops at (+44)): flag 0x80000, scales 0x8000, frame 0xca, its
+/// angle toward the player, the hit's table 0x06092804, state 0, distance 0. The angle (r0),
+/// or 0.
+pub fn orb_make(cpu: &mut Cpu, spec: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 0x7c)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, ACTOR_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + HIT));
+    let f = cpu.read32(o + FLAGS) | 0x8_0000;
+    cpu.write32(o + FLAGS, f);
+    cpu.write32(o + BEHAVIOUR, SHOT_ORB_BEHAVIOUR);
+    let number = cpu.read8(spec + 30);
+    cpu.write8(o + NUMBER_BYTE, number);
+    for k in [0, 4, 8] {
+        let v = cpu.read32(spec + k);
+        cpu.write32(o + POSITION + k, v);
+    }
+    let angle = nested!(cpu, 0x0608_cc60, orb_heading(cpu, o, 0));
+    cpu.write16(o + TURN, angle as u16);
+    cpu.write8(o + BYTE_33, 8);
+    cpu.write32(o + SCALE_Y, 0x8000);
+    cpu.write32(o + SCALE_X, 0x8000);
+    cpu.write8(o + FRAME, 0xca);
+    cpu.write8(o + SPRITE_KIND, 0);
+    let colour = cpu.read16(spec + 32);
+    cpu.write16(o + COLOUR_B, colour);
+    cpu.write16(o + SPRITE_COLOUR, colour);
+    cpu.write32(o + HIT, SHOT_HIT_PAIR);
+    cpu.write8(o + 84, 1);
+    cpu.write8(o + 85, 5);
+    cpu.write32(o + 72, 0xffff_ffff);
+    cpu.write32(o + 76, 0xffff_ffff);
+    cpu.write32(o + ORB_STATE, 0);
+    cpu.write32(o + ORB_DISTANCE, 0);
+    let stop = cpu.read32(spec + 44);
+    cpu.write32(o + ORB_STOP, stop);
+    angle
+}
+
+// ---- the attack objects (the timeline's entries, each an object running a step machine) ----------------
+
+/// An attack object (its fields from +0x50): the entry it runs (+0x50: the function +8 the
+/// behaviour +0x4c, the count +4 into +0x44), the step byte (+0x3c), a counter (+0x40), the
+/// speed's accumulation (+0x48: 0x800 a frame for 16 frames, and the step after), the angle
+/// (+0x54, a word), its place (+0x14...), the spec's speed (+0x64). Each attack's entry (its
+/// +12, +16 the spec's, +20 its colour, +24 and +28 its place, +34 the angle, +38 its turn, +40
+/// the speed, ...: read through the entry).
+const ATTACK_STEP: u32 = 0x3c;
+const ATTACK_COUNTER: u32 = 0x40;
+const ATTACK_COUNT: u32 = 0x44;
+const ATTACK_DRIFT: u32 = 0x48;
+const ATTACK_FUNCTION: u32 = 0x4c;
+const ATTACK_ENTRY: u32 = 0x50;
+const ATTACK_ANGLE: u32 = 0x54;
+const ATTACK_SPEED: u32 = 0x64;
+const ATTACK_ENTRY_SIZE: u32 = 56;
+
+/// The attack's step 0 (its object `o`): the place from the entry's (+24, +28; or at 0 for the orbs),
+/// z 0, the counter cleared, the angle from the entry's; the step on. `speed` also takes the
+/// entry's speed (+40 into +0x64).
+fn attack_prelude(cpu: &mut Cpu, o: u32, placed: bool, speed: bool) {
+    let p = cpu.read32(o + ATTACK_ENTRY);
+    let (x, y) = if placed { (cpu.read32(p + 24), cpu.read32(p + 28)) } else { (0, 0) };
+    cpu.write32(o + POSITION, x);
+    cpu.write32(o + POSITION + 4, y);
+    cpu.write32(o + POSITION + 8, 0);
+    cpu.write32(o + ATTACK_COUNTER, 0);
+    let angle = cpu.read16(p + 34);
+    cpu.write16(o + ATTACK_ANGLE, angle);
+    if speed {
+        let s = cpu.read32(p + 40);
+        cpu.write32(o + ATTACK_SPEED, s);
+    }
+    let step = cpu.read8(o + ATTACK_STEP).wrapping_add(1);
+    cpu.write8(o + ATTACK_STEP, step);
+}
+
+/// The drift up (an attack object `o`): the drift (+0x48) 0x800 more, the counter on; at 16 the counter
+/// is cleared, the drift 0x10000 and the step on.
+pub fn drift_up(cpu: &mut Cpu, o: u32) {
+    let d = cpu.read32(o + ATTACK_DRIFT).wrapping_add(0x800);
+    cpu.write32(o + ATTACK_DRIFT, d);
+    let n = cpu.read32(o + ATTACK_COUNTER) + 1;
+    cpu.write32(o + ATTACK_COUNTER, n);
+    if n == 16 {
+        cpu.write32(o + ATTACK_COUNTER, 0);
+        cpu.write32(o + ATTACK_DRIFT, 0x1_0000);
+        let step = cpu.read8(o + ATTACK_STEP).wrapping_add(1);
+        cpu.write8(o + ATTACK_STEP, step);
+    }
+}
+
+/// The drift down: 0x800 less, the counter on; at 16 the object's place in the numbered objects
+/// cleared and the object ended.
+pub fn drift_down(cpu: &mut Cpu, o: u32) {
+    let d = cpu.read32(o + ATTACK_DRIFT).wrapping_sub(0x800);
+    cpu.write32(o + ATTACK_DRIFT, d);
+    let n = cpu.read32(o + ATTACK_COUNTER) + 1;
+    cpu.write32(o + ATTACK_COUNTER, n);
+    if n == 16 {
+        let number = cpu.read8(o + NUMBER_BYTE) as i8 as i32 as u32;
+        cpu.write32(NUMBERED + (number << 2), 0);
+        cpu.write8(o + MODE, ENDING);
+    }
+}
+
+/// An attack of orbs (its object `o`): step 0 and 1 drift up; at step 2, every so many frames (the
+/// counter masked by the entry's +28), a spot picked at random in the screen's top, away
+/// from the nearer player (up to 8 tries for one more than 0x1900 from the player by the units
+/// of 16.16 turned to dots squared), an orb made there (the entry's colour +20 and distance +24,
+/// the number of the object's), a glow and the sound 90; step 3 drifts down.
+pub fn orbs_attack(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    match cpu.read8(o + ATTACK_STEP) {
+        0 => {
+            attack_prelude(cpu, o, false, false);
+            nested!(cpu, 0x0608_cda4, drift_up(cpu, o));
+        }
+        1 => nested!(cpu, 0x0608_cda4, drift_up(cpu, o)),
+        2 => {
+            let n = cpu.read32(o + ATTACK_COUNTER);
+            cpu.write32(o + ATTACK_COUNTER, n + 1);
+            let p = cpu.read32(o + ATTACK_ENTRY);
+            if cpu.read32(p + 28) & n != 0 {
+                return;
+            }
+            let player = nested!(cpu, 0x0605_6a58, aim::nearer_player(cpu, o + SPRITE));
+            let (px, py) = (cpu.read32(player + 20), cpu.read32(player + 24));
+            cpu.write32(d + 64, px);
+            let mut tries = 0;
+            let (mut x, mut y);
+            loop {
+                let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+                x = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x0160_0000, r)).wrapping_add(0xff50_0000);
+                let r = nested!(cpu, 0x0603_4dd4, sgl::sl_random(cpu));
+                y = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x00e0_0000, r)).wrapping_add(0xff90_0000);
+                let dx = (cpu.read32(d + 64).wrapping_sub(x) as i32 >> 16) as i16 as i32;
+                let dy = (py.wrapping_sub(y) as i32 >> 16) as i16 as i32;
+                if dx.wrapping_mul(dx).wrapping_add(dy.wrapping_mul(dy)) > 0x1900 {
+                    break;
+                }
+                tries += 1;
+                if tries > 7 {
+                    break;
+                }
+            }
+            if tries == 8 {
+                return;
+            }
+            cpu.write32(d, x);
+            cpu.write32(d + 4, y);
+            cpu.write32(d + 8, 0);
+            let number = cpu.read8(o + NUMBER_BYTE);
+            cpu.write8(d + 30, number);
+            let p = cpu.read32(o + ATTACK_ENTRY);
+            let colour = (cpu.read16(CHAR_BASE) as i16 as i32 as u32).wrapping_add(cpu.read16(p + 20) as i16 as i32 as u32);
+            cpu.write16(d + 32, colour as u16);
+            let stop = cpu.read32(p + 24);
+            cpu.write32(d + 44, stop);
+            nested!(cpu, 0x0608_cca4, orb_make(cpu, d));
+            cpu.write32(d + 44, 0x8000);
+            nested!(cpu, 0x0605_8f34, explosions::glow_set(cpu, d));
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 90));
+        }
+        3 => nested!(cpu, 0x0608_cde0, drift_down(cpu, o)),
+        _ => {}
+    }
+}
+
+/// The shot spec an attack makes its shots from (on its frame `d`): the number (byte +0), the
+/// place (+4, +8, z 0), the colour word (+16: the entry's +20), the script (+20: the entry's
+/// +12), the table of hits (+24: the entry's +16), then the angle (+28) and the speed (+32).
+fn attack_spec(cpu: &mut Cpu, o: u32, d: u32) {
+    let p = cpu.read32(o + ATTACK_ENTRY);
+    let x = cpu.read32(o + POSITION);
+    cpu.write32(d + 4, x);
+    let y = cpu.read32(o + POSITION + 4);
+    cpu.write32(d + 8, y);
+    cpu.write32(d + 12, 0);
+    let number = cpu.read8(o + NUMBER_BYTE);
+    cpu.write8(d, number);
+    let colour = cpu.read16(p + 20);
+    cpu.write16(d + 16, colour);
+    let script = cpu.read32(p + 12);
+    cpu.write32(d + 20, script);
+    let hits = cpu.read32(p + 16);
+    cpu.write32(d + 24, hits);
+}
+
+/// An attack's end of step 2: the flash at the shots' spot unless the object's flag 0x80000000 is
+/// set, the sound `se` (at the object's x).
+fn attack_flash(cpu: &mut Cpu, o: u32, d: u32, colour: u32, se: u32) {
+    if cpu.read32(o + FLAGS) & 0x8000_0000 == 0 {
+        let (x, y) = (cpu.read32(d + 4), cpu.read32(d + 8));
+        nested!(cpu, 0x0608_c7e8, puff_draw(cpu, x, y, colour));
+    }
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, se));
+}
+
+/// An attack of shots in a fan (its object `o`): steps 0 and 1 drift up, then every so many frames
+/// (the counter masked by the entry's +48) shots from the object's place at the entry's angle
+/// (+34 of it turned by its +54 for each, until the angles' count (by +52) passes 0xffff), the speed
+/// the entry's +40; the angle goes on by the entry's +38; a flash and the sound 92; step 3 drifts down.
+pub fn fan_attack(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    match cpu.read8(o + ATTACK_STEP) {
+        0 => {
+            attack_prelude(cpu, o, true, false);
+            nested!(cpu, 0x0608_cda4, drift_up(cpu, o));
+        }
+        1 => nested!(cpu, 0x0608_cda4, drift_up(cpu, o)),
+        2 => {
+            let n = cpu.read32(o + ATTACK_COUNTER);
+            cpu.write32(o + ATTACK_COUNTER, n + 1);
+            let p = cpu.read32(o + ATTACK_ENTRY);
+            if cpu.read32(p + 48) & n != 0 {
+                return;
+            }
+            attack_spec(cpu, o, d);
+            let mut angle = cpu.read16(o + ATTACK_ANGLE) as i16 as i32;
+            let speed = cpu.read32(p + 40);
+            cpu.write32(d + 32, speed);
+            let mut total = 0u32;
+            loop {
+                cpu.write16(d + 28, angle as u16);
+                let p = cpu.read32(o + ATTACK_ENTRY);
+                angle = (cpu.read16(p + 54) as i16 as i32 + angle) as i16 as i32;
+                total = total.wrapping_add(cpu.read32(p + 52));
+                nested!(cpu, 0x0608_caec, shot_make(cpu, d));
+                if total as i32 > 0xffff {
+                    break;
+                }
+            }
+            let p = cpu.read32(o + ATTACK_ENTRY);
+            let turn = (cpu.read16(o + ATTACK_ANGLE) as i16 as i32 + cpu.read16(p + 38) as i16 as i32) as u16;
+            cpu.write16(o + ATTACK_ANGLE, turn);
+            attack_flash(cpu, o, d, 48, 92);
+        }
+        3 => nested!(cpu, 0x0608_cde0, drift_down(cpu, o)),
+        _ => {}
+    }
+}
+
+/// An attack of shots in a spiral (its object `o`): as the fan, but the entry's speed (+40 into +0x64
+/// of the object) goes up by the entry's +48 with each shot of the five (the mask +44), the angle by
+/// +54 between them, and one turn of +38 and the angle at the end; a flash and the sound 89.
+pub fn spiral_attack(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    match cpu.read8(o + ATTACK_STEP) {
+        0 => {
+            attack_prelude(cpu, o, true, true);
+            nested!(cpu, 0x0608_cda4, drift_up(cpu, o));
+        }
+        1 => nested!(cpu, 0x0608_cda4, drift_up(cpu, o)),
+        2 => {
+            let n = cpu.read32(o + ATTACK_COUNTER);
+            cpu.write32(o + ATTACK_COUNTER, n + 1);
+            let p = cpu.read32(o + ATTACK_ENTRY);
+            if cpu.read32(p + 44) & n != 0 {
+                return;
+            }
+            attack_spec(cpu, o, d);
+            let angle = cpu.read16(o + ATTACK_ANGLE);
+            cpu.write16(d + 28, angle);
+            let speed = cpu.read32(o + ATTACK_SPEED);
+            cpu.write32(d + 32, speed);
+            for k in 0..5 {
+                if k > 0 {
+                    let p = cpu.read32(o + ATTACK_ENTRY);
+                    let speed = cpu.read32(d + 32).wrapping_add(cpu.read32(p + 48));
+                    cpu.write32(d + 32, speed);
+                }
+                nested!(cpu, 0x0608_caec, shot_make(cpu, d));
+                if k < 4 {
+                    let p = cpu.read32(o + ATTACK_ENTRY);
+                    let a = (cpu.read16(d + 28) as i16 as i32 + cpu.read16(p + 54) as i16 as i32) as u16;
+                    cpu.write16(d + 28, a);
+                }
+            }
+            let p = cpu.read32(o + ATTACK_ENTRY);
+            let turn = (cpu.read16(o + ATTACK_ANGLE) as i16 as i32 + cpu.read16(p + 38) as i16 as i32) as u16;
+            cpu.write16(o + ATTACK_ANGLE, turn);
+            attack_flash(cpu, o, d, 48, 89);
+        }
+        3 => nested!(cpu, 0x0608_cde0, drift_down(cpu, o)),
+        _ => {}
+    }
+}
+
+/// An attack of one shot ring (its object `o`): steps 0 and 1 drift up; at step 2 every so many frames
+/// (the counter masked by the entry's +48) shots made from the object's place with the angle turning by the
+/// entry's +46 for each, the speed +40, the shots counted by the entry's +44 up to the count +52;
+/// the angle goes on by +38 at the end (no flash); step 3 drifts down.
+pub fn ring_attack(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    match cpu.read8(o + ATTACK_STEP) {
+        0 => {
+            attack_prelude(cpu, o, true, false);
+            nested!(cpu, 0x0608_cda4, drift_up(cpu, o));
+        }
+        1 => nested!(cpu, 0x0608_cda4, drift_up(cpu, o)),
+        2 => {
+            let n = cpu.read32(o + ATTACK_COUNTER);
+            cpu.write32(o + ATTACK_COUNTER, n + 1);
+            let p = cpu.read32(o + ATTACK_ENTRY);
+            if cpu.read32(p + 48) & n != 0 {
+                return;
+            }
+            attack_spec(cpu, o, d);
+            let mut angle = cpu.read16(o + ATTACK_ANGLE) as i16 as i32;
+            let speed = cpu.read32(p + 40);
+            cpu.write32(d + 32, speed);
+            let mut count = 0u32;
+            if 0 < cpu.read32(p + 52) as i32 {
+                loop {
+                    cpu.write16(d + 28, angle as u16);
+                    let p = cpu.read32(o + ATTACK_ENTRY);
+                    angle = (cpu.read16(p + 46) as i16 as i32 + angle) as i16 as i32;
+                    count = count.wrapping_add(cpu.read32(p + 44));
+                    nested!(cpu, 0x0608_caec, shot_make(cpu, d));
+                    let p = cpu.read32(o + ATTACK_ENTRY);
+                    if count as i32 >= cpu.read32(p + 52) as i32 {
+                        break;
+                    }
+                }
+            }
+            let p = cpu.read32(o + ATTACK_ENTRY);
+            let turn = (cpu.read16(o + ATTACK_ANGLE) as i16 as i32 + cpu.read16(p + 38) as i16 as i32) as u16;
+            cpu.write16(o + ATTACK_ANGLE, turn);
+        }
+        3 => nested!(cpu, 0x0608_cde0, drift_down(cpu, o)),
+        _ => {}
+    }
+}
+
+/// An attack object's behaviour (its object `o`): past step 1 (a signed byte) the entry's function
+/// (+0x4c) is run, and its count (+0x44) counted down: at 0 the counter is cleared and the step 3
+/// (drifting down); step 1 (and before) just runs it. Unless the object's flag 0x80000000 is set
+/// the sprite shows alternately: on odd frames the frame 0xd3 at a random scale (the drift +0x48
+/// plus 0x4000 plus a half of a random word's share), the flag 0x100 and the colour 32 on; on even
+/// frames the frame 0xd6 at the drift, the flag 0x100 off and the colour 48; the direction bits
+/// 0x30 a random of them.
+pub fn attack_behaviour(cpu: &mut Cpu, o: u32) {
+    let past = cpu.read8(o + ATTACK_STEP) as i8 > 1;
+    let f = cpu.read32(o + ATTACK_FUNCTION);
+    cpu.call_returning(0x0608_d780, f, &[o]);
+    if past {
+        let n = cpu.read32(o + ATTACK_COUNT).wrapping_sub(1);
+        cpu.write32(o + ATTACK_COUNT, n);
+        if n == 0 {
+            cpu.write32(o + ATTACK_COUNTER, 0);
+            cpu.write8(o + ATTACK_STEP, 3);
+        }
+    }
+    if cpu.read32(o + FLAGS) & 0x8000_0000 != 0 {
+        return;
+    }
+    if cpu.read32(GAME_FRAMES) & 1 != 0 {
+        let drift = cpu.read32(o + ATTACK_DRIFT).wrapping_add(0x4000);
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0)) & 0xffff;
+        let scale = drift.wrapping_add(nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x8000, r)));
+        cpu.write8(o + FRAME, 0xd3);
+        cpu.write32(o + SCALE_Y, scale);
+        cpu.write32(o + SCALE_X, scale);
+        let f = cpu.read32(o + FLAGS) | 0x100;
+        cpu.write32(o + FLAGS, f);
+        let colour = (cpu.read16(CHAR_BASE) as i16 as i32 as u32).wrapping_add(32) as u16;
+        cpu.write16(o + COLOUR_B, colour);
+        cpu.write16(o + SPRITE_COLOUR, colour);
+    } else {
+        let drift = cpu.read32(o + ATTACK_DRIFT);
+        cpu.write8(o + FRAME, 0xd6);
+        cpu.write32(o + SCALE_Y, drift);
+        cpu.write32(o + SCALE_X, drift);
+        let f = cpu.read32(o + FLAGS) & 0xffff_feff;
+        cpu.write32(o + FLAGS, f);
+        let colour = (cpu.read16(CHAR_BASE) as i16 as i32 as u32).wrapping_add(48) as u16;
+        cpu.write16(o + COLOUR_B, colour);
+        cpu.write16(o + SPRITE_COLOUR, colour);
+    }
+    let f = cpu.read32(o + FLAGS) & 0xffff_ffcf;
+    cpu.write32(o + FLAGS, f);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0));
+    let f = cpu.read32(o + FLAGS) | (r & 0x30);
+    cpu.write32(o + FLAGS, f);
+}
+
+/// An attack object made (list 2, 0x84 bytes, the plain exec) for the timeline's `entry`, in a free
+/// numbered place (by the numbers from 2; none free, none made): the behaviour, the number, the
+/// sprite's frame 0xd5, the scales 0, the colour the character base's 48, the flag 0x80000000
+/// when the entry's word +22 is 1, the step 0, the entry's function +8, its count +4 and the
+/// entry itself, put in its place in the numbered objects. The object, or 0.
+pub fn attack_make(cpu: &mut Cpu, entry: u32) -> u32 {
+    let number = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, 2)) as i8 as i32 as u32;
+    if number == -1i32 as u32 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 0x84)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PLAIN_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + SPRITE));
+    cpu.write32(o + BEHAVIOUR, ATTACK_BEHAVIOUR);
+    cpu.write8(o + NUMBER_BYTE, number as u8);
+    cpu.write8(o + BYTE_33, 0xf8);
+    cpu.write8(o + FRAME, 0xd5);
+    cpu.write8(o + SPRITE_KIND, 0);
+    cpu.write32(o + SCALE_Y, 0);
+    cpu.write32(o + SCALE_X, 0);
+    let colour = (cpu.read16(CHAR_BASE) as i16 as i32 as u32).wrapping_add(48) as u16;
+    cpu.write16(o + COLOUR_B, colour);
+    cpu.write16(o + SPRITE_COLOUR, colour);
+    if cpu.read16(entry + 22) == 1 {
+        let f = cpu.read32(o + FLAGS) | 0x8000_0000;
+        cpu.write32(o + FLAGS, f);
+    }
+    cpu.write8(o + ATTACK_STEP, 0);
+    let function = cpu.read32(entry + 8);
+    cpu.write32(o + ATTACK_FUNCTION, function);
+    let count = cpu.read32(entry + 4);
+    cpu.write32(o + ATTACK_COUNT, count);
+    cpu.write32(o + ATTACK_ENTRY, entry);
+    let number = cpu.read8(o + NUMBER_BYTE) as i8 as i32 as u32;
+    cpu.write32(NUMBERED + (number << 2), o);
+    o
+}
+
+/// The attack's timeline (its object `o`: its place in the list +0x10, the frame +0x14; the lists
+/// by the stage's number, 4 bytes each at 0x06092774): unless the game is paused (0x0600ed80's top
+/// bit); state 0 takes the list; state 1 makes the entries of the frame (each 56 bytes, the frame
+/// number first; the entry's +8 zero ends the timeline: state 0x70) and counts the frame on; state 0x70
+/// goes to 0x73, and 0x73 frees the object.
+pub fn attack_run(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(PAUSED) & 0x8000_0000 != 0 {
+        return;
+    }
+    let state = cpu.read8(o + MODE) as i8;
+    match state {
+        1 => {}
+        0 => {
+            let n = (cpu.read8(ATTACK_LIST_NUMBER) as i8 as i32 as u32) << 2;
+            let list = cpu.read32(ATTACK_LISTS + n);
+            cpu.write32(o + TIMELINE_AT, list);
+            cpu.write32(o + TIMELINE_FRAME, 0);
+            cpu.write8(o + MODE, 1);
+        }
+        s if s > 1 => {
+            if s == 0x70 {
+                cpu.write8(o + MODE, 0x73);
+            } else if s == 0x73 {
+                nested!(cpu, 0x0600_579c, objects::obj_free(cpu, o));
+            }
+            return;
+        }
+        _ => return,
+    }
+    let mut entry = cpu.read32(o + TIMELINE_AT);
+    let frame = cpu.read32(o + TIMELINE_FRAME);
+    if cpu.read32(entry) != frame {
+        cpu.write32(o + TIMELINE_FRAME, frame.wrapping_add(1));
+        return;
+    }
+    loop {
+        if cpu.read32(entry + 8) == 0 {
+            cpu.write8(o + MODE, 0x70);
+            return;
+        }
+        nested!(cpu, 0x0608_d85c, attack_make(cpu, entry));
+        entry = cpu.read32(o + TIMELINE_AT).wrapping_add(ATTACK_ENTRY_SIZE);
+        cpu.write32(o + TIMELINE_AT, entry);
+        let frame = cpu.read32(o + TIMELINE_FRAME);
+        if cpu.read32(entry) != frame {
+            cpu.write32(o + TIMELINE_FRAME, frame.wrapping_add(1));
+            return;
+        }
+    }
+}
+/// The timeline's list (+0x10) and the frame (+0x14).
+const TIMELINE_AT: u32 = 0x10;
+const TIMELINE_FRAME: u32 = 0x14;
+const PAUSED: u32 = 0x0600_ed80;
+const ATTACK_LIST_NUMBER: u32 = 0x0600_ed84;
+const ATTACK_LISTS: u32 = 0x0609_2774;
+
+/// The attack's timeline made (list 0, 0x18 bytes). The object, or 0.
+pub fn attack_start(cpu: &mut Cpu) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 0x18)) as i8 as i32 as u32;
+    nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks, ATTACK_EXEC))
+}
