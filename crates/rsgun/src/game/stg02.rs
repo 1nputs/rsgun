@@ -16344,17 +16344,7 @@ const PIECES_KIND: u32 = 0x31;
 const PIECES_MODELS_AT: u32 = 0x1c;
 const PIECES_CHECK: u32 = 0x28_0000;
 const PIECES_REACH: u32 = 0x18_0000;
-/// The scenery scenes' per-frame sets of SGL calls in this overlay (their own copies of SGL's
-/// setters, not rewritten yet): the screen's blocks and windows by place.
-const SL_WINDOW_RANGE: u32 = 0x060a_2804;
-const SL_SPRITES_COPY: u32 = 0x060a_2824;
-const SL_SCENE_MODE: u32 = 0x060a_26b4;
-const SL_SCENE_SIZE: u32 = 0x060a_27c4;
-const SL_SCENE_ON: u32 = 0x060a_26c4;
-const SL_SCENE_MESSAGE: u32 = 0x060a_26fc;
-const SL_SCENE_PLACE: u32 = 0x060a_2844;
-const SL_SCENE_TURN: u32 = 0x060a_2864;
-
+/// The scenery scenes' next scroll (screen.rs's).
 fn scene_scroll_next(cpu: &mut Cpu) {
     nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
 }
@@ -16728,10 +16718,10 @@ pub fn wave_start(cpu: &mut Cpu, o: u32) {
 /// lines cleared.
 pub fn wave_lines_set(cpu: &mut Cpu, o: u32) {
     cpu.write8(o + 8, 0);
-    cpu.call(SL_WINDOW_RANGE, &[0, 0, 0x15f, 0xffff]);
+    nested!(cpu, 0x060a_2804, sgl::sl_scr_window0(cpu, 0, 0, 0x15f, 0xffff));
     nested!(cpu, 0x0606_e17c, sgl::sl_window_control(cpu, 1, 3));
     nested!(cpu, 0x0606_e1bc, sgl::sl_line_scroll_control(cpu, 1, 10));
-    cpu.call(SL_SPRITES_COPY, &[WAVE_VRAM]);
+    nested!(cpu, 0x060a_2824, sgl::sl_line_table_nbg0(cpu, WAVE_VRAM));
     nested!(cpu, 0x0609_d894, wave_clear(cpu));
 }
 
@@ -16771,7 +16761,7 @@ pub fn wave_scene(cpu: &mut Cpu, o: u32, dx: u32, dy: u32, stream: u32) {
                 top = 0;
             }
             let bottom = ((v + 112) as i16 as i32).min(0xdf);
-            cpu.call(SL_WINDOW_RANGE, &[0, top as u16 as u32, 0x15f, bottom as u16 as u32]);
+            nested!(cpu, 0x060a_2804, sgl::sl_scr_window0(cpu, 0, top as u16 as u32, 0x15f, bottom as u16 as u32));
             let angle = cpu.read16(o + SCENE_ANGLE) as i16 as i32 as u32;
             let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, angle));
             let sway = cpu.read32(o + SCENE_SWAY);
@@ -16805,7 +16795,7 @@ pub fn wave_scene(cpu: &mut Cpu, o: u32, dx: u32, dy: u32, stream: u32) {
                 cpu.write8(o + SCENE_STATE, s);
             }
             let top = cpu.read16(o + SCENE_EDGE) as i16 as i32;
-            cpu.call(SL_WINDOW_RANGE, &[0, top as u16 as u32, 0x15f, (0xe0 - top) as u16 as u32]);
+            nested!(cpu, 0x060a_2804, sgl::sl_scr_window0(cpu, 0, top as u16 as u32, 0x15f, (0xe0 - top) as u16 as u32));
             nested!(cpu, 0x0609_db48, ripples_spawn(cpu));
         }
         4 => tail = false,
@@ -16871,7 +16861,7 @@ pub fn rail_start(cpu: &mut Cpu, o: u32) {
 /// (0, -1.0)); the next scroll once the mover's y is past 4.5.
 pub fn rail_step(cpu: &mut Cpu, o: u32) {
     if cpu.read8(o + 9) == 0 {
-        cpu.call(SL_SCENE_MESSAGE, &[RAIL_MESSAGE]);
+        nested!(cpu, 0x060a_26fc, sgl::sl_map_ra_table(cpu, RAIL_MESSAGE));
         let b = cpu.read8(o + 9).wrapping_add(1);
         cpu.write8(o + 9, b);
     }
@@ -16889,10 +16879,10 @@ pub fn rail_step(cpu: &mut Cpu, o: u32) {
 /// 2, the colour calculation 0x40 and the colour rates of the screens -2 to -8 and -7 set.
 pub fn dome_start(cpu: &mut Cpu) {
     nested!(cpu, 0x0607_1c4c, sgl::sl_map_rbg0(cpu, 0x25e4_4000));
-    cpu.call(SL_SCENE_MODE, &[2]);
+    nested!(cpu, 0x060a_26b4, sgl::sl_rpara_mode(cpu, 2));
     let screen = cpu.read32(screen::SCREEN);
     cpu.write32(screen + SCREEN_HOOK, 0x0609_e21c);
-    cpu.call(SL_SCENE_SIZE, &[2]);
+    nested!(cpu, 0x060a_27c4, sgl::sl_sprite_type(cpu, 2));
     nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 0x40));
     for (screen, rate) in [(-2i32, 31), (-1, 28), (-4, 24), (-3, 20), (-6, 16), (-5, 12), (-8, 8), (-7, 4)] {
         nested!(cpu, 0x0606_e45c, sgl::sl_col_rate(cpu, screen as u32, rate));
@@ -16935,7 +16925,7 @@ pub fn dome_step(cpu: &mut Cpu, o: u32) {
     let at = cpu.read32(o + DOME_AT).wrapping_add(m);
     cpu.write32(o + DOME_AT, at);
     nested!(cpu, 0x0605_f648, bg::view_along_eased(cpu, RAIL_PATH));
-    cpu.call(SL_SCENE_ON, &[0]);
+    nested!(cpu, 0x060a_26c4, sgl::sl_cur_rpara(cpu, 0));
     let speed = cpu.read32(o + DOME_SPEED);
     let scale = cpu.read32(SCENE_VIEW + SCENE_VIEW_SCALE);
     let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x20_0000, scale));
@@ -16944,16 +16934,16 @@ pub fn dome_step(cpu: &mut Cpu, o: u32) {
     nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
     nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCENE_MOVER));
     nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
-    cpu.call(SL_SCENE_ON, &[1]);
+    nested!(cpu, 0x060a_26c4, sgl::sl_cur_rpara(cpu, 1));
     let height = cpu.read32(SCENE_VIEW + SCENE_VIEW_TURN_X).wrapping_add(0xffff_4000).wrapping_mul(11);
     let x = cpu.read32(o + DOME_AT).wrapping_add(0x02b0_0000);
     cpu.write32(SCENE_PLANE + SCENE_PLANE_X, x);
     let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x70_0000, height));
     let y = m.wrapping_add(0x06d4_0000);
     cpu.write32(SCENE_PLANE + SCENE_PLANE_Y, y);
-    cpu.call(SL_SCENE_PLACE, &[x, y]);
+    nested!(cpu, 0x060a_2844, sgl::sl_rpara_place(cpu, x, y));
     let turn = cpu.read16(SCENE_VIEW + SCENE_VIEW_TURN_Y) as i16 as i32 as u32;
-    cpu.call(SL_SCENE_TURN, &[turn]);
+    nested!(cpu, 0x060a_2864, sgl::sl_rpara_turn(cpu, turn));
     nested!(cpu, 0x0609_e21c, dome_draw(cpu));
     if (cpu.read32(SCENE_VIEW) as i32) > 0x1_ffff {
         scene_scroll_next(cpu);
@@ -17000,7 +16990,7 @@ pub fn grid_step(cpu: &mut Cpu, o: u32) {
         cpu.write32(SCENE_VIEW, place);
         nested!(cpu, 0x0605_f648, bg::view_along_eased(cpu, RAIL_PATH));
     }
-    cpu.call(SL_SCENE_ON, &[0]);
+    nested!(cpu, 0x060a_26c4, sgl::sl_cur_rpara(cpu, 0));
     let speed = cpu.read32(o + GRID_SPEED);
     let scale = cpu.read32(SCENE_VIEW + SCENE_VIEW_SCALE);
     let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x20_0000, scale));
@@ -17015,7 +17005,7 @@ pub fn grid_step(cpu: &mut Cpu, o: u32) {
     cpu.write16(SCENE_MOVER + SCENE_MOVER_TILT, tilt);
     nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCENE_MOVER));
     nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
-    cpu.call(SL_SCENE_ON, &[1]);
+    nested!(cpu, 0x060a_26c4, sgl::sl_cur_rpara(cpu, 1));
     let scale = cpu.read32(SCENE_VIEW + SCENE_VIEW_SCALE);
     let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0xffe8_0000, scale));
     let at = cpu.read32(o + GRID_AT).wrapping_add(m);
@@ -17029,9 +17019,9 @@ pub fn grid_step(cpu: &mut Cpu, o: u32) {
     cpu.write32(o + GRID_DROP, drop);
     let x = cpu.read32(SCENE_PLANE + SCENE_PLANE_X);
     let y = cpu.read32(SCENE_PLANE + SCENE_PLANE_Y);
-    cpu.call(SL_SCENE_PLACE, &[x, y]);
+    nested!(cpu, 0x060a_2844, sgl::sl_rpara_place(cpu, x, y));
     let turn = cpu.read16(SCENE_VIEW + SCENE_VIEW_TURN_Y) as i16 as i32 as u32;
-    cpu.call(SL_SCENE_TURN, &[turn]);
+    nested!(cpu, 0x060a_2864, sgl::sl_rpara_turn(cpu, turn));
     nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
     let state = cpu.read8(o + SCENE_STATE) as i8;
     if state == 0 {
@@ -17338,11 +17328,6 @@ const ROOM_LISTS: [(u32, u32); 2] = [(0x060a_7860, 4), (0x060a_7870, 38)];
 const RPARA_TABLES: u32 = 0x25e3_fe00;
 const KTABLE: u32 = 0x25e2_0000;
 const PRIORITIES: [(u32, u32); 5] = [(1, 6), (0, 4), (5, 3), (-7i32 as u32, 5), (-8i32 as u32, 4)];
-const SL_RPARA_INIT: u32 = 0x060a_2524;
-const SL_KTABLE_MAKE: u32 = 0x060a_2594;
-const SL_RPARA_A: [(u32, &[u32]); 3] = [(0x060a_2614, &[0]), (0x060a_2624, &[0]), (0x060a_2634, &[KTABLE, 0x61])];
-const SL_RPARA_B: [(u32, &[u32]); 5] = [(0x060a_26b4, &[0]), (0x060a_26c4, &[0]), (0x060a_26d4, &[0]), (0x060a_26e4, &[0x060a_7adc]), (0x060a_2754, &[0])];
-const SL_KTABLE_B: u32 = 0x060a_2764;
 /// The screen record's scroll marks (+0x54) and the marks it is given.
 const SCROLL_MARKS: u32 = 0x54;
 const MARKS: u32 = 0x060a_7780;
@@ -17358,19 +17343,20 @@ pub fn stg02_start(cpu: &mut Cpu, data: u32, room: u32) {
         }
     }
     nested!(cpu, 0x0605_e17c, states::stage_data_set(cpu, data));
-    cpu.call(SL_RPARA_INIT, &[RPARA_TABLES]);
-    cpu.call(SL_KTABLE_MAKE, &[KTABLE]);
+    nested!(cpu, 0x060a_2524, sgl::sl_rpara_init_set_stg02(cpu, RPARA_TABLES));
+    nested!(cpu, 0x060a_2594, sgl::sl_make_ktable(cpu, KTABLE));
     nested!(cpu, 0x0606_e27c, sgl::sl_char_rbg0(cpu, 0, 0));
     nested!(cpu, 0x0606_e2ce, sgl::sl_page_rbg0(cpu, 0x25e0_0000, 0, 0xc000));
-    cpu.call(SL_RPARA_A[0].0, SL_RPARA_A[0].1);
+    nested!(cpu, 0x060a_2614, sgl::sl_plane_ra(cpu, 0));
     nested!(cpu, 0x0607_1c4c, sgl::sl_map_rbg0(cpu, 0x25e4_0000));
-    for (f, args) in &SL_RPARA_A[1..] {
-        cpu.call(*f, args);
-    }
-    for (f, args) in SL_RPARA_B {
-        cpu.call(f, args);
-    }
-    cpu.call(SL_KTABLE_B, &[KTABLE, 0x60]);
+    nested!(cpu, 0x060a_2624, sgl::sl_over_ra(cpu, 0));
+    nested!(cpu, 0x060a_2634, sgl::sl_ktable_ra(cpu, KTABLE, 0x61));
+    nested!(cpu, 0x060a_26b4, sgl::sl_rpara_mode(cpu, 0));
+    nested!(cpu, 0x060a_26c4, sgl::sl_cur_rpara(cpu, 0));
+    nested!(cpu, 0x060a_26d4, sgl::sl_plane_rb(cpu, 0));
+    nested!(cpu, 0x060a_26e4, sgl::sl_map_rb_table_stg02(cpu, 0x060a_7adc));
+    nested!(cpu, 0x060a_2754, sgl::sl_over_rb(cpu, 0));
+    nested!(cpu, 0x060a_2764, sgl::sl_ktable_rb(cpu, KTABLE, 0x60));
     nested!(cpu, 0x0607_0dec, sgl::sl_back1_col_set(cpu, 0x25e3_fffe, 0));
     nested!(cpu, 0x0606_e288, sgl::sl_char_nbg0(cpu, 0, 0));
     nested!(cpu, 0x0606_e300, sgl::sl_page_nbg0(cpu, 0x25e6_0000, 0x200, 0x8000));
@@ -17387,10 +17373,10 @@ pub fn stg02_start(cpu: &mut Cpu, data: u32, room: u32) {
     for (screen, pri) in PRIORITIES {
         nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, screen, pri));
     }
-    cpu.call(SL_SCENE_SIZE, &[5]);
+    nested!(cpu, 0x060a_27c4, sgl::sl_sprite_type(cpu, 5));
     nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 0x101));
-    cpu.call(0x060a_27d4, &[1]);
-    cpu.call(0x060a_27f4, &[4]);
+    nested!(cpu, 0x060a_27d4, sgl::sl_sprite_cc_condition(cpu, 1));
+    nested!(cpu, 0x060a_27f4, sgl::sl_sprite_cc_number(cpu, 4));
     nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 0));
     nested!(cpu, 0x0606_990c, sgl::sl_zdsp_level(cpu, 7));
     nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 1));
@@ -17434,7 +17420,6 @@ const SWAP_FADE: u32 = 0x28;
 const SWAP_COUNT: u32 = 0x2c;
 /// The leaving speed (+0x34).
 const SWAP_LEAVE: u32 = 0x34;
-const SL_KTABLE_SET: u32 = 0x060a_2634;
 const SCENE_RUN_FRAMES: u32 = 120;
 
 /// The two planes' (bg.rs's PLANE_A and PLANE_B) places swapped.
@@ -17532,22 +17517,22 @@ pub fn swap_start(cpu: &mut Cpu, o: u32) {
     nested!(cpu, 0x0607_0c4c, sgl::sl_map_nbg0(cpu, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000));
     nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 1, 3));
     nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x10_0007));
-    cpu.call(SL_SCENE_MESSAGE, &[0x060a_7ee8]);
+    nested!(cpu, 0x060a_26fc, sgl::sl_map_ra_table(cpu, 0x060a_7ee8));
     let cells = states::stage_part(cpu, states::CELLS, 0);
     nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, cells, 0x25e0_0000, 0x1_2ce0, 0x800));
     let colours = states::stage_part(cpu, states::COLOURS, 0);
     nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0, 0xf0));
-    cpu.call(SL_SCENE_MODE, &[0]);
-    cpu.call(SL_SCENE_ON, &[0]);
+    nested!(cpu, 0x060a_26b4, sgl::sl_rpara_mode(cpu, 0));
+    nested!(cpu, 0x060a_26c4, sgl::sl_cur_rpara(cpu, 0));
     nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
     nested!(cpu, 0x0606_e4dc, sgl::sl_invers_matrix(cpu));
     nested!(cpu, 0x0606_e50c, sgl::rotation_parameters(cpu));
     nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
-    cpu.call(SL_KTABLE_SET, &[KTABLE, 0x60]);
+    nested!(cpu, 0x060a_2634, sgl::sl_ktable_ra(cpu, KTABLE, 0x60));
     cpu.write32(SCENE_MOVER + SCENE_MOVER_X, 0x0080_0000);
     cpu.write32(SCENE_MOVER + SCENE_MOVER_Y, 0x0680_0000);
-    cpu.call(SL_SCENE_PLACE, &[0x0080_0000, 0x0680_0000]);
-    cpu.call(SL_SCENE_TURN, &[0]);
+    nested!(cpu, 0x060a_2844, sgl::sl_rpara_place(cpu, 0x0080_0000, 0x0680_0000));
+    nested!(cpu, 0x060a_2864, sgl::sl_rpara_turn(cpu, 0));
 }
 
 /// The swap scene's run (`o`): the fade down by 0.2 while above -8.0; a frame counted in +0x2c;
@@ -17588,7 +17573,7 @@ pub fn swap_leave(cpu: &mut Cpu, o: u32) {
 pub fn swap_leaving(cpu: &mut Cpu, o: u32) {
     let x = cpu.read32(SCENE_MOVER + SCENE_MOVER_X);
     let y = cpu.read32(SCENE_MOVER + SCENE_MOVER_Y);
-    cpu.call(SL_SCENE_PLACE, &[x, y]);
+    nested!(cpu, 0x060a_2844, sgl::sl_rpara_place(cpu, x, y));
     let leave = cpu.read32(o + SWAP_LEAVE);
     nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, 0, leave.wrapping_neg(), 0));
     nested!(cpu, 0x0609_e5f8, swap_step(cpu, o));
@@ -17599,7 +17584,7 @@ pub fn swap_leaving(cpu: &mut Cpu, o: u32) {
 pub fn swap_leaving_end(cpu: &mut Cpu, o: u32) {
     let x = cpu.read32(SCENE_MOVER + SCENE_MOVER_X);
     let y = cpu.read32(SCENE_MOVER + SCENE_MOVER_Y);
-    cpu.call(SL_SCENE_PLACE, &[x, y]);
+    nested!(cpu, 0x060a_2844, sgl::sl_rpara_place(cpu, x, y));
     let leave = cpu.read32(o + SWAP_LEAVE);
     nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, 0, leave.wrapping_neg(), 0));
     let leave = cpu.read32(o + SWAP_LEAVE);
@@ -17663,11 +17648,11 @@ pub fn sway_place(cpu: &mut Cpu, o: u32) {
     y = y.wrapping_add(nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, reach, c)));
     cpu.write32(SCENE_MOVER + SCENE_MOVER_X, x);
     cpu.write32(SCENE_MOVER + SCENE_MOVER_Y, y);
-    cpu.call(SL_SCENE_PLACE, &[x, y]);
+    nested!(cpu, 0x060a_2844, sgl::sl_rpara_place(cpu, x, y));
     let angle = top_angle(cpu.read32(o + SWAY_TURN));
     let three = angle.wrapping_mul(3);
     cpu.write16(SCENE_MOVER + 4, three as u16);
-    cpu.call(SL_SCENE_TURN, &[three as u16 as i16 as i32 as u32]);
+    nested!(cpu, 0x060a_2864, sgl::sl_rpara_turn(cpu, three as u16 as i16 as i32 as u32));
 }
 
 /// The sway scene's step (`o`, its state in +8 up to 4: past it nothing but the place): 0 the
@@ -17775,7 +17760,7 @@ pub fn sway_fade_step(cpu: &mut Cpu, o: u32) {
     nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, dx, dy, 0));
     let x = cpu.read32(SCENE_MOVER + SCENE_MOVER_X);
     let y = cpu.read32(SCENE_MOVER + SCENE_MOVER_Y);
-    cpu.call(SL_SCENE_PLACE, &[x, y]);
+    nested!(cpu, 0x060a_2844, sgl::sl_rpara_place(cpu, x, y));
     let speed = cpu.read32(o + SWAY_SPEED);
     nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, 0, speed.wrapping_add(speed)));
     nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
@@ -17825,7 +17810,7 @@ pub fn stair_start(cpu: &mut Cpu, o: u32) {
     nested!(cpu, 0x0607_0c4c, sgl::sl_map_nbg0(cpu, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000));
     nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 1, 3));
     nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x10_0007));
-    cpu.call(SL_KTABLE_SET, &[KTABLE, 0x61]);
+    nested!(cpu, 0x060a_2634, sgl::sl_ktable_ra(cpu, KTABLE, 0x61));
     for at in [20, 16, 12, 32, 28, 24] {
         cpu.write32(SCENE_MOVER + at, 0);
     }
@@ -17841,7 +17826,7 @@ pub fn stair_start(cpu: &mut Cpu, o: u32) {
     nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, cells, 0x25e0_0000, 0xb820, 0x800));
     let cells = states::stage_part(cpu, states::CELLS, 2);
     nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, cells, 0x25e0_b820, 0xf3c0, 0x800));
-    cpu.call(SL_SCENE_MESSAGE, &[0x060a_7ef8]);
+    nested!(cpu, 0x060a_26fc, sgl::sl_map_ra_table(cpu, 0x060a_7ef8));
     let colours = states::stage_part(cpu, states::COLOURS, 1);
     nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0, 96));
     let colours = states::stage_part(cpu, states::COLOURS, 2);
@@ -17942,7 +17927,7 @@ pub fn stair_second_start(cpu: &mut Cpu) {
     let colour = cpu.read16(kind(STAIR_KIND) + K_COLOUR) as u32 | 0x1000;
     nested!(cpu, 0x0604_5b60, models::models_colour(cpu, STAIR_KIND, colour & 0xffff));
     nested!(cpu, 0x0606_2f74, gouraud::models_hss(cpu, STAIR_KIND, 4));
-    cpu.call(SL_SCENE_SIZE, &[5]);
+    nested!(cpu, 0x060a_27c4, sgl::sl_sprite_type(cpu, 5));
     nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, -8i32 as u32, 3));
     nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, -5i32 as u32, 2));
     let screen = cpu.read32(screen::SCREEN);
@@ -18038,9 +18023,9 @@ pub fn flow_step(cpu: &mut Cpu) {
     nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, 0, dy, 0));
     let x = cpu.read32(SCENE_MOVER + SCENE_MOVER_X);
     let y = cpu.read32(SCENE_MOVER + SCENE_MOVER_Y);
-    cpu.call(SL_SCENE_PLACE, &[x, y]);
+    nested!(cpu, 0x060a_2844, sgl::sl_rpara_place(cpu, x, y));
     let (a, b) = (cpu.read32(SCENE_MOVER + 36), cpu.read32(SCENE_MOVER + 40));
-    cpu.call(0x060a_2894, &[a, b]);
+    nested!(cpu, 0x060a_2894, sgl::sl_rpara_scale(cpu, a, b));
 }
 
 /// The first plane's zooms both eased from 2.0 to 1.0 by the object's value (+0x20).
@@ -18111,8 +18096,8 @@ pub fn flow_run(cpu: &mut Cpu, o: u32) {
         nested!(cpu, 0x0606_e4dc, sgl::sl_invers_matrix(cpu));
         nested!(cpu, 0x0606_e50c, sgl::rotation_parameters(cpu));
         nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
-        cpu.call(SL_SCENE_TURN, &[0]);
-        cpu.call(SL_KTABLE_SET, &[KTABLE, 0x60]);
+        nested!(cpu, 0x060a_2864, sgl::sl_rpara_turn(cpu, 0));
+        nested!(cpu, 0x060a_2634, sgl::sl_ktable_ra(cpu, KTABLE, 0x60));
         cpu.write32(SCENE_MOVER + SCENE_MOVER_X, 0x80_0000);
         cpu.write32(SCENE_MOVER + SCENE_MOVER_Y, 0);
         nested!(cpu, 0x0609_f514, flow_zoom(cpu, o));
@@ -18237,8 +18222,8 @@ pub fn wipe_run(cpu: &mut Cpu, o: u32) {
                     for at in [44, 40, 36] {
                         cpu.write32(SCENE_MOVER + at, 0x1_0000);
                     }
-                    cpu.call(SL_KTABLE_SET, &[KTABLE, 0x61]);
-                    cpu.call(SL_SCENE_MESSAGE, &[0x060a_7ef8]);
+                    nested!(cpu, 0x060a_2634, sgl::sl_ktable_ra(cpu, KTABLE, 0x61));
+                    nested!(cpu, 0x060a_26fc, sgl::sl_map_ra_table(cpu, 0x060a_7ef8));
                     nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 0, 3));
                     nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 5, 5));
                     let screen = cpu.read32(screen::SCREEN);
@@ -18503,7 +18488,7 @@ pub fn view_scene_start(cpu: &mut Cpu, o: u32) {
     cpu.write32(bg::PLANE_B + bg::ZOOM_X, 0x1_0000);
     let cells = states::stage_part(cpu, states::CELLS, 4);
     nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, cells, 0x25e0_b820, 0x1_30a0, 0x800));
-    cpu.call(0x060a_28a4, &[0x25e5_4000]);
+    nested!(cpu, 0x060a_28a4, sgl::sl_map_rb(cpu, 0x25e5_4000));
     let colours = states::stage_part(cpu, states::COLOURS, 4);
     nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0x60, 0xa0));
     for at in [44, 40, 36] {
@@ -18519,16 +18504,16 @@ pub fn view_scene_start(cpu: &mut Cpu, o: u32) {
     for at in [44, 40, 36] {
         cpu.write32(TWIN + at, 0xffff);
     }
-    cpu.call(SL_KTABLE_B, &[KTABLE, 0x61]);
+    nested!(cpu, 0x060a_2764, sgl::sl_ktable_rb(cpu, KTABLE, 0x61));
     nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x17));
     nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 0x101));
     nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 1, 4));
     nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 0, 3));
     nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 5, 5));
-    cpu.call(SL_WINDOW_RANGE, &[0, 0, 0x160, 0xffff]);
+    nested!(cpu, 0x060a_2804, sgl::sl_scr_window0(cpu, 0, 0, 0x160, 0xffff));
     nested!(cpu, 0x0606_e17c, sgl::sl_window_control(cpu, 7, 2));
-    cpu.call(SL_SCENE_MODE, &[3]);
-    cpu.call(SL_SCENE_ON, &[0]);
+    nested!(cpu, 0x060a_26b4, sgl::sl_rpara_mode(cpu, 3));
+    nested!(cpu, 0x060a_26c4, sgl::sl_cur_rpara(cpu, 0));
     cpu.write8(o + SCENE_STATE, 0);
     cpu.write32(o + 32, 0x8_0000);
     cpu.write32(o + 40, 0);
@@ -18581,12 +18566,12 @@ pub fn view_scene_step(cpu: &mut Cpu, o: u32) {
     };
     cpu.write32(t + 4, y as u32);
     let low = cpu.read16(t + 6) as u32;
-    cpu.call(SL_WINDOW_RANGE, &[0, 0, 0x160, low]);
+    nested!(cpu, 0x060a_2804, sgl::sl_scr_window0(cpu, 0, 0, 0x160, low));
     let y = cpu.read32(t + 4);
     cpu.write32(TIMER_COMPARE, y.wrapping_add(1));
-    cpu.call(SL_SCENE_ON, &[1]);
+    nested!(cpu, 0x060a_26c4, sgl::sl_cur_rpara(cpu, 1));
     nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, TWIN));
-    cpu.call(SL_SCENE_ON, &[0]);
+    nested!(cpu, 0x060a_26c4, sgl::sl_cur_rpara(cpu, 0));
     nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCENE_MOVER));
     nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
     if cpu.read32(o + 40) == 0x1_0000 {
@@ -18608,8 +18593,8 @@ pub fn view_scene_end(cpu: &mut Cpu, o: u32) {
     cpu.write32(SCENE_VIEW + 8, 0xff50_0000);
     let x = cpu.read32(SCENE_VIEW + 12) & 0x01ff_ffff;
     cpu.write32(SCENE_VIEW + 12, x);
-    cpu.call(SL_SCENE_MODE, &[1]);
-    cpu.call(SL_SCENE_ON, &[1]);
+    nested!(cpu, 0x060a_26b4, sgl::sl_rpara_mode(cpu, 1));
+    nested!(cpu, 0x060a_26c4, sgl::sl_cur_rpara(cpu, 1));
     cpu.call(0x060a_26e4, &[0x060a_83d0]);
 }
 
@@ -18697,10 +18682,10 @@ pub fn view_scene_second(cpu: &mut Cpu, o: u32) {
     let x = (cpu.read32(SCENE_VIEW + 12) & 0x01ff_ffff).wrapping_add(0xfc00_0000);
     cpu.write32(SCENE_VIEW + 12, x);
     nested!(cpu, 0x0606_e17c, sgl::sl_window_control(cpu, 7, 3));
-    cpu.call(SL_WINDOW_RANGE, &[0, 0, 0x160, 0xffff]);
-    cpu.call(SL_SCENE_MODE, &[3]);
+    nested!(cpu, 0x060a_2804, sgl::sl_scr_window0(cpu, 0, 0, 0x160, 0xffff));
+    nested!(cpu, 0x060a_26b4, sgl::sl_rpara_mode(cpu, 3));
     nested!(cpu, 0x0607_1c4c, sgl::sl_map_rbg0(cpu, 0x25e5_4000));
-    cpu.call(0x060a_28a4, &[0x25e5_4000]);
+    nested!(cpu, 0x060a_28a4, sgl::sl_map_rb(cpu, 0x25e5_4000));
     cpu.write32(TWIN + 12, 0);
     cpu.write32(o + 40, 0);
     let room = cpu.read32(STAGE_ROOM);
@@ -18757,12 +18742,12 @@ pub fn view_scene_step_b(cpu: &mut Cpu, o: u32) {
     };
     cpu.write32(t + 4, y as u32);
     let low = cpu.read16(t + 6) as u32;
-    cpu.call(SL_WINDOW_RANGE, &[0, 0, 0x160, low]);
+    nested!(cpu, 0x060a_2804, sgl::sl_scr_window0(cpu, 0, 0, 0x160, low));
     let y = cpu.read32(t + 4);
     cpu.write32(TIMER_COMPARE, y.wrapping_add(1));
-    cpu.call(SL_SCENE_ON, &[1]);
+    nested!(cpu, 0x060a_26c4, sgl::sl_cur_rpara(cpu, 1));
     nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, TWIN));
-    cpu.call(SL_SCENE_ON, &[0]);
+    nested!(cpu, 0x060a_26c4, sgl::sl_cur_rpara(cpu, 0));
     nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCENE_MOVER));
     nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
     if cpu.read32(o + 40) == 0x1_0000 {
@@ -18777,7 +18762,7 @@ pub fn view_scene_second_end(cpu: &mut Cpu, o: u32) {
     nested!(cpu, 0x0609_fe5c, timer_end(cpu));
     nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 83, 0));
     nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, 0, 0, 0));
-    cpu.call(SL_SCENE_MODE, &[0]);
+    nested!(cpu, 0x060a_26b4, sgl::sl_rpara_mode(cpu, 0));
     cpu.write32(SCENE_VIEW + 12, 0xff50_0000);
     let z = cpu.read32(SCENE_VIEW + 8) & 0x01ff_ffff;
     cpu.write32(SCENE_VIEW + 8, z);
@@ -18799,7 +18784,7 @@ fn view_scene_back(cpu: &mut Cpu, o: u32, message: u32, limit: u32) {
     nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
     match cpu.read8(o + SCENE_STATE) as i8 {
         0 => {
-            cpu.call(SL_SCENE_MESSAGE, &[message]);
+            nested!(cpu, 0x060a_26fc, sgl::sl_map_ra_table(cpu, message));
             state_next(cpu, o);
         }
         1 => {
@@ -18943,7 +18928,7 @@ fn tower_window(cpu: &mut Cpu, from: u32, to: u32, amount: u32) {
     let h = (r >> 16) as u16 as i16 as i32 as u32;
     let bottom = h.wrapping_add(112) & 0xffff;
     let top = h.wrapping_neg().wrapping_add(112) & 0xffff;
-    cpu.call(SL_WINDOW_RANGE, &[0, top, 0x15f, bottom]);
+    nested!(cpu, 0x060a_2804, sgl::sl_scr_window0(cpu, 0, top, 0x15f, bottom));
 }
 
 /// The tower scene's run (`o`: +0x20 and +0x30 the rise's speeds, +0x24 the value that drives it,
@@ -18974,7 +18959,7 @@ pub fn tower_scene_run(cpu: &mut Cpu, o: u32) {
                 let w = (r >> 16) as u16 as i16 as i32 as u32;
                 nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, w, w, w));
                 if cpu.read32(o + 36) as i32 > 0xffff {
-                    cpu.call(SL_WINDOW_RANGE, &[0, 0, 0x160, 0xffff]);
+                    nested!(cpu, 0x060a_2804, sgl::sl_scr_window0(cpu, 0, 0, 0x160, 0xffff));
                     nested!(cpu, 0x0606_e17c, sgl::sl_window_control(cpu, 5, 3));
                     nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 0x53, 0));
                     cpu.write32(SCENE_MOVER + 12, 0xff50_0000);
@@ -19033,7 +19018,7 @@ pub fn tower_scene_run(cpu: &mut Cpu, o: u32) {
                 let x = cpu.read32(o + 36);
                 let amount = x.wrapping_mul(2);
                 if (x as i32) > 0x7fff {
-                    cpu.call(SL_WINDOW_RANGE, &[0, 0, 0x160, 0xffff]);
+                    nested!(cpu, 0x060a_2804, sgl::sl_scr_window0(cpu, 0, 0, 0x160, 0xffff));
                 } else {
                     let tilt = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x1800, 0xffff_0000, amount));
                     cpu.write16(SCENE_MOVER, tilt as u16);
@@ -19110,16 +19095,16 @@ pub fn tower_second_start(cpu: &mut Cpu, o: u32) {
     nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, table, 0x25e4_0000, 0x2000));
     let colours = states::stage_part(cpu, states::COLOURS, 9);
     nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0, 0x60));
-    cpu.call(SL_SCENE_ON, &[0]);
+    nested!(cpu, 0x060a_26c4, sgl::sl_cur_rpara(cpu, 0));
     nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
     nested!(cpu, 0x0606_e4dc, sgl::sl_invers_matrix(cpu));
     nested!(cpu, 0x0606_e50c, sgl::rotation_parameters(cpu));
     nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
-    cpu.call(SL_KTABLE_SET, &[0x25e2_0000, 96]);
+    nested!(cpu, 0x060a_2634, sgl::sl_ktable_ra(cpu, 0x25e2_0000, 96));
     cpu.write32(SCENE_MOVER + 12, 0x00b0_0000);
     cpu.write32(SCENE_MOVER + 16, 0);
-    cpu.call(SL_SCENE_PLACE, &[0x00b0_0000, 0]);
-    cpu.call(SL_SCENE_TURN, &[0]);
+    nested!(cpu, 0x060a_2844, sgl::sl_rpara_place(cpu, 0x00b0_0000, 0));
+    nested!(cpu, 0x060a_2864, sgl::sl_rpara_turn(cpu, 0));
     nested!(cpu, 0x0606_e17c, sgl::sl_window_control(cpu, 5, 0));
     let y = cpu.read32(bg::PLANE_B + bg::Y).wrapping_sub(cpu.read32(o + 52));
     cpu.write32(bg::PLANE_B + bg::Y, y);
@@ -19154,7 +19139,7 @@ pub fn planes_slide(cpu: &mut Cpu, o: u32) {
     let y = cpu.read32(SCENE_MOVER + 16) & 0x01ff_ffff;
     cpu.write32(SCENE_MOVER + 16, y);
     let x = cpu.read32(SCENE_MOVER + 12);
-    cpu.call(SL_SCENE_PLACE, &[x, y]);
+    nested!(cpu, 0x060a_2844, sgl::sl_rpara_place(cpu, x, y));
     let speed = cpu.read32(o + 52).wrapping_neg();
     nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, 0, ((speed as i32) >> 2) as u32, 0));
 }
@@ -19220,7 +19205,7 @@ pub fn stair_scene_start(cpu: &mut Cpu, o: u32) {
     cpu.write32(o + 44, 0x8_0000);
     cpu.write32(SCENE_VIEW, 0);
     nested!(cpu, 0x0605_f5b0, bg::view_along(cpu, 0x060a_843c));
-    cpu.call(SL_KTABLE_SET, &[0x25e2_0000, 97]);
+    nested!(cpu, 0x060a_2634, sgl::sl_ktable_ra(cpu, 0x25e2_0000, 97));
     for at in [20, 16, 12, 32, 28, 24] {
         cpu.write32(SCENE_MOVER + at, 0);
     }
@@ -19232,7 +19217,7 @@ pub fn stair_scene_start(cpu: &mut Cpu, o: u32) {
     }
     let cells = states::stage_part(cpu, states::CELLS, 1);
     nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, cells, 0x25e0_0000, 0xb820, 0x800));
-    cpu.call(SL_SCENE_MESSAGE, &[0x060a_7ef8]);
+    nested!(cpu, 0x060a_26fc, sgl::sl_map_ra_table(cpu, 0x060a_7ef8));
     let colours = states::stage_part(cpu, states::COLOURS, 1);
     nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0, 0x60));
     let (x, y) = (cpu.read32(bg::PLANE_B), cpu.read32(bg::PLANE_B + 4));
@@ -19242,7 +19227,7 @@ pub fn stair_scene_start(cpu: &mut Cpu, o: u32) {
     nested!(cpu, 0x0607_0c4c, sgl::sl_map_nbg0(cpu, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000));
     nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 1, 3));
     nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 5, 4));
-    cpu.call(SL_SCENE_SIZE, &[5]);
+    nested!(cpu, 0x060a_27c4, sgl::sl_sprite_type(cpu, 5));
     nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 0xffff_fff8, 3));
     nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, 0, 0, 0));
     nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 82, 1));
@@ -19414,4 +19399,147 @@ fn stair_scene_load(cpu: &mut Cpu, o: u32) {
     nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 1, 6));
     nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x3_0014));
     nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 0x53, 0));
+}
+
+/// The grid scene's sweeps (objects of 28 bytes, made by grid_sweep_make, running at
+/// GRID_SWEEP): each steps a cursor along a row (+0x10, 2 bytes a step) and one down a column
+/// (+0x14, 0x80 bytes a step) of NBG0's map (0x25e76000, 64 cells wide), putting a tile where it
+/// goes (2 then 3 along the row, 1 then 3 down the column, 3 where it has been); after 64 steps
+/// (+0x18) the object ends (mode 112, then 115 frees it). It waits while the game is paused
+/// (the top bit of the flags) and steps on every other frame.
+const GRID_SWEEP: u32 = 0x060a_18cc;
+const GRID_MAP: u32 = 0x25e7_6000;
+const GRID_SWEEP_SIZE: u32 = 28;
+const GRID_ROW: u32 = 16;
+const GRID_COLUMN: u32 = 20;
+const GRID_COUNT: u32 = 24;
+const GRID_STEPS: u32 = 64;
+const GRID_ROW_BYTES: u32 = 128;
+const GRID_PAUSED: u32 = 0x8000_0000;
+const GRID_DONE: i8 = 112;
+const GRID_FREE: i8 = 115;
+
+/// A sweep's mode 0 (to 1, its count cleared), 1 (a step on the frames the game's frame count is
+/// even: the row's cursor's tile 2 where it holds 0, else 3, the cursor on 2; the column's 1
+/// where 0, else 3, the cursor down; the count up, at 64 the mode 112), 112 (to 115) and 115
+/// (freed).
+pub fn grid_sweep_behaviour(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(GAME_FLAGS) & GRID_PAUSED != 0 {
+        return;
+    }
+    let mode = cpu.read8(o + OBJ_MODE) as i8;
+    match mode {
+        0 | 1 => {
+            if mode == 0 {
+                cpu.write8(o + OBJ_MODE, 1);
+                cpu.write32(o + GRID_COUNT, 0);
+            }
+            if cpu.read32(GAME_FRAMES) & 1 != 0 {
+                return;
+            }
+            let at = cpu.read32(o + GRID_ROW);
+            let tile = if cpu.read16(at) == 0 { 2 } else { 3 };
+            cpu.write16(at, tile);
+            let row = cpu.read32(o + GRID_ROW);
+            let column = cpu.read32(o + GRID_COLUMN);
+            cpu.write32(o + GRID_ROW, row.wrapping_add(2));
+            let tile = if cpu.read16(column) == 0 { 1 } else { 3 };
+            cpu.write16(column, tile);
+            let column = cpu.read32(o + GRID_COLUMN);
+            let count = cpu.read32(o + GRID_COUNT);
+            cpu.write32(o + GRID_COLUMN, column.wrapping_add(GRID_ROW_BYTES));
+            cpu.write32(o + GRID_COUNT, count.wrapping_add(1));
+            if count.wrapping_add(1) == GRID_STEPS {
+                cpu.write8(o + OBJ_MODE, GRID_DONE as u8);
+            }
+        }
+        GRID_DONE => cpu.write8(o + OBJ_MODE, GRID_FREE as u8),
+        GRID_FREE => nested!(cpu, 0x0600_579c, objects::obj_free(cpu, o)),
+        _ => {}
+    }
+}
+
+/// A sweep made for position `n`: its row cursor at row `n`'s start (128 bytes a row) and its
+/// column cursor at column `n` (a cell, 2 bytes).
+pub fn grid_sweep_make(cpu: &mut Cpu, n: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, GRID_SWEEP_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks, GRID_SWEEP));
+    if o != 0 {
+        cpu.write32(o + GRID_ROW, GRID_MAP.wrapping_add(n.wrapping_mul(GRID_ROW_BYTES)));
+        cpu.write32(o + GRID_COLUMN, GRID_MAP.wrapping_add(n.wrapping_mul(2)));
+    }
+}
+
+/// The grid scene's start (`o`): the room's cells part 12's first 0x80 bytes at 0x25e60000, the
+/// map (0x060a8544, 0x2000 bytes) filled in at 0x25e76000, the first plane at (15.0, 11.0) with
+/// no speed and scales 1.0, the colours of part 12 (16 at 0x100), priority (0, 5), colour rates
+/// (0, 31) and (1, 16), the sprites' colour calculation 3, the screens shown (0x17), the stage's
+/// draw hook cleared, the step (+0x0a) 0 and the count (+0x28) 32.0.
+const GRID_SCENE_PART: u32 = 12;
+const GRID_SCENE_STEP: u32 = 10;
+const GRID_SCENE_FADE: u32 = 40;
+
+pub fn grid_scene_start(cpu: &mut Cpu, o: u32) {
+    let cells = states::stage_part(cpu, states::CELLS, GRID_SCENE_PART);
+    nested!(cpu, 0x0605_edf8, screen::copy_words(cpu, cells, 0x25e6_0000, 0x80));
+    nested!(cpu, 0x0605_ecb4, screen::queue_fill(cpu, 0x060a_8544, GRID_MAP, 0x2000));
+    cpu.write32(bg::PLANE_A + bg::X, 0x00f0_0000);
+    cpu.write32(bg::PLANE_A + bg::Y, 0x00b0_0000);
+    cpu.write32(bg::PLANE_A + bg::SPEED_Y, 0);
+    cpu.write32(bg::PLANE_A + bg::SPEED_X, 0);
+    cpu.write32(bg::PLANE_A + bg::ZOOM_Y, 0x1_0000);
+    cpu.write32(bg::PLANE_A + bg::ZOOM_X, 0x1_0000);
+    let colours = states::stage_part(cpu, states::COLOURS, GRID_SCENE_PART);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0x100, 16));
+    nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 0, 5));
+    nested!(cpu, 0x0606_e45c, sgl::sl_col_rate(cpu, 0, 31));
+    nested!(cpu, 0x0606_e45c, sgl::sl_col_rate(cpu, 1, 16));
+    nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 3));
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x17));
+    let screen = cpu.read32(screen::SCREEN);
+    cpu.write32(screen + SCREEN_HOOK, 0);
+    cpu.write8(o + GRID_SCENE_STEP, 0);
+    cpu.write32(o + GRID_SCENE_FADE, 0x20_0000);
+}
+
+/// The grid scene's planes: the first plane's speed (-0x4000, -0x4000), the second's (0, -0x2000),
+/// each stepped.
+pub fn grid_planes(cpu: &mut Cpu) {
+    nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, 0xffff_c000, 0xffff_c000));
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, 0, 0xffff_e000));
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+}
+
+/// The grid scene's run (`o`): the matrix, the move, the planes; while the step (+0x0a) is
+/// 15 or less and the count (+0x28) is a whole number of 2.0s, a sweep made at position 4 steps
+/// and 2 on, the step up; the count down by 0.125 with the colour rate of NBG0's screen its whole
+/// part; at 0 the next scroll.
+pub fn grid_scene_run(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0609_f08c, stair_matrix(cpu));
+    nested!(cpu, 0x060a_14d4, stair_scene_move(cpu, o));
+    nested!(cpu, 0x060a_1bb4, grid_planes(cpu));
+    if cpu.read8(o + GRID_SCENE_STEP) as i8 <= 15 && cpu.read32(o + GRID_SCENE_FADE) & 0x1_ffff == 0 {
+        let step = cpu.read8(o + GRID_SCENE_STEP) as i8 as i32 as u32;
+        nested!(cpu, 0x060a_197c, grid_sweep_make(cpu, (step << 2).wrapping_add(2)));
+        let step = cpu.read8(o + GRID_SCENE_STEP).wrapping_add(1);
+        cpu.write8(o + GRID_SCENE_STEP, step);
+    }
+    let fade = cpu.read32(o + GRID_SCENE_FADE).wrapping_add(0xffff_e000);
+    cpu.write32(o + GRID_SCENE_FADE, fade);
+    nested!(cpu, 0x0606_e45c, sgl::sl_col_rate(cpu, 0, fade >> 16));
+    if cpu.read32(o + GRID_SCENE_FADE) == 0 {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// The grid scene's end (`o`): the screens shown 0x100007, the state (+9) 0.
+pub fn grid_scene_end(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x10_0007));
+    cpu.write8(o + 9, 0);
+}
+
+/// The grid scene's draw: its planes.
+pub fn grid_scene_draw(cpu: &mut Cpu) {
+    nested!(cpu, 0x060a_1bb4, grid_planes(cpu));
 }
