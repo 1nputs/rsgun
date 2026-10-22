@@ -2071,7 +2071,32 @@ pub fn register(n: &mut Natives) {
         0x0609_f53c => sgl::sl_line_window0[table] -> (),
         0x0609_f54c => sgl::sl_map_rb[a] -> (),
     }
-    // STG04.BIN's code (fingerprint 5c18364ee98aacb1): `rewrites! { n; overlay "STG04"; ... }` here, from its first rewrite
+    // STG04.BIN's code (fingerprint 5c18364ee98aacb1, the fourth stage)
+    rewrites! { n; overlay "STG04";
+        0x0608_034c => stg04::message_event[e] -> u32,
+        0x0608_03a0 => stg04::kinds_event[e] -> u32,
+        0x0608_05c8 => stg04::boss_event[e] -> u32,
+        0x0608_0674 => stg04::fade_colours[from, to] -> (),
+        0x0608_0738 => stg04::colours_set[] -> (),
+        0x0608_079c => stg04::drone_setup[o, spec] -> (),
+        0x0608_084c => stg04::explosion_effect[e] -> u32,
+        0x0608_0880 => stg04::explosion[p] -> u32,
+        0x0608_08e0 => stg04::aim_angle[o, at, delay] -> u32,
+        0x0608_0928 => stg04::gunner_shoot[o] -> u32,
+        0x0608_0970 => stg04::left_screen[o] -> u32,
+        0x0608_09c0 => stg04::swooper_behaviour[o] -> (),
+        0x0608_0c3c => stg04::drone_defaults[o] -> (),
+        0x0608_0c7c => stg04::swooper_set[desc] -> (),
+        0x0608_0d50 => stg04::swooper_volley[o] -> (),
+        0x0608_0e6c => stg04::swooper_launcher[o] -> (),
+        0x0608_0f14 => stg04::swooper_launcher_set[] -> u32,
+        0x0608_0f44 => stg04::out_of_view[o] -> u32,
+        0x0608_1284 => stg04::gunner_behaviour[o] -> (),
+        0x0608_1570 => stg04::gunner_set[desc] -> (),
+        0x0608_1634 => stg04::gunner_volley[o] -> (),
+        0x0608_1838 => stg04::gunner_launcher[o] -> (),
+        0x0608_18d4 => stg04::gunner_launcher_set[frames] -> u32,
+    }
     // STG05.BIN's code (fingerprint 2adefae5540dd556, the last stage)
     rewrites! { n; overlay "STG05";
         0x0608_0000 => stg05::stg05_mode[game] -> u32,
