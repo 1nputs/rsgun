@@ -19,7 +19,7 @@ mkdir -p "$OUT"
 cp "${RSGUN:-target/release/rsgun}" "$OUT/rsgun"
 { echo out/evidence/marathon-states/f060000.state; ls out/evidence/route4-states/f*.state; } | xargs -P "$JOBS" -I{} sh -c '
     s={}; f=$(basename "$s" .state); start=$(expr "${f#f}" + 0)
-    case "$s" in out/evidence/marathon-states/*) f=r$f ;; esac
+    case "$s" in out/evidence/marathon-states/*) f=r${f#f} ;; esac
     "$OUT/rsgun" --headless --load-state "$s" --script out/evidence/route4-input.txt \
         --frames $((start + FRAMES)) --save "$OUT/save-$f" --compare "$OUT/$f.txt" > "$OUT/$f.log" 2>&1
 '
