@@ -52,6 +52,7 @@ mod start;
 mod states;
 mod stg00;
 mod stg01;
+mod stg02;
 mod system;
 mod text;
 mod timeline;
@@ -1360,6 +1361,35 @@ pub fn register(n: &mut Natives) {
         0x0608_1164 => sgl::sl_sprite_type[t] -> (),
         0x0608_1174 => sgl::sl_sprite_cc_condition[condition] -> (),
         0x0608_1194 => sgl::sl_sprite_cc_number[n] -> (),
+    }
+    // STG02.BIN's code (stage 2's)
+    rewrites! { n; overlay "STG02";
+        0x0608_0000 => stg02::stg02_mode[game] -> u32,
+        0x0608_0450 => stg02::model_attrs_set[k, m] -> (),
+        0x0608_04d0 => stg02::kind_attrs_set[k] -> (),
+        0x0608_051c => stg02::model_tilt_angle[o] -> u32,
+        0x0608_054c => stg02::model_screen_angle[o] -> u32,
+        0x0608_057c => stg02::line_effect[o, length] -> (),
+        0x0608_0610 => stg02::burst[o, size] -> u32,
+        0x0608_06b4 => stg02::destroyed_hook[o] -> u32,
+        0x0608_0c20 => stg02::aim_line_behaviour[o] -> (),
+        0x0608_0d88 => stg02::circling_missile_behaviour[o] -> (),
+        0x0608_1124 => stg02::core_behaviour[o] -> (),
+        0x0608_1a00 => stg02::rocket_behaviour[o] -> (),
+        0x0608_1bc8 => stg02::launcher_behaviour[o] -> (),
+        0x0608_1f80 => stg02::laser_behaviour[o] -> (),
+        0x0608_22c4 => stg02::laser_gun_behaviour[o] -> (),
+        0x0608_260c => stg02::pod_behaviour[o] -> (),
+        0x0608_2814 => stg02::fin_7_behaviour[o] -> (),
+        0x0608_2970 => stg02::fin_8_behaviour[o] -> (),
+        0x0608_2ad4 => stg02::fin_9_behaviour[o] -> (),
+        0x0608_2c38 => stg02::spinner_behaviour[o] -> (),
+        0x0608_2f1c => stg02::wing_behaviour[o] -> (),
+        0x0608_30c8 => stg02::hatch_behaviour[o] -> (),
+        0x0608_349c => stg02::hatch_pod_behaviour[o] -> (),
+        0x0608_37dc => stg02::outline_line_behaviour[o] -> (),
+        0x0608_3b7c => stg02::outline_spark_behaviour[o] -> (),
+        0x0608_3e14 => stg02::tracer_behaviour[o] -> (),
     }
     // STG01.BIN's code (stage 3's)
     rewrites! { n; overlay "STG01";
