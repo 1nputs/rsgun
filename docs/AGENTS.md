@@ -109,6 +109,12 @@ into the next brief for that overlay.
   r5): pass them in the `cpu.call`.
 - **Stack arguments past the fourth**: `[a, b, c, d; e, f]` in the registration; callers that push
   and do not pop between calls are mirrored with `cpu.push`/`cpu.pop`.
+- **Scratch pushes read as a prologue**: compare mode reads a function's opening pushes as its
+  prologue; a function that pushes and pops scratch words as it goes (STG05's matrix multiply)
+  "leaves memory otherwise" on every call until it gets a `PROLOGUES` entry in mod.rs with no
+  pushes.
+- **Ghidra's offsets** can be shifted by its idea of the argument (STG05's draw: +0x10, the
+  argument being `o + 0x10`); take offsets from the disassembly.
 - **Overlay images end before their tables**: read tables at run time from memory, not from the
   evidence's .bin, when they lie past the image.
 - **Report labels**: a marathon report names an address by one overlay's fingerprint; in a

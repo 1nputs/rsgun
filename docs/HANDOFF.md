@@ -23,9 +23,9 @@ Overlays (fingerprint, game mode, marathon segments, worktree and branch, where 
 - STG04 (5c18364ee98aacb1, game mode 10, f150000-f170000; ../rsgun-stg04, wip-stg04): every
   function that runs is rewritten (last runs out/port/stg04r-13). Held back (never run):
   0x06082520, 0x060828f4, 0x06084bc4, 0x060877b0, 0x060877bc.
-- STG05 (2adefae5540dd556, game mode 11, f170000-f200000; ../rsgun-stg05, wip-stg05): through
-  0x0608c254; next 0x0608c34c. Held back: the figure's draw 0x0608752c (a batch of its own), the
-  VDP2 set-up 0x06089bac; never run 0x060894b0, 0x0608a510.
+- STG05 (2adefae5540dd556, game mode 11, f170000-f200000; ../rsgun-stg05, wip-stg05): every
+  function that runs is rewritten (last runs out/port/stg05-19). Held back (never run):
+  0x060894b0, 0x0608a510, 0x0608d104, 0x0608d48c.
 - RANK (4635b7419f6fc1a7, the ranking after a game ends, f200000: 16 functions run; the
   marathon reports label many of them with STG05's fingerprint; ../rsgun-rank, wip-rank):
   scaffolded (rank.rs, a marker in mod.rs).
