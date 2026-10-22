@@ -14,8 +14,11 @@ runs are left to the SH-2 code (cpu.call where a rewrite calls them): 0x0608e044
 0x0609db48, 0x0609dc58, 0x0609ddb4, 0x0609de74, 0x0609e0d8, 0x0609e2e8, 0x0609d124,
 0x0609ee24, 0x0609ef70 and the other never-called ones. Two agents work at once (21 October):
 STG01 on wip-stg01 (../rsgun-stg01), STG02 on wip-stg02 (../rsgun-stg02). Left after them:
-STG04 (199), STG05 (165), RANK (16) by their fingerprints (2adefae5540dd556, 5c18364ee98aacb1,
-4635b7419f6fc1a7: check each name with `states::overlay_name` before registering). The marathon
+STG04 (5c18364ee98aacb1, game mode 10, runs about f160000-f170000), STG05 (2adefae5540dd556,
+game mode 11, f170000-f200000: under way on wip-stg04, its worktree ../rsgun-stg04, from
+0x06081514), RANK (4635b7419f6fc1a7); check each name with `states::overlay_name` before
+registering (a block registered under the wrong overlay never runs, and its report shows only
+`f_...` names). The marathon
 reports in out/port/marathon-898fd01 label an address by one overlay's fingerprint only: a
 function shown as another overlay's (f_ADDR_1a653c... in an STG01 segment) may be STG01's; check
 the compare runs' own reports. How each function is done, step by step: section 6, step 1, "The
