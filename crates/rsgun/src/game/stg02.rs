@@ -13439,6 +13439,12 @@ pub fn late_kinds_event(cpu: &mut Cpu, e: u32) -> u32 {
     done
 }
 
+/// The stage boss's event (a timeline event): the boss made (boss_set). 1.
+pub fn stage_boss_event(cpu: &mut Cpu, _e: u32) -> u32 {
+    nested!(cpu, 0x0608_66b8, boss_set(cpu));
+    1
+}
+
 // ---- the last boss --------------------------------------------------------------------------------
 
 /// The last boss (made by 0x0609b2f4, its kinds 58 and 59): its step (+0x6c, by the table at
@@ -19542,4 +19548,378 @@ pub fn grid_scene_end(cpu: &mut Cpu, o: u32) {
 /// The grid scene's draw: its planes.
 pub fn grid_scene_draw(cpu: &mut Cpu) {
     nested!(cpu, 0x060a_1bb4, grid_planes(cpu));
+}
+
+/// The grid scene's fades (objects like the sweeps, made by grid_fade_make, running at GRID_FADER):
+/// the sweeps' cursors again, each step undoing what the sweeps put: the row's cursor (+0x10)
+/// puts 1 where there was 3, else 0; the column's (+0x14) 2 where there was 3, else 0. Every
+/// frame (no wait for the frame count), 64 steps (+0x18), then mode 112, 115 and freed.
+const GRID_FADER: u32 = 0x060a_19d0;
+
+/// A fade's mode 0 (to 1, its count cleared), 1 (a step) and 112, 115 as the sweeps'.
+pub fn grid_fade_behaviour(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(GAME_FLAGS) & GRID_PAUSED != 0 {
+        return;
+    }
+    match cpu.read8(o + OBJ_MODE) as i8 {
+        0 => {
+            cpu.write8(o + OBJ_MODE, 1);
+            cpu.write32(o + GRID_COUNT, 0);
+        }
+        1 => {}
+        GRID_DONE => {
+            cpu.write8(o + OBJ_MODE, GRID_FREE as u8);
+            return;
+        }
+        GRID_FREE => {
+            nested!(cpu, 0x0600_579c, objects::obj_free(cpu, o));
+            return;
+        }
+        _ => return,
+    }
+    let row = cpu.read32(o + GRID_ROW);
+    let tile = if cpu.read16(row) == 3 { 1 } else { 0 };
+    cpu.write16(row, tile);
+    let column = cpu.read32(o + GRID_COLUMN);
+    cpu.write32(o + GRID_ROW, row.wrapping_add(2));
+    let tile = if cpu.read16(column) == 3 { 2 } else { 0 };
+    cpu.write16(column, tile);
+    let column = cpu.read32(o + GRID_COLUMN);
+    cpu.write32(o + GRID_COLUMN, column.wrapping_add(GRID_ROW_BYTES));
+    let count = cpu.read32(o + GRID_COUNT).wrapping_add(1);
+    cpu.write32(o + GRID_COUNT, count);
+    if count == GRID_STEPS {
+        cpu.write8(o + OBJ_MODE, GRID_DONE as u8);
+    }
+}
+
+/// A fade made for position `n`: its row cursor at row `n`'s start, its column cursor at column
+/// `n + 4`.
+pub fn grid_fade_make(cpu: &mut Cpu, n: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, GRID_SWEEP_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 0, blocks, GRID_FADER));
+    if o != 0 {
+        cpu.write32(o + GRID_ROW, GRID_MAP.wrapping_add(n.wrapping_mul(GRID_ROW_BYTES)));
+        cpu.write32(o + GRID_COLUMN, GRID_MAP.wrapping_add(n.wrapping_add(4).wrapping_mul(2)));
+    }
+}
+
+/// The grid scene's load (`o`: the state at +9, the load at +0x20): the next stage's model kind
+/// 51 and its screen data file read in while the grid runs. State 0 starts kind 51's file
+/// loading to the buffer (0x060740e4); 1, once loaded, fixes and installs the kind (VDP1's next
+/// place 0x06074058, its next character 0x060740ea and colour 0x060740e8); 2 starts the
+/// screen data file (0x060090b8) loading to the stage data's place (the next rate 0x800); 3, once
+/// loaded, sets it as the stage data, long-copies cells part 0 (0x1f080 bytes) to 0x25e00000,
+/// puts maps 0 and 1 twice (0x25e40000, 0x25e40040, 0x25e41000, 0x25e41040) and colours part 0's
+/// 0x90 at 0; 4 is the next scroll. Every frame the planes.
+const GRID_KIND: u32 = 51;
+const GRID_DATA_FILE: u32 = 0x0600_90b8;
+const GRID_BUFFER: u32 = 0x0607_40e4;
+const GRID_VDP1_PLACE: u32 = 0x0607_4058;
+const GRID_NEXT_COLOUR: u32 = 0x0607_40e8;
+const GRID_NEXT_CHAR: u32 = 0x0607_40ea;
+const GRID_STAGE_DATA: u32 = 0x0607_4800;
+const GRID_LOAD: u32 = 32;
+const GRID_STATE: u32 = 9;
+const QUEUE_CELLS: u32 = 0x0605_ed94;
+
+pub fn grid_load_step(cpu: &mut Cpu, o: u32) {
+    let state = cpu.read8(o + GRID_STATE);
+    let load = cpu.read32(o + GRID_LOAD);
+    if state <= 4 {
+        let mut next = false;
+        match state {
+            0 => {
+                let at = cpu.read32(GRID_BUFFER);
+                let load = nested!(cpu, 0x0604_5910, kinds::kind_load(cpu, GRID_KIND, at));
+                if load != 0 {
+                    cpu.write32(o + GRID_LOAD, load);
+                    next = true;
+                }
+            }
+            1 => {
+                if nested!(cpu, 0x0600_6074, files::load_done(cpu, load)) != 0 {
+                    let at = cpu.read32(GRID_BUFFER);
+                    nested!(cpu, 0x0604_583c, kinds::model_kind_fix(cpu, GRID_KIND, at));
+                    let vram = cpu.read32(GRID_VDP1_PLACE);
+                    let first = cpu.read16(GRID_NEXT_CHAR) as i16 as i32 as u32;
+                    let colour = cpu.read16(GRID_NEXT_COLOUR) as u32;
+                    nested!(cpu, 0x0604_5950, kinds::model_kind_install(cpu, GRID_KIND, vram, first, colour));
+                    next = true;
+                }
+            }
+            2 => {
+                let load = nested!(cpu, 0x0600_5e40, files::load_file(cpu, GRID_DATA_FILE));
+                if load != 0 {
+                    cpu.write32(NEXT_RATE, 0x800);
+                    let at = cpu.read32(GRID_STAGE_DATA);
+                    nested!(cpu, 0x0600_603c, files::start_load(cpu, load, at));
+                    cpu.write32(o + GRID_LOAD, load);
+                    next = true;
+                }
+            }
+            3 => {
+                if nested!(cpu, 0x0600_6074, files::load_done(cpu, load)) != 0 {
+                    let data = cpu.read32(GRID_STAGE_DATA);
+                    nested!(cpu, 0x0605_e17c, states::stage_data_set(cpu, data));
+                    let cells = states::stage_part(cpu, states::CELLS, 0);
+                    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, cells, 0x25e0_0000, 0x1_f080, 0x800));
+                    for (k, at) in [(0, 0x25e4_0000), (1, 0x25e4_0040), (0, 0x25e4_1000), (1, 0x25e4_1040)] {
+                        let map = states::stage_part(cpu, states::MAPS, k);
+                        cpu.push(&[0, 0]);
+                        nested!(cpu, QUEUE_CELLS, screen::queue_cells(cpu, map, at, 32, 32, 0, 0));
+                    }
+                    cpu.pop(32);
+                    let colours = states::stage_part(cpu, states::COLOURS, 0);
+                    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0, 0x90));
+                    next = true;
+                }
+            }
+            _ => nested!(cpu, 0x0605_e648, screen::scroll_next(cpu)),
+        }
+        if next {
+            state_at_next(cpu, o);
+        }
+    }
+    nested!(cpu, 0x060a_1bb4, grid_planes(cpu));
+}
+
+/// The grid scene's second start (`o`): the mover cleared with its scales 0xffff, stage maps 4, 5,
+/// 2, 3 then 8, 9, 6, 7 put (32 by 32 cells) at 0x25e42000, 0x25e42040, 0x25e43000, 0x25e43040 and
+/// 0x25e44000, 0x25e44040, 0x25e45000, 0x25e45040, the view cleared and put at the path
+/// (0x060a8548), RBG0's map 0x25e40000, the first plane's place wrapped to 0x3fffff and moved
+/// (1.0 in x, 0.75 in y) with no speed and scales 1.0, the rise (+0x2c) 4.0, the state (+9),
+/// the count (+0x30) and the step (+0x0a) 0, and the screens 0x17 shown.
+pub fn grid_second_start(cpu: &mut Cpu, o: u32) {
+    for at in [20, 16, 12, 32, 28, 24] {
+        cpu.write32(SCENE_MOVER + at, 0);
+    }
+    for at in [4, 2, 0, 10, 8, 6] {
+        cpu.write16(SCENE_MOVER + at, 0);
+    }
+    for at in [44, 40, 36] {
+        cpu.write32(SCENE_MOVER + at, 0xffff);
+    }
+    // each group of four puts its two pushed words, and lets them go (the second group's after the
+    // view is cleared)
+    for (n, group) in [[(4, 0x25e4_2000), (5, 0x25e4_2040), (2, 0x25e4_3000), (3, 0x25e4_3040)], [(8, 0x25e4_4000), (9, 0x25e4_4040), (6, 0x25e4_5000), (7, 0x25e4_5040)]].into_iter().enumerate() {
+        for (k, at) in group {
+            let map = states::stage_part(cpu, states::MAPS, k);
+            cpu.push(&[0, 0]);
+            nested!(cpu, QUEUE_CELLS, screen::queue_cells(cpu, map, at, 32, 32, 0, 0));
+        }
+        if n == 0 {
+            cpu.pop(32);
+        }
+    }
+    cpu.write32(SCENE_VIEW, 0);
+    cpu.pop(32);
+    nested!(cpu, 0x0605_f648, bg::view_along_eased(cpu, 0x060a_8548));
+    nested!(cpu, 0x0607_1c4c, sgl::sl_map_rbg0(cpu, 0x25e4_0000));
+    cpu.write32(bg::PLANE_A + bg::SPEED_Y, 0);
+    cpu.write32(bg::PLANE_A + bg::SPEED_X, 0);
+    let (x, y) = (cpu.read32(bg::PLANE_A + bg::X), cpu.read32(bg::PLANE_A + bg::Y));
+    let (x, y) = (x & 0x3f_ffff, y & 0x3f_ffff);
+    cpu.write32(bg::PLANE_A + bg::X, x);
+    cpu.write32(bg::PLANE_A + bg::Y, y);
+    cpu.write32(bg::PLANE_A + bg::X, x.wrapping_add(0x0100_0000));
+    cpu.write32(bg::PLANE_A + bg::Y, y.wrapping_add(0x00c0_0000));
+    cpu.write32(bg::PLANE_A + bg::ZOOM_Y, 0x1_0000);
+    cpu.write32(bg::PLANE_A + bg::ZOOM_X, 0x1_0000);
+    cpu.write32(o + 44, 0x4_0000);
+    cpu.write8(o + GRID_STATE, 0);
+    cpu.write32(o + 48, 0);
+    cpu.write8(o + GRID_SCENE_STEP, 0);
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x17));
+}
+
+/// The scene's matrix: the mover's rise (+0x10) taken up by the scene's (+0x2c) and kept to 25
+/// bits, the view's matrix and the mover's rotation.
+fn grid_matrix(cpu: &mut Cpu, rise: u32) {
+    let y = cpu.read32(SCENE_MOVER + SCENE_MOVER_Y).wrapping_add(rise) & 0x01ff_ffff;
+    cpu.write32(SCENE_MOVER + SCENE_MOVER_Y, y);
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCENE_MOVER));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+}
+
+/// The grid scene's second run (`o`): the matrix, then by state (+9): 0 the planes, a fade made at
+/// position 4 steps and 2 on while the step (+0x0a) is 15 or less and the count (+0x28) is a whole
+/// number of 2.0s (the step up), the count up by 0.125 with the colour rate of NBG0's screen its
+/// whole part, and at 2.0 the screens 0x30014 shown, the count cleared, the state up; 1 counts 60
+/// frames then the next scroll.
+pub fn grid_second_run(cpu: &mut Cpu, o: u32) {
+    let rise = cpu.read32(o + 44);
+    grid_matrix(cpu, rise);
+    match cpu.read8(o + GRID_STATE) as i8 {
+        0 => {
+            nested!(cpu, 0x060a_1bb4, grid_planes(cpu));
+            if cpu.read8(o + GRID_SCENE_STEP) as i8 <= 15 && cpu.read32(o + GRID_SCENE_FADE) & 0x1_ffff == 0 {
+                let step = cpu.read8(o + GRID_SCENE_STEP) as i8 as i32 as u32;
+                nested!(cpu, 0x060a_1a70, grid_fade_make(cpu, (step << 2).wrapping_add(2)));
+                let step = cpu.read8(o + GRID_SCENE_STEP).wrapping_add(1);
+                cpu.write8(o + GRID_SCENE_STEP, step);
+            }
+            let fade = cpu.read32(o + GRID_SCENE_FADE).wrapping_add(0x2000);
+            cpu.write32(o + GRID_SCENE_FADE, fade);
+            nested!(cpu, 0x0606_e45c, sgl::sl_col_rate(cpu, 0, fade >> 16));
+            if cpu.read32(o + GRID_SCENE_FADE) == 0x20_0000 {
+                nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x3_0014));
+                cpu.write32(o + GRID_SCENE_FADE, 0);
+                state_at_next(cpu, o);
+            }
+        }
+        1 => {
+            let count = cpu.read32(o + GRID_SCENE_FADE).wrapping_add(1);
+            cpu.write32(o + GRID_SCENE_FADE, count);
+            if count == 60 {
+                nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The grid scene's third start (`o`): cells part 1 (0xa40 bytes) copied to 0x25e60000, colours part
+/// 1's 16 at 0x100, stage maps 11, 10, 13, 12 put (32 by 32 cells) at 0x25e76000, 0x25e76040,
+/// 0x25e77000, 0x25e77040, NBG0's page (0x200, 0x8000) and map (0x25e76000), the first plane at
+/// (11.0, 0) with no speed and scales 1.0, priority (1, 5), colour calculation 0x101, the state (+9)
+/// and the count (+0x28) 0, window 0 current, the slave's setting 60 given 1, the Z display
+/// level 7, window 1 current, and the ships' scene on.
+pub fn grid_third_start(cpu: &mut Cpu, o: u32) {
+    let cells = states::stage_part(cpu, states::CELLS, 1);
+    nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, cells, 0x25e6_0000, 0xa40));
+    let colours = states::stage_part(cpu, states::COLOURS, 1);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0x100, 16));
+    for (k, at) in [(11, 0x25e7_6000), (10, 0x25e7_6040), (13, 0x25e7_7000), (12, 0x25e7_7040)] {
+        let map = states::stage_part(cpu, states::MAPS, k);
+        cpu.push(&[0, 0]);
+        nested!(cpu, QUEUE_CELLS, screen::queue_cells(cpu, map, at, 32, 32, 0, 0));
+    }
+    cpu.pop(32);
+    nested!(cpu, 0x0606_e300, sgl::sl_page_nbg0(cpu, 0x25e6_0000, 0x200, 0x8000));
+    nested!(cpu, 0x0607_0c4c, sgl::sl_map_nbg0(cpu, 0x25e7_6000, 0x25e7_6000, 0x25e7_6000, 0x25e7_6000));
+    cpu.write32(bg::PLANE_A + bg::X, 0x00b0_0000);
+    cpu.write32(bg::PLANE_A + bg::Y, 0);
+    cpu.write32(bg::PLANE_A + bg::SPEED_Y, 0);
+    cpu.write32(bg::PLANE_A + bg::SPEED_X, 0);
+    cpu.write32(bg::PLANE_A + bg::ZOOM_Y, 0x1_0000);
+    cpu.write32(bg::PLANE_A + bg::ZOOM_X, 0x1_0000);
+    nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 1, 5));
+    nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 0x101));
+    cpu.write8(o + GRID_STATE, 0);
+    cpu.write32(o + GRID_SCENE_FADE, 0);
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 0));
+    nested!(cpu, 0x0606_705c, sgl::slave_setting_60(cpu, 1));
+    nested!(cpu, 0x0606_990c, sgl::sl_zdsp_level(cpu, 7));
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 1));
+    nested!(cpu, 0x0606_1738, super::player::scene_on(cpu));
+}
+
+/// The third scene's piece (the model kind 51's first piece, through the kind's file's list at
+/// +0x1c) and the point (0x060a85a0) it hangs at: drawn at the point, and the point's place on the
+/// screen found; the first plane put at its minus when it is within 0xffffff of the screen's
+/// centre in both (the screens 0x20015 shown), else the screens 0x30014.
+const GRID_POINT: u32 = 0x060a_85a0;
+const GRID_PIECE_LIST: u32 = 0x1c;
+
+pub fn grid_look(cpu: &mut Cpu) {
+    let out = cpu.stack();
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 0));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let [x, y, z] = [0, 4, 8].map(|i| cpu.read32(GRID_POINT + i));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, z));
+    let file = cpu.read32(kind(GRID_KIND));
+    let pieces = cpu.read32(file + GRID_PIECE_LIST);
+    let piece = cpu.read32(pieces);
+    let polygons = cpu.read32(piece);
+    nested!(cpu, 0x0606_745c, sgl::sl_put_polygon(cpu, polygons));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 1));
+    nested!(cpu, 0x0606_750c, sgl::sl_convert(cpu, GRID_POINT, out));
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCENE_MOVER));
+    let (x, y) = (cpu.read32(out) as i32, cpu.read32(out + 4) as i32);
+    if x.wrapping_abs() > 0xff_ffff || y.wrapping_abs() > 0xff_ffff {
+        nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x3_0014));
+    } else {
+        nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x2_0015));
+        cpu.write32(bg::PLANE_A + bg::X, (x as u32).wrapping_neg());
+        cpu.write32(bg::PLANE_A + bg::Y, (y as u32).wrapping_neg());
+        nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    }
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+}
+
+/// The grid scene's third run (`o`): the start pressed is the next scroll; from state 1 the look;
+/// then by state (+9): 0 the matrix (the mover's rise taken up by the +0x2c value) and, once the rise
+/// is 0, the map table 0x060a8590 and the state up; 1 the view's turn (+16) eased from 0 to
+/// -0xf00 by the count (+0x30, 0x200 a step up to 0xffff) and its z (+8) lowered by the +0x2c value
+/// which is lowered 0x500 a frame, the state up at 0; 2 counts 60 (+0x28) then the state up; 3 the
+/// state up and the next scroll. The ships held still.
+pub fn grid_third_run(cpu: &mut Cpu, o: u32) {
+    if nested!(cpu, 0x0606_1780, super::player::start_pressed(cpu)) != 0 {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+    if cpu.read8(o + GRID_STATE) != 0 {
+        nested!(cpu, 0x060a_22ac, grid_look(cpu));
+    }
+    let state = cpu.read8(o + GRID_STATE) as i8 as i32 as u32;
+    if state <= 4 {
+        match state {
+            0 => {
+                let rise = cpu.read32(o + 44);
+                grid_matrix(cpu, rise);
+                if cpu.read32(SCENE_MOVER + SCENE_MOVER_Y) == 0 {
+                    nested!(cpu, 0x060a_26fc, sgl::sl_map_ra_table(cpu, 0x060a_8590));
+                    state_at_next(cpu, o);
+                }
+            }
+            1 => {
+                let t = cpu.read32(o + 48);
+                if t as i32 <= 0xffff {
+                    let t = t.wrapping_add(0x200);
+                    cpu.write32(o + 48, t);
+                    let turn = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0, 0xffff_f100, t));
+                    cpu.write32(SCENE_VIEW + SCENE_VIEW_TURN_X, turn);
+                }
+                let rise = cpu.read32(o + 44);
+                let z = cpu.read32(SCENE_VIEW + 8).wrapping_sub(rise);
+                cpu.write32(SCENE_VIEW + 8, z);
+                let rise = rise.wrapping_add(0xffff_fb00);
+                cpu.write32(o + 44, rise);
+                if rise as i32 <= 0 {
+                    state_at_next(cpu, o);
+                }
+            }
+            2 => {
+                let count = cpu.read32(o + GRID_SCENE_FADE).wrapping_add(1);
+                cpu.write32(o + GRID_SCENE_FADE, count);
+                if count == 60 {
+                    state_at_next(cpu, o);
+                }
+            }
+            3 => {
+                state_at_next(cpu, o);
+                nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+            }
+            _ => {}
+        }
+    }
+    nested!(cpu, 0x0606_16b8, super::player::ships_still(cpu));
+}
+
+/// The grid scene's third end: the colour offsets A and B cleared, the mode done.
+pub fn grid_third_end(cpu: &mut Cpu) {
+    nested!(cpu, 0x0605_e6fc, screen::set_offset_a(cpu, 0, 0, 0));
+    nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, 0, 0, 0));
+    nested!(cpu, 0x0604_0c64, super::director::mode_done(cpu));
+}
+
+/// The grid scene's third frame (`o` passed on): its run, the ships held still.
+pub fn grid_third_frame(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x060a_23a0, grid_third_run(cpu, o));
+    nested!(cpu, 0x0606_16b8, super::player::ships_still(cpu));
 }
