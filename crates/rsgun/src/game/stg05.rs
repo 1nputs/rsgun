@@ -2949,3 +2949,1033 @@ pub fn figure_rise(cpu: &mut Cpu, o: u32) {
     nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, 0, 0, 0, 60));
     nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 79));
 }
+
+// ---- the figure's mode steps (the table at 0x060910cc, by mode) -------------------------------------------------------
+
+/// The figure's lift (+0x18b0, a count that rises or falls to 0) and the speed it moves at (+0x18b4).
+const FIG_LIFT: u32 = 0x18b0;
+const FIG_LIFT_SPEED: u32 = 0x18b4;
+
+/// A word the SH-2 sign-extends on loading.
+fn neg_word(v: u16) -> u32 {
+    v as i16 as i32 as u32
+}
+
+/// The lift eased (the part the steps 2 and 4 share): `aim` its distance from the place the pull
+/// puts it at; below 0 the lift is cleared; else the speed approaches a 48th of the way back by a
+/// 0x300th of the distance and the lift moves by it.
+fn lift_ease(cpu: &mut Cpu, o: u32, aim: u32) {
+    if cpu.read32(o + FIG_LIFT) as i32 >= 0 {
+        let size = nested!(cpu, 0x0600_6a78, math::quotient(cpu, aim, 0x300)) as i32;
+        let size = size.wrapping_abs() as u32;
+        let goal = nested!(cpu, 0x0600_6a78, math::quotient(cpu, aim.wrapping_neg(), 48));
+        let v = cpu.read32(o + FIG_LIFT_SPEED);
+        let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, goal, size));
+        cpu.write32(o + FIG_LIFT_SPEED, v);
+        let l = cpu.read32(o + FIG_LIFT).wrapping_add(v);
+        cpu.write32(o + FIG_LIFT, l);
+    } else {
+        cpu.write32(o + FIG_LIFT, 0);
+    }
+}
+
+/// Mode 2's step: the scale +0x18b8 eased to 0x10000 by 0x80, the pose step, the head aim
+/// +0x53c 0xb800 less the pull's word at +0x189a, the arms' aims cleared, the place aimed at
+/// (+0x554) 0x2000 on and its z (+0x558) the pull +0x1890 by 1024 less the figure's z; sunk,
+/// wrapped, settled; the pull's third +0x1898 eased to 0x1c00 by 10 while the lift speed is
+/// below 0; while the pull is 0, once the lift is past 0x70000 the pull is 1 and +0x1894 0x80000;
+/// the lift's aim the lift less 0x80000 (pull 0) or less +0x1894 (which then falls by 0x400); the
+/// lift eased (`lift_ease`); once it is 0 its flag 0x20 cleared, the scale 0x10000 and mode 3.
+pub fn figure_step_2(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0a80, falling_piece_set(cpu));
+    let v = cpu.read32(o + FIG_SCALE);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0x1_0000, 0x80));
+    cpu.write32(o + FIG_SCALE, v);
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    let low = neg_word(cpu.read16(o + FIG_PULL + 8 + 2));
+    cpu.write16(o + FIG_HEAD_AIM, 0xffff_b800u32.wrapping_sub(low) as u16);
+    cpu.write16(o + FIG_HEAD_AIM + 2, 0);
+    cpu.write16(o + FIG_HEAD_AIM + 4, 0);
+    let y = cpu.read32(o + FIG_Y_AT).wrapping_add(0x2000);
+    cpu.write32(o + FIG_Y_AT, y);
+    let z = (cpu.read32(o + FIG_PULL) << 10).wrapping_neg().wrapping_sub(cpu.read32(o + POSITION + 8));
+    cpu.write32(o + FIG_LIMB_AIM + 8, z);
+    nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+    nested!(cpu, 0x0608_442c, wrap_place(cpu, o));
+    nested!(cpu, 0x0608_4258, figure_settle(cpu, o));
+    if (cpu.read32(o + FIG_LIFT_SPEED) as i32) < 0 {
+        let v = cpu.read32(o + FIG_PULL + 8);
+        let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0x1c00, 10));
+        cpu.write32(o + FIG_PULL + 8, v);
+    }
+    if cpu.read32(o + FIG_PULL) == 0 && cpu.read32(o + FIG_LIFT) as i32 > 0x7_0000 {
+        cpu.write32(o + FIG_PULL, 1);
+        cpu.write32(o + FIG_PULL + 4, 0x8_0000);
+    }
+    let aim;
+    if cpu.read32(o + FIG_PULL) == 0 {
+        aim = cpu.read32(o + FIG_LIFT).wrapping_add(0xfff8_0000);
+    } else {
+        let p = cpu.read32(o + FIG_PULL + 4);
+        aim = cpu.read32(o + FIG_LIFT).wrapping_sub(p);
+        cpu.write32(o + FIG_PULL + 4, p.wrapping_add(-0x400i32 as u32));
+    }
+    lift_ease(cpu, o, aim);
+    if cpu.read32(o + FIG_LIFT) == 0 {
+        let f = cpu.read16(o + FIG_FLAGS) & 0xffdf;
+        cpu.write16(o + FIG_FLAGS, f);
+        cpu.write32(o + FIG_SCALE, 0x1_0000);
+        nested!(cpu, 0x0608_3e20, figure_mode_3(cpu, o, 0));
+    }
+}
+
+/// Mode 3's step: the pose step, the head aim +0x53c 0xa800 and the arm's +0x53e eight times the
+/// word +0x534 (as it is), the aim at the player (`figure_aim`), the places aimed at (+0x550 0,
+/// +0x554 -0x400000, +0x558 -0x100000), the count +0x298 eased to 0 by 0x4000, the figure sunk,
+/// wrapped and settled, +0x1894 on one. Past 120 of it the pull (+0x1890) says the next mode:
+/// 0 and 1 mode 4, 2 and 5 mode 10, 6 and 7 mode 17, 3 and 4 none.
+pub fn figure_step_3(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    cpu.write16(o + FIG_HEAD_AIM, 0xa800);
+    let w = neg_word(cpu.read16(o + 0x534));
+    cpu.write16(o + FIG_HEAD_AIM + 2, (w << 3) as u16);
+    nested!(cpu, 0x0608_4638, figure_aim(cpu, o));
+    cpu.write32(o + FIG_AT, 0);
+    cpu.write32(o + FIG_Y_AT, 0xffc0_0000);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0xfff0_0000);
+    let v = cpu.read32(o + 0x298);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0, 0x4000));
+    cpu.write32(o + 0x298, v);
+    nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+    nested!(cpu, 0x0608_442c, wrap_place(cpu, o));
+    nested!(cpu, 0x0608_4258, figure_settle(cpu, o));
+    let n = cpu.read32(o + FIG_PULL + 4).wrapping_add(1);
+    cpu.write32(o + FIG_PULL + 4, n);
+    let pull = cpu.read32(o + FIG_PULL);
+    if pull > 7 || n as i32 <= 120 {
+        return;
+    }
+    match pull {
+        0 | 1 => nested!(cpu, 0x0608_3eb4, figure_mode_4(cpu, o)),
+        2 | 5 => nested!(cpu, 0x0608_3f74, figure_mode_10(cpu, o)),
+        6 | 7 => nested!(cpu, 0x0608_4120, figure_mode_17(cpu, o)),
+        _ => {}
+    }
+}
+
+/// The pose script's step flags that the steps wait for (the figure's anim's flags word at +0x94):
+/// the cues 1 and 2 a script's step gives (cleared every frame by the pose step) and the
+/// script's end.
+const CUE_1: u32 = 1;
+const CUE_2: u32 = 2;
+const FIG_SCRIPT_FLAGS: u32 = FIG_ANIM + POSE_FLAGS;
+
+/// Whether the figure's pose script gives `bits` this frame.
+fn fig_cue(cpu: &mut Cpu, o: u32, bits: u32) -> bool {
+    cpu.read16(o + FIG_SCRIPT_FLAGS) as u32 & bits != 0
+}
+
+/// The head aim +0x53c 0xb900 and the arm's +0x53e the word +0x534 by 32 (as the steps 4 and 5
+/// set them), the aim at the player.
+fn head_up_aim(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0605_6a58, aim::nearer_player(cpu, o + SPRITE));
+    cpu.write16(o + FIG_HEAD_AIM, 0xb900);
+    let w = neg_word(cpu.read16(o + 0x534));
+    cpu.write16(o + FIG_HEAD_AIM + 2, (w << 5) as u16);
+    nested!(cpu, 0x0608_4638, figure_aim(cpu, o));
+}
+
+/// Mode 4's step (the figure's first fight mode): the pose step, the head's aim up (`head_up_aim`),
+/// +0x550 0, its place +0x554 eased to -0x200000 by 0x8000 and +0x558 -0x200000, +0x298 eased to
+/// 0x70000 by 0x8000; on the script's first cue +0x29c is -0x10000, on its second the sound 72;
+/// the figure sunk, wrapped and settled; when the script ends (flag 0x4000) it starts the pose
+/// script 0x06090c2a again; at a gauge count of 0x1e0 the sphere is made; with a sphere held
+/// (+0x188c) past 0x257 a volley; the count +0x2b8 on one, and when the life is gone or the count
+/// is past 0x960 the figure is wrecked and its mode goes on.
+pub fn figure_step_4(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    head_up_aim(cpu, o);
+    cpu.write32(o + FIG_AT, 0);
+    let y = cpu.read32(o + FIG_Y_AT);
+    let y = nested!(cpu, 0x0604_6168, actors::approach(cpu, y, 0xffe0_0000, 0x8000));
+    cpu.write32(o + FIG_Y_AT, y);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0xffe0_0000);
+    let v = cpu.read32(o + 0x298);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0x7_0000, 0x8000));
+    cpu.write32(o + 0x298, v);
+    if fig_cue(cpu, o, CUE_1) {
+        cpu.write32(o + FIG_SHRINK, 0xffff_0000);
+    }
+    if fig_cue(cpu, o, CUE_2) {
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 72));
+    }
+    nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+    nested!(cpu, 0x0608_442c, wrap_place(cpu, o));
+    nested!(cpu, 0x0608_4258, figure_settle(cpu, o));
+    if fig_cue(cpu, o, SCRIPT_END) {
+        fig_script(cpu, o, 0x0609_0c2a);
+    }
+    if cpu.read32(o + FIG_GAUGE) == 0x1e0 {
+        nested!(cpu, 0x0608_3b90, sphere_set(cpu, o));
+    }
+    if cpu.read32(o + FIG_TARGET) != 0 && cpu.read32(o + FIG_GAUGE) as i32 > 0x257 {
+        nested!(cpu, 0x0608_240c, figure_volley(cpu, o));
+    }
+    let count = cpu.read32(o + FIG_GAUGE).wrapping_add(1);
+    cpu.write32(o + FIG_GAUGE, count);
+    if cpu.read32(o + FIG_LIFE) as i32 <= 0 || count as i32 > 0x960 {
+        nested!(cpu, 0x0608_3ddc, figure_wreck(cpu, o));
+        let m = cpu.read8(o + FIG_MODE).wrapping_add(1);
+        cpu.write8(o + FIG_MODE, m);
+    }
+}
+
+/// Mode 5's step: the pose step, the head's aim up, +0x550 0, +0x554 the pull +0x1890 less
+/// 0x200000, +0x558 -0x200000, the pull 0x6000 less, +0x298 0x70000, +0x29c -0x10000 on the
+/// script's first cue; sunk, wrapped, settled; on the cue again mode 6.
+pub fn figure_step_5(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    head_up_aim(cpu, o);
+    cpu.write32(o + FIG_AT, 0);
+    let pull = cpu.read32(o + FIG_PULL);
+    cpu.write32(o + FIG_Y_AT, pull.wrapping_add(0xffe0_0000));
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0xffe0_0000);
+    cpu.write32(o + FIG_PULL, pull.wrapping_add(-0x6000i32 as u32));
+    cpu.write32(o + 0x298, 0x7_0000);
+    if fig_cue(cpu, o, CUE_1) {
+        cpu.write32(o + FIG_SHRINK, 0xffff_0000);
+    }
+    nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+    nested!(cpu, 0x0608_442c, wrap_place(cpu, o));
+    nested!(cpu, 0x0608_4258, figure_settle(cpu, o));
+    if fig_cue(cpu, o, CUE_1) {
+        nested!(cpu, 0x0608_3f34, figure_mode_6(cpu, o));
+    }
+}
+
+/// Mode 6's step: the pose step, the head aim 0xb900 and the arms' aims 0, the places aimed at
+/// (+0x550 0, +0x554 -0x580000, +0x558 -0x200000), +0x298 eased to 0x70000 by 0x4000; the mode
+/// goes on one on the script's first cue; sunk, wrapped, settled.
+pub fn figure_step_6(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    cpu.write16(o + FIG_HEAD_AIM, 0xb900);
+    cpu.write16(o + FIG_HEAD_AIM + 2, 0);
+    cpu.write16(o + FIG_HEAD_AIM + 4, 0);
+    cpu.write32(o + FIG_AT, 0);
+    cpu.write32(o + FIG_Y_AT, 0xffa8_0000);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0xffe0_0000);
+    let v = cpu.read32(o + 0x298);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0x7_0000, 0x4000));
+    cpu.write32(o + 0x298, v);
+    if fig_cue(cpu, o, CUE_1) {
+        let m = cpu.read8(o + FIG_MODE).wrapping_add(1);
+        cpu.write8(o + FIG_MODE, m);
+    }
+    nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+    nested!(cpu, 0x0608_442c, wrap_place(cpu, o));
+    nested!(cpu, 0x0608_4258, figure_settle(cpu, o));
+}
+
+/// The figure's mode on one.
+fn fig_mode_up(cpu: &mut Cpu, o: u32) {
+    let m = cpu.read8(o + FIG_MODE).wrapping_add(1);
+    cpu.write8(o + FIG_MODE, m);
+}
+
+/// The figure sunk, wrapped and settled, as every step ends.
+fn fig_finish(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+    nested!(cpu, 0x0608_442c, wrap_place(cpu, o));
+    nested!(cpu, 0x0608_4258, figure_settle(cpu, o));
+}
+
+/// Mode 7's step: the pose step, the head aim 0xc000, the arms' aims 0, +0x554 -0x480000, +0x558
+/// -0x200000, +0x298 3000 less (0x3000); on the script's first cue +0x298 0xa0000, +0x29c
+/// -0x66000, the mode on one, its flag 0x20 cleared and the sound 73; sunk, wrapped, settled,
+/// the place it moves to eased toward the player's.
+pub fn figure_step_7(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    cpu.write16(o + FIG_HEAD_AIM, 0xc000);
+    cpu.write16(o + FIG_HEAD_AIM + 2, 0);
+    cpu.write16(o + FIG_HEAD_AIM + 4, 0);
+    cpu.write32(o + FIG_Y_AT, 0xffb8_0000);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0xffe0_0000);
+    let v = cpu.read32(o + 0x298).wrapping_add(0xffff_d000);
+    cpu.write32(o + 0x298, v);
+    if fig_cue(cpu, o, CUE_1) {
+        cpu.write32(o + 0x298, 0xa_0000);
+        cpu.write32(o + FIG_SHRINK, 0xfff9_a000);
+        fig_mode_up(cpu, o);
+        let f = cpu.read16(o + FIG_FLAGS) & 0xffdf;
+        cpu.write16(o + FIG_FLAGS, f);
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 73));
+    }
+    fig_finish(cpu, o);
+    nested!(cpu, 0x0608_4528, figure_follow_player(cpu, o));
+}
+
+static GLINT_SET_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
+
+/// Mode 8's step: the pose step, the arms' aims 0; while the byte +0x574 is 0 the head aim is
+/// 0xa800, +0x554 -0x3c0000, +0x558 -0x200000 and +0x29c 0x2000 on; once it is not, it goes on one
+/// each frame: the head aim 0xd200, +0x554 -0x3c0000 less the byte by 0x40000, +0x558 0x200000,
+/// +0x298 and +0x29c 0x40000, the sound 75. On the script's second cue the byte goes on one
+/// and a glint is made (watching the flags +0x2c4's 0x40, at the place +0x404 or, mirrored,
+/// +0x4e8, spare +0x30, number the byte +0x32). On its first cue the mode goes on one,
+/// the sound 82 and the figure is sunk. Wrapped, settled and the place it moves to eased toward
+/// the player's.
+pub fn figure_step_8(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    cpu.write16(o + FIG_HEAD_AIM + 2, 0);
+    cpu.write16(o + FIG_HEAD_AIM + 4, 0);
+    let angry = cpu.read8(o + FIG_ANGRY);
+    if angry == 0 {
+        cpu.write16(o + FIG_HEAD_AIM, 0xa800);
+        cpu.write32(o + FIG_Y_AT, 0xffc4_0000);
+        cpu.write32(o + FIG_LIMB_AIM + 8, 0xffe0_0000);
+        let v = cpu.read32(o + FIG_SHRINK).wrapping_add(0x2000);
+        cpu.write32(o + FIG_SHRINK, v);
+    } else {
+        let angry = angry.wrapping_add(1);
+        cpu.write8(o + FIG_ANGRY, angry);
+        cpu.write16(o + FIG_HEAD_AIM, 0xd200);
+        cpu.write32(o + FIG_Y_AT, ((angry as u32) << 18).wrapping_add(0xffc4_0000));
+        cpu.write32(o + FIG_LIMB_AIM + 8, 0x20_0000);
+        cpu.write32(o + 0x298, 0x4_0000);
+        cpu.write32(o + FIG_SHRINK, 0x4_0000);
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 75));
+    }
+    if fig_cue(cpu, o, CUE_2) {
+        let angry = cpu.read8(o + FIG_ANGRY).wrapping_add(1);
+        cpu.write8(o + FIG_ANGRY, angry);
+        let place = if cpu.read8(o + FIG_MIRROR) != 0 { 0x4e8 } else { 0x404 };
+        let number = cpu.read8(o + NUMBER) as i8 as i16 as u16 as u32;
+        cpu.nested_with_stack(&GLINT_SET_PROLOGUE, 0x0608_0d44, &[number], |cpu| {
+            glint_set(cpu, o + FIG_FLAGS, 0x40, o + place, o + 48, number)
+        });
+    }
+    if fig_cue(cpu, o, CUE_1) {
+        fig_mode_up(cpu, o);
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 82));
+        nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+    }
+    nested!(cpu, 0x0608_442c, wrap_place(cpu, o));
+    nested!(cpu, 0x0608_4258, figure_settle(cpu, o));
+    nested!(cpu, 0x0608_4528, figure_follow_player(cpu, o));
+}
+
+/// Mode 9's step: the pose step, the head aim 0xb000 and the arm's aim the word +0x534 by eight,
+/// the aim at the player, the places aimed at (+0x550 0, +0x554 -0x580000, +0x558 -0x300000),
+/// +0x298 eased to 0 by 0x2000; when the script ends mode 3 with a pull of 2; sunk, wrapped,
+/// settled.
+pub fn figure_step_9(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    cpu.write16(o + FIG_HEAD_AIM, 0xb000);
+    let w = neg_word(cpu.read16(o + 0x534));
+    cpu.write16(o + FIG_HEAD_AIM + 2, (w << 3) as u16);
+    nested!(cpu, 0x0608_4638, figure_aim(cpu, o));
+    cpu.write32(o + FIG_AT, 0);
+    cpu.write32(o + FIG_Y_AT, 0xffa8_0000);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0xffd0_0000);
+    let v = cpu.read32(o + 0x298);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0, 0x2000));
+    cpu.write32(o + 0x298, v);
+    if fig_cue(cpu, o, SCRIPT_END) {
+        nested!(cpu, 0x0608_3e20, figure_mode_3(cpu, o, 2));
+    }
+    fig_finish(cpu, o);
+}
+
+/// Mode 10's step: the head aim 0xb400; on the script's second cue the byte +0x574 is 1; the
+/// arm's aim 0x8000 once it is not 0, else the word +0x534 by eight; the aim at the player, the
+/// places aimed at (+0x550 0, +0x554 -0x280000, +0x558 -0x400000); on the first cue the mode goes on
+/// one, +0x574 and the count +0x2b0 are cleared, +0x579 and +0x57a 8 and the life +0x2c0 the life
+/// kept (+0x50) and 0x5cc60 more, the gauge made for it; then the pose step, the figure sunk,
+/// wrapped and settled.
+pub fn figure_step_10(cpu: &mut Cpu, o: u32) {
+    cpu.write16(o + FIG_HEAD_AIM, 0xb400);
+    if fig_cue(cpu, o, CUE_2) {
+        cpu.write8(o + FIG_ANGRY, 1);
+    }
+    if cpu.read8(o + FIG_ANGRY) != 0 {
+        cpu.write16(o + FIG_HEAD_AIM + 2, 0x8000);
+    } else {
+        let w = neg_word(cpu.read16(o + 0x534));
+        cpu.write16(o + FIG_HEAD_AIM + 2, (w << 3) as u16);
+    }
+    nested!(cpu, 0x0608_4638, figure_aim(cpu, o));
+    cpu.write32(o + FIG_AT, 0);
+    cpu.write32(o + FIG_Y_AT, 0xffd8_0000);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0xffc0_0000);
+    if fig_cue(cpu, o, CUE_1) {
+        fig_mode_up(cpu, o);
+        cpu.write8(o + FIG_ANGRY, 0);
+        cpu.write16(o + FIG_COUNT, 0);
+        cpu.write8(o + FIG_BYTE_57A, 8);
+        cpu.write8(o + FIG_BYTE_579, 8);
+        let life = cpu.read32(o + FIG_LIFE_KEPT).wrapping_add(0x5_cc60);
+        cpu.write32(o + FIG_LIFE, life);
+        nested!(cpu, 0x0604_64d8, hud::boss_gauge_set(cpu, life));
+    }
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    fig_finish(cpu, o);
+}
+
+/// The sound's control (a byte at +0x18bc, what the sound effect 86 gave) the figure keeps
+/// for stopping it, and its fixed places the glow rings are set at (+0x1794, +0x1800).
+const FIG_SOUND: u32 = 0x18bc;
+const FIG_RINGS: [u32; 2] = [0x1800, 0x1794];
+
+/// Mode 11's end (and the end of several of its phases): the pose step, the figure sunk, wrapped and
+/// settled; with the life gone it is wrecked, goes to mode 15 and the sound 86 is stopped.
+fn step_11_end(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    fig_finish(cpu, o);
+    if cpu.read32(o + FIG_LIFE) as i32 <= 0 {
+        nested!(cpu, 0x0608_3ddc, figure_wreck(cpu, o));
+        nested!(cpu, 0x0608_4070, figure_mode_15(cpu, o));
+        let control = cpu.read8(o + FIG_SOUND) as i8 as i32 as u32;
+        nested!(cpu, 0x0600_52e0, sound::se_stop(cpu, 86, control));
+    }
+}
+
+/// The phase of mode 11 goes on one.
+fn phase_up(cpu: &mut Cpu, o: u32) {
+    let p = cpu.read8(o + FIG_ANGRY).wrapping_add(1);
+    cpu.write8(o + FIG_ANGRY, p);
+}
+
+/// The phase after a throw phase's count `over`: the phase on one and the sound 86's control stopped.
+fn step_11_stop_sound(cpu: &mut Cpu, o: u32, over: u32) {
+    if cpu.read16(o + FIG_COUNT) as u32 <= over {
+        return;
+    }
+    phase_up(cpu, o);
+    let control = cpu.read8(o + FIG_SOUND) as i8 as i32 as u32;
+    nested!(cpu, 0x0600_52e0, sound::se_stop(cpu, 86, control));
+}
+
+/// The shared tail of two of mode 11's phases: the colours warmed (`warm_fade`) and the sound 86
+/// started (its control kept at +0x18bc).
+fn step_11_warm(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_3da4, warm_fade(cpu));
+    let control = nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 86));
+    cpu.write8(o + FIG_SOUND, control as u8);
+}
+
+/// Mode 11's step (the figure's long attack), a machine by the byte +0x574 (`FIG_ANGRY`, the phase), the
+/// arm's aim 0, the places aimed at (+0x550 0, +0x554 -0x500000, +0x558 0x120000):
+/// 0 waits past 50 frames of the count +0x2b0, then phase 1, the flag 0x20 cleared, +0x57b and +0x57c
+/// cleared and the warm fade and sound 86; 1 and 33 ease the counts to 0x18000 (`figure_ease`),
+/// and once the count +0x1784 is past 0x8000 go on one, the count cleared and the glow rings set;
+/// 2 and 34 ease them to 0x10000 and throw (`figure_throw`) until the count is past 0xf0 or 0x320, then
+/// stop the sound and go on one; 3 and 35 ease to 0 and throw until the count falls to 0x3ff, then 3
+/// goes to phase 16 (the pose script 0x06090d9c) and 35 to 0xd0 (the counts cleared); 16 waits 80
+/// frames; 17 fires shots from the muzzles each frame whose count has no bits 0-1 (every 16 the sound
+/// 30) and, the script ending, goes to 32 with the pose script 0x06090d58; 32 waits for the
+/// script's first cue, goes to 33 and the warm fade and sound 86 again; 255 goes on one mode, the
+/// pose script 0x06090d7a and the bytes +0x579, +0x57a, +0x57b or +0x57c set by the mirror; any
+/// other phase goes on one with the head aim 0xa000 and no facing. Then the end of the step
+/// (`step_11_end`).
+pub fn figure_step_11(cpu: &mut Cpu, o: u32) {
+    cpu.write16(o + FIG_HEAD_AIM + 4, 0);
+    cpu.write32(o + FIG_AT, 0);
+    cpu.write32(o + FIG_Y_AT, 0xffb0_0000);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0x12_0000);
+    let phase = cpu.read8(o + FIG_ANGRY);
+    match phase {
+        0 => {
+            cpu.write16(o + FIG_HEAD_AIM, 0);
+            if cpu.read16(o + FIG_COUNT) > 50 {
+                cpu.write8(o + FIG_ANGRY, 1);
+                let f = cpu.read16(o + FIG_FLAGS) & 0xffdf;
+                cpu.write16(o + FIG_FLAGS, f);
+                cpu.write8(o + FIG_BYTE_57B, 0);
+                cpu.write8(o + FIG_BYTE_57C, 0);
+                step_11_warm(cpu, o);
+            }
+        }
+        1 | 33 => {
+            cpu.write16(o + FIG_FACING, 0);
+            nested!(cpu, 0x0608_456c, figure_ease(cpu, o, 0x1_8000, 0x1_8000));
+            if cpu.read32(o + FIG_EASE_Y) as i32 > 0x8000 {
+                phase_up(cpu, o);
+                cpu.write16(o + FIG_COUNT, 0);
+                nested!(cpu, 0x0608_1610, halo_ring_set(cpu, o + FIG_RINGS[0], o + FIG_EASE_Y));
+                nested!(cpu, 0x0608_1610, halo_ring_set(cpu, o + FIG_RINGS[1], o + FIG_EASE_X));
+            }
+        }
+        2 | 34 => {
+            nested!(cpu, 0x0608_456c, figure_ease(cpu, o, 0x1_0000, 0x1_0000));
+            nested!(cpu, 0x0608_2238, figure_throw(cpu, o));
+            step_11_stop_sound(cpu, o, if phase == 2 { 0xf0 } else { 0x320 });
+        }
+        3 | 35 => {
+            nested!(cpu, 0x0608_456c, figure_ease(cpu, o, 0, 0));
+            nested!(cpu, 0x0608_2238, figure_throw(cpu, o));
+            if cpu.read32(o + FIG_EASE_Y) as i32 <= 0x3ff {
+                cpu.write8(o + FIG_ANGRY, if phase == 3 { 16 } else { 0xd0 });
+                if phase == 3 {
+                    cpu.write16(o + FIG_FACING, 0);
+                }
+                cpu.write32(o + FIG_EASE_Y, 0);
+                cpu.write32(o + FIG_EASE_X, 0);
+                cpu.write16(o + FIG_COUNT, 0);
+                if phase == 3 {
+                    fig_script(cpu, o, 0x0609_0d9c);
+                }
+            }
+        }
+        16 => {
+            if cpu.read16(o + FIG_COUNT) > 80 {
+                phase_up(cpu, o);
+                cpu.write16(o + FIG_COUNT, 0);
+            }
+        }
+        17 => {
+            let count = cpu.read16(o + FIG_COUNT) as u32;
+            if count & 15 == 0 {
+                nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 30));
+            }
+            let c = cpu.read16(o + FIG_COUNT) as i16 as i32 as u32;
+            if c & 3 == 0 {
+                let turn = (c & 0xffff) << 9;
+                let (a, b) = if c & 64 != 0 {
+                    (turn.wrapping_sub(0x4000), 0x4000u32.wrapping_sub(turn))
+                } else {
+                    (0u32.wrapping_sub(0x4000).wrapping_sub(turn), 0x4000u32.wrapping_add(turn))
+                };
+                nested!(cpu, 0x0608_1490, shot_from(cpu, o, a & 0xffff, o + FIG_MUZZLES[0], 8));
+                nested!(cpu, 0x0608_1490, shot_from(cpu, o, b & 0xffff, o + FIG_MUZZLES[1], 8));
+            }
+            if fig_cue(cpu, o, SCRIPT_END) {
+                cpu.write8(o + FIG_ANGRY, 32);
+                fig_script(cpu, o, 0x0609_0d58);
+            }
+        }
+        32 => {
+            if fig_cue(cpu, o, CUE_1) {
+                cpu.write8(o + FIG_ANGRY, 33);
+                step_11_warm(cpu, o);
+            }
+        }
+        255 => {
+            fig_mode_up(cpu, o);
+            cpu.write8(o + FIG_ANGRY, 0);
+            cpu.write16(o + FIG_COUNT, 0);
+            fig_script(cpu, o, 0x0609_0d7a);
+            if cpu.read8(o + FIG_MIRROR) == 0 {
+                cpu.write8(o + FIG_BYTE_579, 8);
+                cpu.write8(o + FIG_BYTE_57A, 10);
+                cpu.write8(o + FIG_BYTE_57C, 3);
+            } else {
+                cpu.write8(o + FIG_BYTE_579, 10);
+                cpu.write8(o + FIG_BYTE_57A, 8);
+                cpu.write8(o + FIG_BYTE_57B, 3);
+            }
+        }
+        _ => {
+            cpu.write16(o + FIG_FACING, 0);
+            cpu.write16(o + FIG_HEAD_AIM, 0xa000);
+            phase_up(cpu, o);
+        }
+    }
+    step_11_end(cpu, o);
+}
+
+/// The figure's easing with one of its two counts held at `reach` and the other let go: a mirrored
+/// figure holds the second, else the first (the arguments of `figure_ease`).
+fn ease_by_side(cpu: &mut Cpu, o: u32, reach: u32) {
+    if cpu.read8(o + FIG_MIRROR) == 0 {
+        nested!(cpu, 0x0608_456c, figure_ease(cpu, o, reach, 0));
+    } else {
+        nested!(cpu, 0x0608_456c, figure_ease(cpu, o, 0, reach));
+    }
+}
+
+/// The glow rings set at the counts +0x1780 and +0x1784 (the mirrored side's the second's).
+fn side_rings(cpu: &mut Cpu, o: u32) {
+    if cpu.read8(o + FIG_MIRROR) != 0 {
+        nested!(cpu, 0x0608_1610, halo_ring_set(cpu, o + FIG_RINGS[0], o + FIG_EASE_Y));
+    } else {
+        nested!(cpu, 0x0608_1610, halo_ring_set(cpu, o + FIG_RINGS[1], o + FIG_EASE_X));
+    }
+}
+
+/// Mode 12's step: the arms' aims 0; the byte +0x574 (the swing) approaches 64 by 1 and the place
+/// aimed at (+0x550, +0x554) is 120 on an arc by it (the sine of its negated quarter-turn's 256ths and
+/// the cosine, the mirror turning the sign of x), the head aim its negation by 256 (+0x53c), +0x558
+/// 0x100000. When the script ends the counts are eased (`ease_by_side`, 0x10000), and at 64 the mode
+/// goes on one, the swing and the count +0x2b8 clear, the warm fade and the sound 86 (its control kept
+/// at +0x18bc). Then the step's end without a wreck (pose step, sink, wrap, settle).
+pub fn figure_step_12(cpu: &mut Cpu, o: u32) {
+    cpu.write16(o + FIG_HEAD_AIM + 2, 0);
+    cpu.write16(o + FIG_HEAD_AIM + 4, 0);
+    let from = cpu.read8(o + FIG_ANGRY) as u32;
+    let a = nested!(cpu, 0x0604_6168, actors::approach(cpu, from, 64, 1)) as u8;
+    cpu.write8(o + FIG_ANGRY, a);
+    let turn = ((a as u32) << 8).wrapping_neg() as u16 as i16 as i32 as u32;
+    let (x, y);
+    if cpu.read8(o + FIG_MIRROR) != 0 {
+        let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, turn));
+        x = s.wrapping_neg().wrapping_mul(-120i32 as u32);
+        let up = (cpu.read8(o + FIG_ANGRY) as i8 as i32 as u32) << 8;
+        let c = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, up));
+        y = c.wrapping_mul(-120i32 as u32);
+    } else {
+        let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, turn));
+        x = s.wrapping_neg().wrapping_mul(120);
+        let c = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, turn));
+        y = c.wrapping_mul(-120i32 as u32);
+    }
+    cpu.write32(o + FIG_AT, x);
+    cpu.write32(o + FIG_Y_AT, y);
+    let a = cpu.read8(o + FIG_ANGRY) as u32;
+    cpu.write16(o + FIG_HEAD_AIM, (a.wrapping_neg() << 8) as u16);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0x10_0000);
+    if fig_cue(cpu, o, SCRIPT_END) {
+        ease_by_side(cpu, o, 0x1_0000);
+        if cpu.read8(o + FIG_ANGRY) == 64 {
+            fig_mode_up(cpu, o);
+            cpu.write8(o + FIG_ANGRY, 0);
+            cpu.write32(o + FIG_GAUGE, 0);
+            step_11_warm(cpu, o);
+        }
+    }
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    fig_finish(cpu, o);
+}
+
+/// The step's end with a wreck (as 11's, but the sound 86 is left running): the pose step, the
+/// figure sunk, wrapped and settled; with the life gone it is wrecked and goes to mode 15.
+fn step_13_end(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    fig_finish(cpu, o);
+    if cpu.read32(o + FIG_LIFE) as i32 <= 0 {
+        nested!(cpu, 0x0608_3ddc, figure_wreck(cpu, o));
+        nested!(cpu, 0x0608_4070, figure_mode_15(cpu, o));
+    }
+}
+
+/// Mode 13's step, by the byte +0x574: 0 clears the facing +0x187a, +0x57b and +0x57c, sets
+/// +0x1788 0x6000 and eases the counts (`ease_by_side`, 0x10000); once either of +0x1780 and +0x1784
+/// is past 0xd000 it goes on one, the count +0x2b0 cleared, the glow rings set (`side_rings`) and the
+/// sphere made. 1 faces the sphere, eases (0x10000), and past 60 of the count volleys; past 0x168
+/// it goes on one, +0x1882 cleared and the sound 86 stopped. 2 faces the sphere, eases to 0, and once
+/// the mirror's count (+0x1784 mirrored, else +0x1780) is down to 0x3ff clears both and the facing
+/// and goes to mode 14. Then the step's end (`step_13_end`).
+pub fn figure_step_13(cpu: &mut Cpu, o: u32) {
+    match cpu.read8(o + FIG_ANGRY) {
+        0 => {
+            cpu.write16(o + FIG_FACING, 0);
+            cpu.write8(o + FIG_BYTE_57B, 0);
+            cpu.write8(o + FIG_BYTE_57C, 0);
+            cpu.write32(o + 0x1788, 0x6000);
+            ease_by_side(cpu, o, 0x1_0000);
+            if cpu.read32(o + FIG_EASE_X) as i32 > 0xd000 || cpu.read32(o + FIG_EASE_Y) as i32 > 0xd000 {
+                phase_up(cpu, o);
+                cpu.write16(o + FIG_COUNT, 0);
+                side_rings(cpu, o);
+                nested!(cpu, 0x0608_3b90, sphere_set(cpu, o));
+            }
+        }
+        1 => {
+            nested!(cpu, 0x0608_3c2c, figure_face_sphere(cpu, o));
+            ease_by_side(cpu, o, 0x1_0000);
+            if cpu.read16(o + FIG_COUNT) > 60 {
+                nested!(cpu, 0x0608_240c, figure_volley(cpu, o));
+            }
+            if cpu.read16(o + FIG_COUNT) > 0x168 {
+                phase_up(cpu, o);
+                cpu.write16(o + FIG_FACE_ORB, 0);
+                let control = cpu.read8(o + FIG_SOUND) as i8 as i32 as u32;
+                nested!(cpu, 0x0600_52e0, sound::se_stop(cpu, 86, control));
+            }
+        }
+        2 => {
+            nested!(cpu, 0x0608_3c2c, figure_face_sphere(cpu, o));
+            nested!(cpu, 0x0608_456c, figure_ease(cpu, o, 0, 0));
+            let count = if cpu.read8(o + FIG_MIRROR) != 0 { cpu.read32(o + FIG_EASE_Y) } else { cpu.read32(o + FIG_EASE_X) };
+            if count as i32 <= 0x3ff {
+                cpu.write32(o + FIG_EASE_Y, 0);
+                cpu.write32(o + FIG_EASE_X, 0);
+                cpu.write16(o + FIG_FACE_ORB, 0);
+                nested!(cpu, 0x0608_4014, figure_mode_14(cpu, o));
+            }
+        }
+        _ => {}
+    }
+    step_13_end(cpu, o);
+}
+
+// ---- mode 14's phases (the table at 0x06091074, by the byte +0x574) --------------------------------------------------
+
+/// The figure's counter of attacks (+0x18ac): its bits 14-18 choose the next one.
+const FIG_ATTACKS: u32 = 0x18ac;
+/// The glint a phase makes: watching the flags' 0x40, at the muzzle's place the mirror says
+/// (`FIG_MUZZLE_PLACES`), the spare the figure's +0x30, the number its byte +0x32.
+const FIG_MUZZLE_PLACES: [u32; 2] = [0x404, 0x4e8];
+
+/// The glint a phase of mode 14 makes at the muzzle the mirror says (`which` its place, 0x4e8 or
+/// 0x404), the number pushed as the fifth argument (left pushed, as the SH-2 code does, until
+/// `pop`).
+fn fig14_glint(cpu: &mut Cpu, o: u32, place: u32, pop: bool) {
+    let number = cpu.read8(o + NUMBER) as i8 as i16 as u16 as u32;
+    if pop {
+        cpu.nested_with_stack(&GLINT_SET_PROLOGUE, 0x0608_0d44, &[number], |cpu| {
+            glint_set(cpu, o + FIG_FLAGS, 0x40, o + place, o + 48, number)
+        });
+    } else {
+        cpu.push(&[number]);
+        nested!(cpu, 0x0608_0d44, glint_set(cpu, o + FIG_FLAGS, 0x40, o + place, o + 48, number));
+    }
+}
+
+/// Mode 14, phase 0 (waiting): the head aim 0xa800, the arms' aims 0, +0x550 -0x700000, +0x554
+/// -0x400000, +0x558 0; past 120 of the count +0x2b0 it is cleared and the phase is 1; sunk.
+pub fn fig14_idle(cpu: &mut Cpu, o: u32) {
+    cpu.write16(o + FIG_HEAD_AIM, 0xa800);
+    cpu.write16(o + FIG_HEAD_AIM + 2, 0);
+    cpu.write16(o + FIG_HEAD_AIM + 4, 0);
+    cpu.write32(o + FIG_AT, 0xff90_0000);
+    cpu.write32(o + FIG_Y_AT, 0xffc0_0000);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0);
+    if cpu.read16(o + FIG_COUNT) > 120 {
+        cpu.write16(o + FIG_COUNT, 0);
+        cpu.write8(o + FIG_ANGRY, 1);
+    }
+    nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+}
+
+/// The phase with its pose script started, the flag 0x20 cleared and the attacks counted on a
+/// quarter (0x4000).
+fn fig14_go(cpu: &mut Cpu, o: u32, phase: u8, script: u32) {
+    cpu.write8(o + FIG_ANGRY, phase);
+    let f = cpu.read16(o + FIG_FLAGS) & 0xffdf;
+    cpu.write16(o + FIG_FLAGS, f);
+    fig_script(cpu, o, script);
+    let n = cpu.read32(o + FIG_ATTACKS).wrapping_add(0x4000);
+    cpu.write32(o + FIG_ATTACKS, n);
+    nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+}
+
+/// Mode 14, phase 1 (choosing): the head aim 0xc000, the arm's aim the attacks' low word
+/// negated, +0x550 -0x400000, +0x554 and +0x558 0; the attacks' bits 14-18 (`n`) pick: with bit 16 set
+/// the phase 5 (pose script 0x06090e04); else an odd `n` the phase 2 (0x06090db0), an even one
+/// the phase 8 (0x06090e76; +0x576 1, +0x57b 4, +0x554 0xa0000, +0x550 -0x680000, the flag
+/// 0x20 cleared). The attacks go on a quarter and the figure is sunk.
+pub fn fig14_choose(cpu: &mut Cpu, o: u32) {
+    cpu.write16(o + FIG_HEAD_AIM, 0xc000);
+    let low = neg_word(cpu.read16(o + FIG_ATTACKS + 2));
+    cpu.write16(o + FIG_HEAD_AIM + 2, low.wrapping_neg() as u16);
+    cpu.write16(o + FIG_HEAD_AIM + 4, 0);
+    cpu.write32(o + FIG_AT, 0xffc0_0000);
+    cpu.write32(o + FIG_Y_AT, 0);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0);
+    let n = (cpu.read32(o + FIG_ATTACKS) & 0x7_c000) >> 14;
+    if n & 4 != 0 {
+        fig14_go(cpu, o, 5, 0x0609_0e04);
+    } else if n & 1 != 0 {
+        fig14_go(cpu, o, 2, 0x0609_0db0);
+    } else {
+        cpu.write32(o + FIG_LIMB_AIM + 8, 0);
+        cpu.write32(o + FIG_Y_AT, 0xa_0000);
+        cpu.write32(o + FIG_AT, 0xff98_0000);
+        cpu.write8(o + FIG_BYTE_576, 1);
+        cpu.write8(o + FIG_BYTE_57B, 4);
+        fig14_go(cpu, o, 8, 0x0609_0e76);
+    }
+}
+
+/// Mode 14, phase 2: +0x558 -0x180000; on the script's first cue the phase 3, +0x294 0x20000 and
+/// +0x29c -0x20000 (not sunk); else sunk.
+pub fn fig14_a_ready(cpu: &mut Cpu, o: u32) {
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0xffe8_0000);
+    if fig_cue(cpu, o, CUE_1) {
+        phase_up(cpu, o);
+        cpu.write32(o + 0x294, 0x2_0000);
+        cpu.write32(o + FIG_SHRINK, 0xfffe_0000);
+    } else {
+        nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+    }
+}
+
+/// Mode 14, phase 3: +0x550 on by +0x294 and +0x29c by 0x2000; on the script's first cue the
+/// phase 4, +0x29c 0, a glint at the mirrored side's muzzle (+0x4e8; the number pushed
+/// and left pushed), the figure sunk and the sound 76.
+pub fn fig14_a_fire(cpu: &mut Cpu, o: u32) {
+    let x = cpu.read32(o + FIG_AT).wrapping_add(cpu.read32(o + 0x294));
+    cpu.write32(o + FIG_AT, x);
+    let v = cpu.read32(o + FIG_SHRINK).wrapping_add(0x2000);
+    cpu.write32(o + FIG_SHRINK, v);
+    if !fig_cue(cpu, o, CUE_1) {
+        return;
+    }
+    phase_up(cpu, o);
+    cpu.write32(o + FIG_SHRINK, 0);
+    fig14_glint(cpu, o, FIG_MUZZLE_PLACES[1], false);
+    nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 76));
+    cpu.pop(4);
+}
+
+/// Mode 14, phase 4: +0x550 on by +0x294, which eases to 0 by 0x3000; the script ending (0x4000)
+/// the phase 1; sunk.
+pub fn fig14_a_after(cpu: &mut Cpu, o: u32) {
+    let x = cpu.read32(o + FIG_AT).wrapping_add(cpu.read32(o + 0x294));
+    cpu.write32(o + FIG_AT, x);
+    let v = cpu.read32(o + 0x294);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0, 0x3000));
+    cpu.write32(o + 0x294, v);
+    if fig_cue(cpu, o, SCRIPT_END) {
+        cpu.write8(o + FIG_ANGRY, 1);
+    }
+    nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+}
+
+/// Mode 14, phase 5: +0x554 -0x60000; on the script's first cue the phase 6, +0x294 -0x1c000,
+/// +0x29c -0x40000, a glint at the muzzle the mirror says (`FIG_MUZZLE_PLACES`) and the sound 73
+/// (not sunk); else sunk with the mirror turned over for the call.
+pub fn fig14_c_fire(cpu: &mut Cpu, o: u32) {
+    cpu.write32(o + FIG_Y_AT, 0xfffa_0000);
+    if fig_cue(cpu, o, CUE_1) {
+        phase_up(cpu, o);
+        cpu.write32(o + 0x294, 0xfffe_4000);
+        cpu.write32(o + FIG_SHRINK, 0xfffc_0000);
+        let place = if cpu.read8(o + FIG_MIRROR) != 0 { FIG_MUZZLE_PLACES[1] } else { FIG_MUZZLE_PLACES[0] };
+        fig14_glint(cpu, o, place, true);
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 73));
+    } else {
+        let m = cpu.read8(o + FIG_MIRROR) ^ 1;
+        cpu.write8(o + FIG_MIRROR, m);
+        nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+        let m = cpu.read8(o + FIG_MIRROR) ^ 1;
+        cpu.write8(o + FIG_MIRROR, m);
+    }
+}
+
+/// Mode 14, phase 6: +0x550 on by +0x294 and +0x29c by 0x2000; a shard (speed 0x24000) from the
+/// muzzle the mirror says (+0x4e8, +0x404) toward the player's place (the angle of the muzzle's
+/// place less the figure's +0x186c, +0x1870, a quarter on); past difficulty 1 a second one (speed
+/// 0x18000) at the angle 0x7000 less it, if the attacks' bit 15 is set, else 0x400 more; on the
+/// script's first cue the phase 7, +0x29c 0, the sound 82 and the figure sunk.
+pub fn fig14_c_shards(cpu: &mut Cpu, o: u32) {
+    let x = cpu.read32(o + FIG_AT).wrapping_add(cpu.read32(o + 0x294));
+    cpu.write32(o + FIG_AT, x);
+    let v = cpu.read32(o + FIG_SHRINK).wrapping_add(0x2000);
+    cpu.write32(o + FIG_SHRINK, v);
+    let m = if cpu.read8(o + FIG_MIRROR) != 0 { FIG_MUZZLE_PLACES[1] } else { FIG_MUZZLE_PLACES[0] };
+    let at = o + m;
+    let y = cpu.read32(o + m + 4).wrapping_sub(cpu.read32(o + 0x1870));
+    let x = cpu.read32(o + m).wrapping_sub(cpu.read32(o + PARENT_PLACE));
+    let angle = nested!(cpu, 0x0606_780c, sgl::sl_atan(cpu, x, y));
+    let angle = 0x4000u32.wrapping_add(angle) & 0xffff;
+    nested!(cpu, 0x0608_2664, shard_set(cpu, o, at, angle, 0x2_4000));
+    if (cpu.read8(DIFFICULTY) as i8) > 1 {
+        let (a, speed) = if cpu.read32(o + FIG_ATTACKS) & 0x8000 != 0 {
+            (0x7000u32.wrapping_sub(angle) & 0xffff, 0x1_8000)
+        } else {
+            (angle.wrapping_add(0x400) & 0xffff, 0x1_8000)
+        };
+        nested!(cpu, 0x0608_2664, shard_set(cpu, o, at, a, speed));
+    }
+    if fig_cue(cpu, o, CUE_1) {
+        phase_up(cpu, o);
+        cpu.write32(o + FIG_SHRINK, 0);
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 82));
+        nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+    }
+}
+
+/// Mode 14, phase 7: +0x550 on by +0x294, which eases to 0 by 0x4000; the script ending the
+/// phase 1; sunk.
+pub fn fig14_c_after(cpu: &mut Cpu, o: u32) {
+    let x = cpu.read32(o + FIG_AT).wrapping_add(cpu.read32(o + 0x294));
+    cpu.write32(o + FIG_AT, x);
+    let v = cpu.read32(o + 0x294);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0, 0x4000));
+    cpu.write32(o + 0x294, v);
+    if fig_cue(cpu, o, SCRIPT_END) {
+        cpu.write8(o + FIG_ANGRY, 1);
+    }
+    nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+}
+
+/// Mode 14, phase 8 (the ribbons): on the script's first cue the sound 77 and the pull +0x1890 1;
+/// while it is not 0 it counts on, and its 2nd to 12th values (2, 6, 8, 10, 12) make two
+/// ribbons each (`figure_ribbon_set` kinds 2 and 18, 3 and 19, 1 and 17, 4 and 20, 0 and 16); on
+/// the second cue +0x576 and +0x57b are cleared, +0x294 -0x40000 and the pull 0; then +0x294
+/// eases to 0 by 0x4000 and +0x550 goes on by it; the script ending the phase 1; sunk.
+pub fn fig14_b_ribbons(cpu: &mut Cpu, o: u32) {
+    if fig_cue(cpu, o, CUE_1) {
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 77));
+        cpu.write32(o + FIG_PULL, 1);
+    }
+    let pull = cpu.read32(o + FIG_PULL);
+    if pull != 0 {
+        cpu.write32(o + FIG_PULL, pull.wrapping_add(1));
+    }
+    let n = cpu.read32(o + FIG_PULL).wrapping_sub(2);
+    if n <= 10 {
+        let kind = match n {
+            0 => Some(2),
+            4 => Some(3),
+            6 => Some(1),
+            8 => Some(4),
+            10 => Some(0),
+            _ => None,
+        };
+        if let Some(k) = kind {
+            nested!(cpu, 0x0608_2948, figure_ribbon_set(cpu, o, k));
+            nested!(cpu, 0x0608_2948, figure_ribbon_set(cpu, o, 16 + k));
+        }
+    }
+    if fig_cue(cpu, o, CUE_2) {
+        cpu.write8(o + FIG_BYTE_576, 0);
+        cpu.write8(o + FIG_BYTE_57B, 0);
+        cpu.write32(o + 0x294, 0xfffc_0000);
+        cpu.write32(o + FIG_PULL, 0);
+    }
+    let v = cpu.read32(o + 0x294);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0, 0x4000));
+    cpu.write32(o + 0x294, v);
+    let x = cpu.read32(o + FIG_AT).wrapping_add(v);
+    cpu.write32(o + FIG_AT, x);
+    if fig_cue(cpu, o, SCRIPT_END) {
+        cpu.write8(o + FIG_ANGRY, 1);
+    }
+    nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+}
+
+/// Mode 14's step: the pose step, the phase's step (the table 0x06091074 by +0x574: idle, choose,
+/// two phases of the attack at the +0x4e8 muzzle, three of the one the mirror says, the ribbons),
+/// the place wrapped and the figure settled; with the life gone or the attacks past 0x80000 its
+/// z and +0x294 are cleared, it is wrecked and goes to mode 15.
+pub fn figure_step_14(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    match cpu.read8(o + FIG_ANGRY) {
+        0 => nested!(cpu, 0x0608_59e4, fig14_idle(cpu, o)),
+        1 => nested!(cpu, 0x0608_5a4c, fig14_choose(cpu, o)),
+        2 => nested!(cpu, 0x0608_5c0c, fig14_a_ready(cpu, o)),
+        3 => nested!(cpu, 0x0608_5c60, fig14_a_fire(cpu, o)),
+        4 => nested!(cpu, 0x0608_5cf4, fig14_a_after(cpu, o)),
+        5 => nested!(cpu, 0x0608_5d58, fig14_c_fire(cpu, o)),
+        6 => nested!(cpu, 0x0608_5e1c, fig14_c_shards(cpu, o)),
+        7 => nested!(cpu, 0x0608_5f78, fig14_c_after(cpu, o)),
+        8 => nested!(cpu, 0x0608_5fe0, fig14_b_ribbons(cpu, o)),
+        _ => {}
+    }
+    nested!(cpu, 0x0608_442c, wrap_place(cpu, o));
+    nested!(cpu, 0x0608_4258, figure_settle(cpu, o));
+    if cpu.read32(o + FIG_LIFE) as i32 <= 0 || cpu.read32(o + FIG_ATTACKS) > 0x8_0000 {
+        cpu.write32(o + POSITION + 8, 0);
+        cpu.write32(o + 0x294, 0);
+        nested!(cpu, 0x0608_3ddc, figure_wreck(cpu, o));
+        nested!(cpu, 0x0608_4070, figure_mode_15(cpu, o));
+    }
+}
+
+/// Mode 15's step: the pose step (its anim kept in the frame's local), the head aim 0xa000, the arm's
+/// aim 0, the aim at the player, the places aimed at (+0x550 0, +0x554 -0x500000, +0x558
+/// -0x200000), +0x298 eased to 0 by 0x2000 and +0x29c to 0x40000; once the figure has sunk
+/// (`figure_sunk`) the mode goes on one, +0x29c and +0x298 are cleared, its pose script is
+/// 0x06090ece and it is sunk; then wrapped and settled.
+pub fn figure_step_15(cpu: &mut Cpu, o: u32) {
+    let local = cpu.stack();
+    cpu.write32(local, o + FIG_ANIM);
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    cpu.write16(o + FIG_HEAD_AIM, 0xa000);
+    cpu.write16(o + FIG_HEAD_AIM + 2, 0);
+    nested!(cpu, 0x0608_4638, figure_aim(cpu, o));
+    cpu.write32(o + FIG_AT, 0);
+    cpu.write32(o + FIG_Y_AT, 0xffb0_0000);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0xffe0_0000);
+    let v = cpu.read32(o + 0x298);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0, 0x2000));
+    cpu.write32(o + 0x298, v);
+    let v = cpu.read32(o + FIG_SHRINK);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0x4_0000, 0x2000));
+    cpu.write32(o + FIG_SHRINK, v);
+    if nested!(cpu, 0x0608_44e8, figure_sunk(cpu, o)) as u8 != 0 {
+        fig_mode_up(cpu, o);
+        cpu.write32(o + FIG_SHRINK, 0);
+        cpu.write32(o + 0x298, 0);
+        fig_script(cpu, o, 0x0609_0ece);
+        nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+    }
+    nested!(cpu, 0x0608_442c, wrap_place(cpu, o));
+    nested!(cpu, 0x0608_4258, figure_settle(cpu, o));
+}
+
+/// Mode 16's step: the pose step, the head aim 0xe000, the arm's aim 0, the aim at the player, the
+/// places aimed at (+0x550 0, +0x554 -0x500000, +0x558 -0x200000); when the script ends mode 3 with
+/// a pull of 7; sunk, wrapped, settled.
+pub fn figure_step_16(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    cpu.write16(o + FIG_HEAD_AIM, 0xe000);
+    cpu.write16(o + FIG_HEAD_AIM + 2, 0);
+    nested!(cpu, 0x0608_4638, figure_aim(cpu, o));
+    cpu.write32(o + FIG_AT, 0);
+    cpu.write32(o + FIG_Y_AT, 0xffb0_0000);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0xffe0_0000);
+    if fig_cue(cpu, o, SCRIPT_END) {
+        nested!(cpu, 0x0608_3e20, figure_mode_3(cpu, o, 7));
+    }
+    fig_finish(cpu, o);
+}
+
+/// Mode 17's step: the pose step, the head aim 0xaf00, the arm's aim 0, the aim at the player, the
+/// places aimed at (+0x550 0, +0x554 -0x500000, +0x558 -0x180000); on the script's first cue the
+/// mode goes on one, +0x29c is -0x80000 and the sound 73 (not sunk); else sunk; then wrapped and
+/// settled.
+pub fn figure_step_17(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    cpu.write16(o + FIG_HEAD_AIM, 0xaf00);
+    cpu.write16(o + FIG_HEAD_AIM + 2, 0);
+    nested!(cpu, 0x0608_4638, figure_aim(cpu, o));
+    cpu.write32(o + FIG_AT, 0);
+    cpu.write32(o + FIG_Y_AT, 0xffb0_0000);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0xffe8_0000);
+    if fig_cue(cpu, o, CUE_1) {
+        fig_mode_up(cpu, o);
+        cpu.write32(o + FIG_SHRINK, 0xfff8_0000);
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 73));
+    } else {
+        nested!(cpu, 0x0608_447c, figure_sink(cpu, o));
+    }
+    nested!(cpu, 0x0608_442c, wrap_place(cpu, o));
+    nested!(cpu, 0x0608_4258, figure_settle(cpu, o));
+}
+
+/// Mode 18's step: the pose step, the head aim 0xc000, the arms' aims 0, the places aimed at
+/// (+0x550 0, +0x554 -0x600000, +0x558 0x400000); when the script ends the mode goes on one, the pull
+/// +0x1890 and +0x189c cleared, +0x1894 150 and +0x1898 7, the flag 0x20 cleared, the pose script
+/// 0x06090f1c and the life (+0x2c0) the life kept (+0x50) and 0x33450 more, the gauge made for it;
+/// then +0x29c eased to 0 by 0x1000, wrapped and settled.
+pub fn figure_step_18(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_0290, pose_step(cpu, o + FIG_ANIM, o));
+    cpu.write16(o + FIG_HEAD_AIM, 0xc000);
+    cpu.write16(o + FIG_HEAD_AIM + 2, 0);
+    cpu.write16(o + FIG_HEAD_AIM + 4, 0);
+    cpu.write32(o + FIG_AT, 0);
+    cpu.write32(o + FIG_Y_AT, 0xffa0_0000);
+    cpu.write32(o + FIG_LIMB_AIM + 8, 0x40_0000);
+    if fig_cue(cpu, o, SCRIPT_END) {
+        fig_mode_up(cpu, o);
+        cpu.write32(o + FIG_PULL, 0);
+        cpu.write32(o + FIG_PULL + 4, 150);
+        cpu.write32(o + FIG_PULL + 8, 7);
+        cpu.write32(o + FIG_PULL + 12, 0);
+        let f = cpu.read16(o + FIG_FLAGS) & 0xffdf;
+        cpu.write16(o + FIG_FLAGS, f);
+        fig_script(cpu, o, 0x0609_0f1c);
+        let life = cpu.read32(o + FIG_LIFE_KEPT).wrapping_add(0x3_3450);
+        cpu.write32(o + FIG_LIFE, life);
+        nested!(cpu, 0x0604_64d8, hud::boss_gauge_set(cpu, life));
+    }
+    let v = cpu.read32(o + FIG_SHRINK);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0, 0x1000));
+    cpu.write32(o + FIG_SHRINK, v);
+    nested!(cpu, 0x0608_442c, wrap_place(cpu, o));
+    nested!(cpu, 0x0608_4258, figure_settle(cpu, o));
+}
