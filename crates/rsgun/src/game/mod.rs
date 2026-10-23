@@ -12,6 +12,7 @@ mod actors;
 mod aim;
 mod backup;
 mod banner;
+mod bios;
 mod bg;
 mod bullets;
 mod camera;
