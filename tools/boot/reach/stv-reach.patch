@@ -1,0 +1,177 @@
+diff -ru a/src/eeprom.rs stv/src/eeprom.rs
+--- a/src/eeprom.rs	2026-10-23 16:14:03.232193966 -0400
++++ b/src/eeprom.rs	2026-10-23 16:39:55.812792652 -0400
+@@ -80,6 +80,7 @@
+         match op {
+             2 if self.bits == 9 => {
+                 self.out_addr = addr;
++                if std::env::var_os("EELOG").is_some() { eprintln!("EE read {addr}"); }
+                 // the dummy 0 now; the word's bits on the following clocks
+                 self.out = Some((self.mem[addr as usize], 16));
+                 self.dout = false;
+@@ -103,6 +104,7 @@
+                 let data = (self.shift & 0xFFFF) as u16;
+                 let addr = ((self.shift >> 16) & 63) as usize;
+                 if self.write_enabled {
++                    if std::env::var_os("EELOG").is_some() { eprintln!("EE write {addr} {data:04x} op{op}"); }
+                     if op == 1 {
+                         self.mem[addr] = data;
+                     } else {
+diff -ru a/src/machine.rs stv/src/machine.rs
+--- a/src/machine.rs	2026-10-23 16:14:03.232193966 -0400
++++ b/src/machine.rs	2026-10-23 16:46:12.964881736 -0400
+@@ -21,6 +21,8 @@
+ const SOUND_HZ: u64 = 11_289_600;
+ 
+ pub struct Sys {
++    pub cur_pc: u32,
++    pub lastw: Vec<u32>,
+     pub bios: Vec<u8>,
+     pub wram_l: Vec<u8>,
+     pub wram_h: Vec<u8>,
+@@ -101,7 +103,7 @@
+     wram_l, wram_h, backup, prot, prot_on, prot_counter, io, inputs, onchip, cache_data, scu, smpc,
+     vdp1, vdp2, scsp, m68k, sound_on, sound_reset_pending, sound_owed, sound_in_sample, sound_steps,
+     slave_on, clock352, line, frame, reset_pending, nmi_pending, slave_reset_pending, wait,
+-} skip { bios, cart, trace, spin, natives, logging, log_depth, access_log, idle, signalled, interpreted, costs });
++} skip { cur_pc, lastw, bios, cart, trace, spin, natives, logging, log_depth, access_log, idle, signalled, interpreted, costs });
+ 
+ impl Sys {
+     #[inline]
+@@ -140,6 +142,8 @@
+ 
+     fn new(bios: Vec<u8>, cart: Vec<u8>, area: u8, eeprom: Option<&[u8]>) -> Sys {
+         Sys {
++            cur_pc: 0,
++            lastw: vec![0; 0x28_0000],
+             bios,
+             wram_l: vec![0; 0x10_0000],
+             wram_h: vec![0; 0x10_0000],
+@@ -312,7 +316,10 @@
+                 }
+             }
+             0x0018_0000..=0x001F_FFFF => self.backup[(p & 0xFFFF) as usize] = v,
+-            0x0020_0000..=0x002F_FFFF => self.wram_l[(p & 0xF_FFFF) as usize] = v,
++            0x0020_0000..=0x002F_FFFF => {
++                self.lastw[0x10_0000 + (p & 0xF_FFFF) as usize] = self.cur_pc;
++                self.wram_l[(p & 0xF_FFFF) as usize] = v
++            }
+             0x0040_0000..=0x004F_FFFF => self.io[(p & 0x7F) as usize] = v,
+             0x0100_0000..=0x01FF_FFFF => self.signal(p),
+             0x04FF_FFF0..=0x04FF_FFFF => {
+@@ -322,7 +329,10 @@
+                     self.prot_counter = 0;
+                 }
+             }
+-            0x05A0_0000..=0x05AF_FFFF => self.scsp.write8(p & 0x7_FFFF, v),
++            0x05A0_0000..=0x05AF_FFFF => {
++                self.lastw[0x20_0000 + (p & 0x7_FFFF) as usize] = self.cur_pc;
++                self.scsp.write8(p & 0x7_FFFF, v)
++            }
+             0x05B0_0000..=0x05BF_FFFF => self.scsp.write8(0x10_0000 | (p & 0xFFF), v),
+             0x05C0_0000..=0x05C7_FFFF => self.vdp1.vram[(p & 0x7_FFFF) as usize] = v,
+             0x05C8_0000..=0x05CF_FFFF => {
+@@ -340,6 +350,7 @@
+             }
+             0x0600_0000..=0x07FF_FFFF => {
+                 self.natives.wrote(p & 0xF_FFFF);
++                self.lastw[(p & 0xF_FFFF) as usize] = self.cur_pc;
+                 self.wram_h[(p & 0xF_FFFF) as usize] = v
+             }
+             _ => {}
+@@ -349,7 +360,10 @@
+     pub fn ext_write16(&mut self, a: u32, v: u16) {
+         let p = a & 0x07FF_FFFE;
+         match p {
+-            0x05A0_0000..=0x05AF_FFFF => self.scsp.write16_bus(p & 0x7_FFFF, v),
++            0x05A0_0000..=0x05AF_FFFF => {
++                for k in 0..2 { self.lastw[0x20_0000 + ((p & 0x7_FFFF) + k) as usize] = self.cur_pc; }
++                self.scsp.write16_bus(p & 0x7_FFFF, v)
++            }
+             0x05B0_0000..=0x05BF_FFFF => self.scsp.write16_bus(0x10_0000 | (p & 0xFFF), v),
+             0x05C0_0000..=0x05C7_FFFF => wr16(&mut self.vdp1.vram, (p & 0x7_FFFF) as usize, v),
+             0x05C8_0000..=0x05CF_FFFF => {
+@@ -371,6 +385,7 @@
+             }
+             0x0600_0000..=0x07FF_FFFF => {
+                 self.natives.wrote(p & 0xF_FFFF);
++                for k in 0..2 { self.lastw[((p & 0xF_FFFF) + k) as usize] = self.cur_pc; }
+                 wr16(&mut self.wram_h, (p & 0xF_FFFF) as usize, v)
+             }
+             _ => {
+@@ -389,6 +404,7 @@
+             }
+             0x0600_0000..=0x07FF_FFFF => {
+                 self.natives.wrote(p & 0xF_FFFF);
++                for k in 0..4 { self.lastw[((p & 0xF_FFFF) + k) as usize] = self.cur_pc; }
+                 wr32(&mut self.wram_h, (p & 0xF_FFFF) as usize, v)
+             }
+             _ => {
+@@ -486,6 +502,14 @@
+     /// same long word), the destination in 16-bit units `wadd` apart (`wadd` 4 to work RAM or the
+     /// A-bus: sequential). Returns the read and write addresses after it.
+     fn scu_transfer(&mut self, src: u32, dst: u32, count: u32, radd: u32, wadd: u32) -> (u32, u32) {
++        let save = self.cur_pc;
++        self.cur_pc = 0xD000_0000 | (save & 0x0FFF_FFFF);
++        let r = self.scu_transfer_inner(src, dst, count, radd, wadd);
++        self.cur_pc = save;
++        r
++    }
++
++    fn scu_transfer_inner(&mut self, src: u32, dst: u32, count: u32, radd: u32, wadd: u32) -> (u32, u32) {
+         let b_bus = (0x05A0_0000..0x0600_0000).contains(&(dst & 0x07FF_FFFF));
+         let mut w = dst;
+         let mut i = 0;
+@@ -509,6 +533,13 @@
+ 
+     /// Runs an SH-2 DMAC channel that is ready.
+     fn run_sh2_dma(&mut self, cpu: usize) {
++        let save = self.cur_pc;
++        self.cur_pc = 0xE000_0000 | (save & 0x0FFF_FFFF);
++        self.run_sh2_dma_inner(cpu);
++        self.cur_pc = save;
++    }
++
++    fn run_sh2_dma_inner(&mut self, cpu: usize) {
+         for ch in 0..2 {
+             if !self.onchip[cpu].dma_ready(ch) {
+                 continue;
+@@ -791,6 +822,8 @@
+     /// instruction, or to call native code there), in `reached`.
+     pub breakpoint: Option<(usize, u32)>,
+     pub reached: Option<u64>,
++    pub reach_state: Option<Vec<u8>>,
++    pub reach_lastw: Vec<u32>,
+     watch: [Watch; 2],
+     /// Each CPU's native call in progress (native.rs), with the stacks kept for the next, and the
+     /// system's stand-in while a call runs (the call has the system: it is moved in and out).
+@@ -801,7 +834,7 @@
+     roms: std::cell::OnceCell<(u64, u64)>,
+ }
+ 
+-saved!(Machine { cpu, sys, time, steps, picture } skip { coverage, evidence, compare, spin_enabled, cpu_speed, render_threads, breakpoint, reached, watch, fibers, stacks, spare, roms });
++saved!(Machine { cpu, sys, time, steps, picture } skip { coverage, evidence, compare, spin_enabled, cpu_speed, render_threads, breakpoint, reached, reach_state, reach_lastw, watch, fibers, stacks, spare, roms });
+ 
+ /// A save state's start, and its format's version.
+ const STATE_MAGIC: &[u8; 8] = b"STVSTATE";
+@@ -1037,6 +1070,8 @@
+             render_threads: 1,
+             breakpoint: None,
+             reached: None,
++            reach_state: None,
++            reach_lastw: Vec::new(),
+             watch: Default::default(),
+             fibers: Default::default(),
+             stacks: Default::default(),
+@@ -1402,8 +1437,11 @@
+         if let Some(cov) = &mut self.coverage {
+             cov[c].insert(cpu.pc);
+         }
++        self.sys.cur_pc = cpu.pc | ((c as u32) << 31);
+         if self.breakpoint == Some((c, cpu.pc)) && self.reached.is_none() {
+             self.reached = Some(self.sys.frame);
++            self.reach_state = self.save_state().ok();
++            self.reach_lastw = self.sys.lastw.clone();
+         }
+         if self.evidence.is_some() {
+             self.note_step(c);

@@ -67,7 +67,8 @@ three times a frame, also through the RAM stubs 0x0600143e/0x06001464) and, rare
 0x4dc0 (settings), 0x3842 (players), 0x3a9c (backup clear); its RAM code (0x06000c00-0x06003000,
 the service table at 0x06000200-0x06000800 points into it: interrupts, SCU mask, vblank hook,
 coins, credits, continue, backup I/O) is 41 functions called, 40 of them mechanical translations.
-Next: rewrite those in bios.rs (compare mode, as the overlays), then the native boot.
+Next: rewrite those in bios.rs (compare mode, as the overlays), then the native boot (the handover
+state is mapped in "The native boot: the handover state", before section 6).
 Left besides the overlays: the BIOS's services (the machine's code, not the game's), and a
 readable pass over the routines asm2sm.py generated (the slave's polygon pipeline, the VDP
 set-up). When the overlays are done, run the whole-game check again on main.
@@ -561,6 +562,154 @@ start reach the Trial Ride tutorial with the ship moving and firing. Gameplay fr
   under its caller (VDP2's composition under `run_frame`).
 - Compare mode needs the spin player off (it skips the accesses the log must hold): the machine turns
   it off itself when `compare` is set, as for evidence.
+
+## The native boot: the handover state
+
+(23 October; PLAN.md has the decision.) What the machine is at the instant the master first executes
+0x06004000, and where each part comes from, so that it can be built in Rust without running the
+BIOS. Tools: `tools/boot/` (all read the images from `build/rom`, nothing from them is written in
+the repository). The reference state is made by `tools/boot/reach/build.sh WORK` (a private copy
+of `crates/stv` with a patch: a snapshot at a breakpoint, a last-writer map of work RAM and sound
+RAM, an EEPROM log; nothing in `crates/` changes), then
+`WORK/target/release/driver . OUT 0x06004000` (about 17 s: dumps in OUT/dump, OUT/entry.state,
+OUT/lastw.bin; env EEPROM, BACKUP, RTC, AREA, EELOG vary the inputs).
+
+**The instant matters.** boot.rs's boot state is the end of frame 1159, before the BIOS's last
+frame; the BIOS finishes in the next frame (the VDP2 fill loop at ROM 0x4018 is where
+frame 1159 ends, and the cart is copied after it), so that state has no game in it (0x06004000 is
+0xFF fill) and the game's image is in none of its dumps. The handover instant is mid-frame (frame
+counter 1159, line 228). Everything below is that instant (`entry.state`).
+
+### Work RAM-H (0x06000000, 1 MB) and RAM-L (0x00200000, 1 MB)
+
+`tools/boot/recipe.py OUT` builds work RAM-H from the images alone and compares it with the real
+one: **all but 898 bytes (0x382, in 16 extents) are equal**. Work RAM-L is the fill only.
+
+| region | source | how |
+|---|---|---|
+| all of RAM-H and RAM-L | the BIOS's fill (ROM routine 0x0d04) | "SEGA" repeated, S at addresses divisible by 4 |
+| 0x06000000-0x06000800 | BIOS ROM 0x000600-0x000e00 (ROM routine 0x0d1a copies) | memcpy; the vector table (VBR = 0x06000000) and the service table 0x06000200-0x06000800 |
+| 0x06000800-0x06000c00 | zeros (ROM 0x305c-0x3062) | memset, then a few variables (below) |
+| 0x06000c00-0x06003000 | BIOS ROM 0x030000-0x032400 | memcpy: the BIOS's RAM code (the 41 service functions); 0x06002864-0x0600287c and 0x06002ca0-0x06002cd4 are variables inside it, set at boot (pointers into the SCSP/VDP areas) |
+| 0x06003000-0x06004000 | zeros | |
+| 0x06004000-0x0603c000 | cart file 0x280000-0x2b8000 | **the game**, 0x38000 bytes, copied by ROM 0x4526 (long words) from the boot table in the cart header (below); this overwrites the BIOS's boot program (RAM 0x06010000-0x0603340c, from ROM 0x008000-0x02b40c), whose work areas are all inside it |
+| 0x0603c000-0x060f0000 | fill | the game loads its other files later (.control at 0x06040000 and the overlays at 0x06080000 come from the cart by the game's own file loads) |
+| 0x060f0000-0x060fa000 | BIOS ROM 0x066000-0x070000 | memcpy by the boot program (data, 0xFF-padded); never read in play1 (below) |
+| 0x060fa000-0x060fb600 | zeros | boot program |
+| 0x06000780-0x06000800 | the EEPROM image (128 bytes, as the BIOS reads all 64 words once) | memcpy; two copies of the settings (word 4 = 0x9015 is some checksum I could not reproduce) |
+| 0x06000a00-0x06000b00 | pointer table: ROM 0x44fc (empty hook) and RAM code 0x06000c34, 0x060153de ... | written by ROM 0x44f4 and the RAM code |
+| 0x060006c0-0x06000700 | the title string of the cart header (cart 0x200060 + 0x10 x region index: "RADIANT.S.GUN   ") | copied by the boot program (ROM 0xb040-0xb076), region from 0x06000248 bits 12-15 |
+| 0x06000234-0x06000350, 0x06000604-0x06000678 | pointers into the BIOS ROM's routines (0x4114, 0x424c ... 0x4880, 0x34c4 ...) and a few settings | stored by ROM 0x02b0 (literals in the code: read them from the code, or run it), 0x320a-0x32d8, 0x3798, 0x4718-0x475a, 0x43e2, 0x339a (settings) |
+| 0x06000650-0x0600065b, 0x060006b4-0x060006c0 | settings/area bytes (0x06000656 = area 1) | from the EEPROM; stored by ROM 0x3798, 0x4d54, 0x32be, 0x459c, 0x11ee and the boot program (0x06012762 ...) |
+| 0x06000700-0x06000780, 0x06000807, 0x06000821-0x06000828 | zeros, then counters | ROM 0x3088-0x3096 (memsets) and RAM code; **0x06000740-0x06000747 depend on the backup RAM** (formatted: 03 00 01 02 00 00 00 02; blank: 00 00 01 00 00 00 00 00; RAM code 0x0600162c-0x06001664); **0x06000758 is the operating-time count** (run dependent) |
+| 0x06041aa0-0x06041b28 | boot program variables (0x88 bytes) | never read (below) |
+| 0x060fff34-0x06100000 | the boot program's stack residue | never read (below); the master's r15 is 0x06100000 |
+
+The residue (898 bytes) is what the BIOS computes: pointers that are literals of its code, the
+EEPROM-derived settings, zeros of its variable area, and the run-dependent counters. They are
+listed by `tools/boot/variables.py OUT` and `recipe.py OUT --writers`, each extent with the ROM
+or RAM address of the instruction that wrote it last.
+
+### The cart's boot table
+
+The cart header (ST-V, "SEGA ST-V(TITAN)" at file offset 0x200000) holds, at 0x200f10, one record
+per region index (16 bytes: source, destination, count in long words, entry): for index 0 and 1
+`0x22280000 -> 0x06004000, 0xe000, entry 0x06004000` (source 0x22280000 is cart file offset
+0x280000), index 2 `0x222c0000, 0xc000`. ROM 0x4500 picks the record by the byte at 0x06000656,
+copies (0x4526, the 4-byte loop at 0x454e), loads r15 from ROM word 0x0510 (0x06100000) and jumps to
+the entry with `jmp @r7` after a `bsr` (so pr = 0x4516).
+
+### The CPUs
+
+Master at the handover: pc = 0x06004000, pr = 0x00004516, sr = 0x00000001 (T set, interrupt mask 0),
+gbr = 0xfffffe00, vbr = 0x06000000, mach = macl = 0, r0 = 0x510, r1 = 0x22200000, r2 = 0x060040ec,
+r3 = 0x06000254, r4 = 0x0603c000, r5 = 0x222b8000, r6 = 0, r7 = 0x06004000, r8-r14 = 0,
+r15 = 0x06100000; no delayed branch, not sleeping. Registers r0-r5 are the loader's leftovers
+(unlikely to matter; `main` clears the bss and sets its own stack).
+
+Slave: not started. `slave_on` is false, its registers are zero, its on-chip registers the
+power-on values (BCR1 = 0x83f0 ...). The game starts it (SSHON) later.
+
+Master on-chip registers the BIOS set (all else power-on): BCR1 0x3f1, BCR2 0xfc, WCR 0x5555,
+MCR 0x78, RTCSR 0x8, RTCNT 0, RTCOR 0x36 (the `bsc` array), IPRB 0x0100, VCRA 0x6061, VCRB 0x6263,
+VCRC 0x6465, VCRD 0x6600, VCRWDT 0x6869, VCRDIV 0x6e, DMA vectors 0x6d and 0x6c, ICR 1, CCR 1
+(cache on, the cache arrays hold zeros), WTCSR 0x1e, FRT: TIER 0x81, TOCR 0xe0, FTCSR 0x0e,
+OCRA = OCRB = 0xffff. Run dependent: FRC (0x9cb0), the FRT's sub-tick count, and FTCSR's flags.
+
+### The devices
+
+SCU (set by the BIOS from its power-on values): IMS 0x3ffe (only VBlank-IN unmasked), DMA mode
+registers 7 (three levels), T0C 0x3ff, T1S 0x1ff, AIACK 1, ASR0 = ASR1 = 0x1ff01ff0, AREF 0x1f,
+RSEL 1. IST 0x2006 (pending bits 1, 2, 13) and the T0 line count 0xe5 are the instant's.
+
+SMPC: last command 0x19 (RESENAB; `reset_enabled`), SNDON done (`sound_on` true), CKCHG352 done
+(`clock352`, `dotsel` true), port data directions 0x3f and 0x18 with `direct` and `exle` set, the
+I/O chip's registers 0x07 = 0x0c and 0x11 = 0x77. The area code is in `smpc.area` and changes
+nothing (the region is taken from the EEPROM). The RTC is not read at all (a year later changed no
+byte of RAM). Run dependent: `rtc_seconds` (19), `rtc_cycles`, the SCSP's sample clock
+(`sound_owed`, `sound_in_sample`, `sound_steps`: 34 million 68000 steps).
+
+VDP1: TVMR 0, FBCR 0, PTMR 2, EWRR 0x58e0, EDSR 3 (the others 0). Its VRAM holds the BIOS's RAM
+test pattern (0xAA/0x55 bytes, 505,000 of 512 KB) with some data at 0x300fc-0x3025c: nothing in it
+is the game's. VDP2: the display registers the BIOS set (TVMD 0x0001, RAMCTL 0x1323; non-zero
+registers 0x00 0x0e 0x10-0x1e 0x20 0x36 0x4c 0x4e 0x78 0x7c 0x88 0x8c 0xbc 0xe0 0xe4
+0xf8-0xfc 0x110-0x118), 3,317 non-zero bytes of VRAM (the BIOS screens' leftovers; 0x5e635fc-0x63650
+is a ROM copy of 0x8ac-0x900) and 1,305 of CRAM (0x000-0x400 is BIOS ROM 0x55a24-0x55e44, 0x420-0x500
+ROM 0x65c60, 0x820-0x900 ROM 0x2b2e0; the rest computed).
+
+SCSP and the sound CPU: running (`sound_on`); sound RAM holds the BIOS's sound driver (68000
+program "ver1.28 94/12/29" at 0x1000: **LZ-decompressed** by the ROM routine at 0x1764 from the
+BIOS ROM, not a plain copy), tables copied from ROM 0x34f70 (to 0x10000, 0x125d bytes) and 0x361cc
+(to 0x40000, 0xfb14 bytes), 0x6060 words (the fill loop at ROM 0x4018) over 0x20000-0x3ffff, and the
+68000's own writes. The backup RAM is the saved file's (a blank one gets the BIOS's 22-byte
+settings blocks at 0x3d00 and 0x3e80 and a header at 4-7; the header differs with the content).
+The EEPROM: read-only during the boot when valid (the 64 words in `smpc.eeprom`).
+
+### What does not matter (leftovers)
+
+Each tested by editing a copy of `entry.state` (`tools/boot/stateedit.py`) and playing
+`tools/oracle/play1.txt` from it to frame 4000 (`--load-state`), then comparing the end state
+(`tools/boot/cmpstates.py`), and the picture and sound (`--shot`, `--wav`, byte for byte):
+
+| edit | result |
+|---|---|
+| zero 0x060f0000-0x060fb600, 0x060fff00-0x06100000 and 0x06041aa0-0x06041b28 | the end state is equal but for the zeroed block itself (the game never touches it); picture and sound equal |
+| zero the stack residue alone | end state identical |
+| zero VDP2 VRAM and CRAM | end state identical; picture and sound equal |
+| zero VDP1 VRAM | only VDP1 VRAM differs (the pattern where the game wrote nothing); picture and sound equal |
+| zero sound RAM | only the unwritten part of sound RAM and the 68000's step count differ; sound equal |
+| zero the fill in RAM-L or RAM-H above 0x06080000 | the game copies uninitialised bytes into places (VDP1 command tables, the slave's r8, parts of RAM-L, sound RAM); no register but those, picture and sound equal |
+
+So the leftovers can be left out (zeros or the fill), and **the fill should be built anyway**:
+it is cheap and keeps the state byte-for-byte equal to the interpreted boot's. Not tested: the
+BIOS's test/service menu (kept interpreted), which may read the 0x060f0000 block.
+
+### Depends on the run
+
+The operating-time count (0x06000758) and the BIOS variables counting frames, FRC and the other
+timers' counts (FRT sub-ticks, SCU T0 line count, SMPC RTC cycles, the SCSP clock), IST's pending
+bits, the stack residue, the registers r0-r5, `line` (228) and `frame` (1159). No random seeds were found
+(nothing but the counters above changes between runs of the same inputs). A native boot picks fixed values; boot.rs
+already shows that two bytes of the operating-time count are all play1 sees of it.
+
+### Open questions
+
+- The EEPROM's validity check (word 4 = 0x9015 is not a plain sum or xor of the words; any change
+  to the settings sent the BIOS down its repair path), so the settings-to-RAM mapping is known only
+  for the default EEPROM. Worth finding the check in the boot program (ROM 0x8000-0xb400) and testing
+  a few valid settings. **Also a bug found on the way**: `eeprom.rs` decodes a write's opcode from
+  `shift >> 6` at 25 bits (the data bits), so the BIOS's repair writes (ERASE/WRITE) land as
+  WRAL fills (the EEPROM ends all zeros); a valid-EEPROM boot never reaches it.
+- What in the 898 residue bytes reads the EEPROM (0x06000248 settings word, 0x06000650-0x0600065b,
+  0x060006b4-0x060006c0): needs the code at ROM 0x339a, 0x3798, 0x4d54 and the boot program read.
+- The 68000 driver in sound RAM comes out of the LZ decompressor at ROM 0x1764 (source in ROM not
+  yet located); copying the decompressed bytes is not possible without the ROM at run time (it is
+  required anyway); run the ROM routine through `cpu.call`, or rewrite the 40-line decompressor.
+- The VDP2 registers/CRAM computed bytes, and VDP1's: whether the game depends on any (nothing seen
+  by frame 4000).
+- Timing: the handover instant is mid-line; a native boot starts the machine at line 0 of a frame
+  or at the instant's line 228, and compare/golden runs against the interpreted boot will differ
+  in the run-dependent items above whichever is chosen.
 
 ## 6. Next steps, in order
 
