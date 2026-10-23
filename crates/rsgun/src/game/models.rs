@@ -638,7 +638,8 @@ pub fn pose_step(cpu: &mut Cpu, p: u32) {
             let to = cpu.read16(target) as u32;
             target += 2;
             let from = cpu.read16(angles + 2 * i) as u32;
-            let d = nested!(cpu, 0x0605_6580, super::aim::angle_between(cpu, from, to)) as i16 as i32 as u32;
+            // the call's return address stays on the stack, read later by other code
+            let d = nested!(cpu, 0x0605_6580, returning 0x0605_673e, super::aim::angle_between(cpu, from, to)) as i16 as i32 as u32;
             let turn = nested!(cpu, 0x0600_6a78, super::math::quotient(cpu, d, frames));
             cpu.write16(turns + 2 * i, turn as u16);
         }

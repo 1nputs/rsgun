@@ -206,7 +206,8 @@ pub fn nearest(cpu: &mut Cpu, obj: u32, out: u32) -> u32 {
         {
             continue;
         }
-        let d = nested!(cpu, DISTANCE, distance(cpu, obj, t)) as i32;
+        // the call's return address stays on the stack, read later by other code
+        let d = nested!(cpu, DISTANCE, returning 0x0604_6042, distance(cpu, obj, t)) as i32;
         if d < nearest {
             nearest = d;
             best = cpu.read8(t + NUMBER) as i8 as i32 as u32;

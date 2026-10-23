@@ -108,7 +108,8 @@ pub fn effect_set(cpu: &mut Cpu, fx: u32) -> u32 {
     if obj == 0 {
         return 0;
     }
-    nested!(cpu, ACTOR_INIT, actor_init(cpu, obj));
+    // the call's return address stays on the stack, read later by other code
+    nested!(cpu, ACTOR_INIT, returning 0x0604_e24e, actor_init(cpu, obj));
     cpu.write32(obj + A_BEHAVIOUR, EFFECT_EXEC);
     let v = cpu.read8(fx + KIND);
     cpu.write8(obj + A_KIND, v);

@@ -354,9 +354,9 @@ pub fn weapons_frame(cpu: &mut Cpu, p: u32) {
     let behaviour = cpu.read32(STATES + 4 * state);
     // the SH-2 code holds the ship, its number's address, the hits' size, their base, a field's
     // address and a limit in r8-r13 here: the state's callees push them (read later as an unset
-    // field)
+    // field), and the call's return address, 0x060479e0
     let regs = [(8, p), (9, p + NUMBER), (10, HITS_SIZE), (11, WEAPON_HITS), (12, WEAPON_HITS + 18), (13, 299)];
-    cpu.holding(&regs, |cpu| cpu.call(behaviour, &[p]));
+    cpu.holding(&regs, |cpu| cpu.call_returning(0x0604_79e0, behaviour, &[p]));
     cpu.write32(p + SPEED + 4, 0);
     cpu.write32(p + SPEED, 0);
 }
