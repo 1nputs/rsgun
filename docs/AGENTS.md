@@ -142,9 +142,11 @@ into the next brief for that overlay.
   own compare runs' reports.
 - **Shell**: never `pkill -f`/`pgrep -f` with a pattern your own shell's command line matches
   (`rsgun --[h]eadless`); no foreground `sleep`; wait with a background `until` loop.
-- **rustc crashes now and then** (SIGSEGV in the release build, the large `rewrites!` blocks;
-  .cargo/config.toml's RUST_MIN_STACK made it rarer, not gone): `cargo check` shows real errors,
-  a rerun builds. A failed build leaves the old target/release/rsgun: confirm "Finished" before
+- **rustc crashes now and then** on this crate (rustc 1.99.1, 23 October): a SIGSEGV, or a parse
+  error that is not in the source and changes from run to run, in `cargo check` too and about one
+  run in three, with or without .cargo/config.toml's RUST_MIN_STACK and with the `rewrites!`
+  blocks split into functions (tried, no change, reverted). No hardware error was logged (CPU
+  86 °C under the compare load). A rerun builds. A failed build leaves the old target/release/rsgun: confirm "Finished" before
   copying it for a compare (the orchestrator once started runs on a stale binary).
 - **Rebase, then rerun.** A batch checked before its rebase onto merged shared fixes is rerun on
   the rebased tree before merging (two STG03 batches were checked without the stale-stack fixes).
