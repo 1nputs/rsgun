@@ -235,9 +235,15 @@ impl Cpu<'_> {
     /// code (through `prologue`, a cache for the call site; see [`nested!`]), r14 its frame
     /// pointer meanwhile.
     pub fn nested<R>(&mut self, prologue: &std::sync::OnceLock<Prologue>, entry: u32, f: impl FnOnce(&mut Cpu) -> R) -> R {
+        self.nested_returning(prologue, entry, RETURN, f)
+    }
+
+    /// `nested` with the return address `pr` the SH-2 call pushes instead of RETURN, where the
+    /// game reads that stack slot later (see `call_returning`).
+    pub fn nested_returning<R>(&mut self, prologue: &std::sync::OnceLock<Prologue>, entry: u32, pr_pushed: u32, f: impl FnOnce(&mut Cpu) -> R) -> R {
         let p = prologue.get_or_init(|| Prologue::read(&mut *self.bus, entry));
         let (sp, pr, fp) = (self.sh2.r[15], self.sh2.pr, self.sh2.r[14]);
-        self.sh2.pr = RETURN;
+        self.sh2.pr = pr_pushed;
         self.sh2.r[15] = p.enter(self.sh2, &mut *self.bus);
         self.sh2.r[14] = self.sh2.r[15];
         self.sh2.pr = pr;
@@ -379,6 +385,10 @@ impl Prologue {
 /// `cpu.nested` for a call from one rewrite to another: `nested!(cpu, ENTRY, f(cpu, ...))`, the
 /// callee's SH-2 entry and the call.
 macro_rules! nested {
+    ($cpu:ident, $entry:expr, returning $pr:expr, $call:expr) => {{
+        static PROLOGUE: std::sync::OnceLock<$crate::game::Prologue> = std::sync::OnceLock::new();
+        $cpu.nested_returning(&PROLOGUE, $entry, $pr, |$cpu| $call)
+    }};
     ($cpu:ident, $entry:expr, $call:expr) => {{
         static PROLOGUE: std::sync::OnceLock<$crate::game::Prologue> = std::sync::OnceLock::new();
         $cpu.nested(&PROLOGUE, $entry, |$cpu| $call)

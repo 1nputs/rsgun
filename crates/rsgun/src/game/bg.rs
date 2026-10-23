@@ -234,18 +234,20 @@ pub fn plane_step(cpu: &mut Cpu, plane: u32) {
 
 /// Plane A's frame: moved, and its zoom and top left corner set for NBG0.
 pub fn plane_a_frame(cpu: &mut Cpu) {
-    plane_frame(cpu, PLANE_A, SL_ZOOM_NBG0, SL_SCR_POS_NBG0);
+    plane_frame(cpu, PLANE_A, SL_ZOOM_NBG0, SL_SCR_POS_NBG0, 0x0605_f05a);
 }
 
 /// Plane B's frame, for NBG1.
 pub fn plane_b_frame(cpu: &mut Cpu) {
-    plane_frame(cpu, PLANE_B, SL_ZOOM_NBG1, SL_SCR_POS_NBG1);
+    plane_frame(cpu, PLANE_B, SL_ZOOM_NBG1, SL_SCR_POS_NBG1, 0x0605_f0a6);
 }
 
-fn plane_frame(cpu: &mut Cpu, plane: u32, zoom: u32, position: u32) {
+/// `corner_pr` is the return address the SH-2 frame's call of the corner pushes.
+fn plane_frame(cpu: &mut Cpu, plane: u32, zoom: u32, position: u32, corner_pr: u32) {
     nested!(cpu, PLANE_STEP, plane_step(cpu, plane));
     let corner = cpu.stack();
-    nested!(cpu, PLANE_CORNER, plane_corner(cpu, plane, corner));
+    // the call's return address stays on the stack, read later by other code
+    nested!(cpu, PLANE_CORNER, returning corner_pr, plane_corner(cpu, plane, corner));
     let (zx, zy) = (cpu.read32(plane + ZOOM_X), cpu.read32(plane + ZOOM_Y));
     cpu.call(zoom, &[zx, zy]);
     let (x, y) = (cpu.read32(corner), cpu.read32(corner + 4));
