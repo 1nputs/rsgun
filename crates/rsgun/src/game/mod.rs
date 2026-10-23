@@ -1336,8 +1336,34 @@ pub fn register(n: &mut Natives) {
         0x0608_4904 => rank::text_plane_clear[] -> (),
         0x0608_4924 => sgl::sl_sprite_type[t] -> (),
     }
-    // STG03.BIN's code (stage 4's): its `rewrites! { n; overlay "STG03"; ... }` block goes here (an
-    // empty block does not compile; the first batch makes it with its first entry).
+    // STG03.BIN's code (fingerprint fd6475daa2eebeb4, the stage 4 route's)
+    rewrites! { n; overlay "STG03";
+        0x0608_0000 => stg03::stg03_mode[game] -> u32,
+        0x0608_0860 => stg02::model_screen_angle[o] -> u32,
+        0x0608_0890 => stg03::shot_step[o] -> (),
+        0x0608_0a54 => stg03::muzzle_shot[gun, turn] -> (),
+        0x0608_0b28 => stg03::spark_step[o] -> (),
+        0x0608_0cc8 => stg03::kind_side_colour[frame, side] -> (),
+        0x0608_1dfc => stg03::part_signal[o] -> (),
+        0x0608_1e48 => stg03::part_none[o] -> u32,
+        0x0608_1e64 => stg03::part_make[parent, side] -> u32,
+        0x0608_1f8c => stg03::pod_step[o] -> (),
+        0x0608_2250 => stg03::arm_step[o] -> (),
+        0x0608_24b4 => stg03::boss_draw[s] -> (),
+        0x0608_328c => stg03::wake_step[o] -> (),
+        0x0608_32d4 => stg03::wake_step[o] -> (),
+        0x0608_331c => stg03::glow_draw[s] -> (),
+        0x0608_342c => stg03::lamp_step[o] -> (),
+        0x0608_3708 => stg03::cover_step[o] -> (),
+        0x0608_380c => stg03::bay_step[o] -> (),
+        0x0608_38d4 => stg03::boss_spark_step[o] -> (),
+        0x0608_3a44 => stg03::place_draw[s] -> (),
+        0x0608_3aac => stg03::gauge_step[o] -> (),
+        0x0608_4b54 => stg03::gauge_make[] -> u32,
+        0x0608_4c10 => stg03::ground_object_exec[o] -> (),
+        0x0608_4c68 => stg03::tile_step[t] -> (),
+        0x0608_4d68 => stg03::tile_shade[t] -> (),
+    }
     // OPENING.BIN's code (the opening mode's), with its copies of SGL's NBG3 and sprite setters
     rewrites! { n; overlay "OPENING";
         0x0608_0000 => opening::opening_mode[game] -> u32,
