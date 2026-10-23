@@ -16793,3 +16793,7 @@ pub fn tables_set_a(cpu: &mut Cpu) -> u32 {
 pub fn tables_set_b(cpu: &mut Cpu) -> u32 {
     tables_set(cpu, 0x060a_d75c)
 }
+
+// ==== from 0x060a1000 on ===========================================================================
+// (A third STG03 worktree, wip-stg03c, writes the functions from 0x060a1000 below this line;
+// wip-stg03b writes those from 0x06094000 to it above.)

@@ -1647,6 +1647,8 @@ pub fn register(n: &mut Natives) {
         0x0609_d214 => stg03::kinds_load_c[s] -> u32,
         0x0609_d4b4 => stg03::tables_set_b[] -> u32,
         0x0609_d4e8 => stg03::kinds_load_d[s] -> u32,
+        // ---- from 0x060a1000 on (a third STG03 worktree, wip-stg03c, adds its entries below this
+        // line; wip-stg03b adds those from 0x06094000 to it above)
     }
     // OPENING.BIN's code (the opening mode's), with its copies of SGL's NBG3 and sprite setters
     rewrites! { n; overlay "OPENING";
