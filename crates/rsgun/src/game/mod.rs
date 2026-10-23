@@ -1409,6 +1409,33 @@ pub fn register(n: &mut Natives) {
         0x0608_8548 => stg03::cycle_frame[o] -> (),
         // ---- from 0x06094000 on (a second STG03 worktree, wip-stg03b, adds its entries below
         // this line while wip-stg03 adds the ones before 0x06094000 above it; merged in order)
+        0x0609_4284 => stg03::craft_draw[s] -> (),
+        0x0609_4920 => stg03::craft_make[link, kind] -> u32,
+        0x0609_4b14 => stg03::window_step[o] -> (),
+        0x0609_4dd8 => stg03::window_draw[s] -> (),
+        0x0609_50ec => stg03::window_make[parent] -> u32,
+        0x0609_51e8 => stg03::debris_spark[o] -> (),
+        0x0609_5328 => stg03::debris_step[o] -> (),
+        0x0609_54b4 => stg03::debris_make[parent] -> (),
+        0x0609_55b8 => stg03::tail_step[o] -> (),
+        0x0609_5674 => stg03::tail_make[parent] -> (),
+        0x0609_5708 => stg03::links_alive[boss] -> u32,
+        0x0609_5764 => stg03::links_clear[boss] -> (),
+        0x0609_57cc => stg03::links_first_wave[boss] -> (),
+        0x0609_583c => stg03::links_first_done[boss] -> (),
+        0x0609_587c => stg03::links_second_wave[boss] -> (),
+        0x0609_591c => stg03::links_third_wave[boss] -> (),
+        0x0609_59ac => stg03::links_crafts_wave[boss] -> (),
+        0x0609_5a28 => stg03::links_last_done[boss] -> (),
+        0x0609_5a68 => stg03::links_last_wave[boss] -> (),
+        0x0609_5b64 => stg03::links_refill[boss] -> (),
+        0x0609_5d24 => stg03::boss_move[boss] -> (),
+        0x0609_5d48 => stg03::boss_camera[boss] -> (),
+        0x0609_5fd0 => stg03::boss_idle[] -> (),
+        0x0609_5fdc => stg03::boss_pause_over[boss] -> (),
+        0x0609_6024 => stg03::boss_idle_framed[] -> (),
+        0x0609_6034 => stg03::boss_face_away[boss] -> (),
+        0x0609_6098 => stg03::boss_face_player[boss] -> (),
     }
     // OPENING.BIN's code (the opening mode's), with its copies of SGL's NBG3 and sprite setters
     rewrites! { n; overlay "OPENING";
