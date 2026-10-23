@@ -1711,6 +1711,7 @@ pub fn register(n: &mut Natives) {
         0x0609_e48c => stg03::gauge_made[] -> u32,
         0x0609_e4a4 => stg03::tables_set_c[] -> u32,
         0x0609_e4d8 => stg03::tables_set_d[] -> u32,
+        0x0609_e50c => stg03::scene_set_up[data, room] -> (),
         0x0609_fcb8 => stg03::scene_scroll_check[] -> (),
         0x0609_fce4 => stg03::scene_spinner_step[o] -> (),
         0x0609_fd44 => stg03::scene_spinner_set[] -> u32,
