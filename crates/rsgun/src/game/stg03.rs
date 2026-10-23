@@ -18770,3 +18770,1116 @@ pub fn tables_set_b(cpu: &mut Cpu) -> u32 {
 // ==== from 0x060a1000 on ===========================================================================
 // (A third STG03 worktree, wip-stg03c, writes the functions from 0x060a1000 below this line;
 // wip-stg03b writes those from 0x06094000 to it above.)
+
+// ---- the stage's backdrop scrolls (0x060a1018-0x060a19a4) ----------------------------------------
+
+/// A backdrop scroll's object: the 16-bit offsets it keeps (+0x10 and +0x12, the tile place), its
+/// speed (+0x20) and the frames left (+0x24).
+const SCN_PLACE_X: u32 = 0x10;
+const SCN_PLACE_Y: u32 = 0x12;
+const SCN_SPEED: u32 = 0x20;
+const SCN_LEFT: u32 = 0x24;
+/// The two plane records (their frame, offset, speed and size) the scrolls set, the maps they stream
+/// (0x060b20e0 and 0x060b20c0) and the plane A's matrix cell record (0x06074740 holds the screen's).
+const SCN_PLANE_1: u32 = 0x0607_47b0;
+const SCN_PLANE_0: u32 = 0x0607_47e0;
+const SCN_MAP_1: u32 = 0x060b_20e0;
+const SCN_MAP_0: u32 = 0x060b_20c0;
+/// The stage data's tables (the file's parts at +4, +8, ...: 0x060747fc for the cells, 0x060747f8
+/// for the colours), the base added to a part (0x06074800) and the stage's buffer (0x060747a0).
+const SCN_CELL_PARTS: u32 = 0x0607_47fc;
+const SCN_COLOUR_PARTS: u32 = 0x0607_47f8;
+const SCN_BASE: u32 = 0x0607_4800;
+const SCN_BUFFER: u32 = 0x0607_47a0;
+/// The overlay's own routines the set-ups call (data past the image): the first scroll's picture
+/// loader, the second set's, and the ones of the fourth and sixth.
+const SCN_PICTURE_A: u32 = 0x060a_b6cc;
+const SCN_PICTURE_B: u32 = 0x060a_b664;
+const SCN_PICTURE_C: u32 = 0x060a_b4fc;
+const SCN_TILES_A: u32 = 0x060a_04d4;
+const SCN_TILES_TABLE: u32 = 0x060b_3100;
+const SCN_VDP2_RAM: u32 = 0x25e0_0000;
+
+/// The data part at `parts + k` (a long) of the stage data plus the base: where a colour or cell
+/// table starts.
+fn scn_part(cpu: &mut Cpu, parts: u32, k: u32) -> u32 {
+    let table = cpu.read32(parts);
+    let offset = cpu.read32(table.wrapping_add(k));
+    offset.wrapping_add(cpu.read32(SCN_BASE))
+}
+
+/// The first scroll's frame: both planes' frames, the speed 0x800 more (until 0x20000) and given as
+/// the planes' (-speed), the second plane's map streamed; the stage scrolled on once the map's
+/// position (+8) is past 0x17fffff.
+pub fn scroll_a_frame(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    let speed = cpu.read32(s + SCN_SPEED);
+    if speed as i32 <= 0x1_ffff {
+        cpu.write32(s + SCN_SPEED, speed.wrapping_add(0x800));
+    }
+    let speed = cpu.read32(s + SCN_SPEED);
+    nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, 0, speed.wrapping_neg()));
+    let speed = cpu.read32(s + SCN_SPEED);
+    nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, 0, speed.wrapping_neg()));
+    nested!(cpu, 0x0605_f170, bg::map_stream(cpu, SCN_PLANE_1, SCN_MAP_1));
+    if cpu.read32(SCN_MAP_1 + 8) as i32 > 0x17f_ffff {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// The second scroll's start (the object `s`): the colour offset and the line scroll set, the
+/// stage's first picture queued into VDP2's RAM, the page of NBG0, the two tables copied, the
+/// first plane's record set (a place of 0xf00000 across, 0x700000 down, speed 1.0), its frame,
+/// the first picture's loader, the tile place zeroed and its tiles made, the tile table and the
+/// colours (0x60 from 0x100) put.
+pub fn scroll_b_start(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 0x53, 0));
+    let src = scn_part(cpu, SCN_CELL_PARTS, 4);
+    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, src, 0x25e7_1880, 0x23c0, 0x800));
+    nested!(cpu, 0x0606_e300, sgl::sl_page_nbg0(cpu, 0x25e7_0000, 0x200, 0x8000));
+    for to in [0x25e7_4000, 0x25e7_5000] {
+        let src = cpu.read32(SCN_BUFFER).wrapping_add(0x1a000);
+        nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, src, to, 0x1000));
+    }
+    scn_plane_set(cpu, SCN_PLANE_0, 0xf0_0000, 0x70_0000);
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    nested!(cpu, 0x0606_e1bc, sgl::sl_line_scroll_control(cpu, 1, 0xe));
+    cpu.call(SCN_PICTURE_A, &[SCN_VDP2_RAM]);
+    cpu.write16(s + SCN_PLACE_Y, 0);
+    cpu.write16(s + SCN_PLACE_X, 0);
+    let y = cpu.read16(s + SCN_PLACE_Y) as i16 as i32 as u32;
+    cpu.call(SCN_TILES_A, &[0, y]);
+    nested!(cpu, 0x0603_4a50, sgl::sl_transfer_entry(cpu, SCN_TILES_TABLE, SCN_VDP2_RAM, 0xa80));
+    let colours = scn_part(cpu, SCN_COLOUR_PARTS, 0x14);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0x100, 0x60));
+}
+
+/// A plane record's place set (`x` across, `y` down), its two other words 0 and its speeds 1.0.
+fn scn_plane_set(cpu: &mut Cpu, plane: u32, x: u32, y: u32) {
+    cpu.write32(plane, x);
+    cpu.write32(plane + 4, y);
+    cpu.write32(plane + 12, 0);
+    cpu.write32(plane + 8, 0);
+    cpu.write32(plane + 20, 0x1_0000);
+    cpu.write32(plane + 16, 0x1_0000);
+}
+
+/// The second scroll's frame: its tiles made at the place, the place moved (-0x100 across, +0x100
+/// down), both planes' frames, the first plane's speed given as half the (-speed) and the second's
+/// as the (-speed), the second map streamed; the stage scrolled on past 0x297fffff.
+pub fn scroll_b_frame(cpu: &mut Cpu, s: u32) {
+    let x = cpu.read16(s + SCN_PLACE_X) as i16 as i32 as u32;
+    let y = cpu.read16(s + SCN_PLACE_Y) as i16 as i32 as u32;
+    cpu.call(SCN_TILES_A, &[x, y]);
+    nested!(cpu, 0x0603_4a50, sgl::sl_transfer_entry(cpu, SCN_TILES_TABLE, SCN_VDP2_RAM, 0xa80));
+    let x = cpu.read16(s + SCN_PLACE_X).wrapping_add(0xff00);
+    cpu.write16(s + SCN_PLACE_X, x);
+    let y = cpu.read16(s + SCN_PLACE_Y).wrapping_add(0x100);
+    cpu.write16(s + SCN_PLACE_Y, y);
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+    nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, 0, ((speed as i32) >> 1) as u32));
+    let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+    nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, 0, speed));
+    nested!(cpu, 0x0605_f170, bg::map_stream(cpu, SCN_PLANE_1, SCN_MAP_1));
+    if cpu.read32(SCN_MAP_1 + 8) as i32 > 0x297f_ffff {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// The third scroll's start: colour calculation 0x101, the line scroll control, the stage's picture
+/// queued, the tables copied, the colours (16 from 0x100) put, the first plane's place (0xb00000,
+/// 0x700000), its frame, the colour offset 0x42/0x11 and the screen offsets 0, the page of RBG0,
+/// the picture loader, the colours (0x100 from 0) and the backgrounds on (23).
+pub fn scroll_c_start(cpu: &mut Cpu) {
+    nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 0x101));
+    nested!(cpu, 0x0606_e1bc, sgl::sl_line_scroll_control(cpu, 1, 0));
+    let src = scn_part(cpu, SCN_CELL_PARTS, 8);
+    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, src, 0x25e7_1880, 0x2a0, 0x800));
+    let src = cpu.read32(SCN_BUFFER).wrapping_add(0x3_0000);
+    nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, src, 0x25e7_4000, 0x1000));
+    let colours = scn_part(cpu, SCN_COLOUR_PARTS, 0x18);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0x100, 16));
+    scn_plane_set(cpu, SCN_PLANE_0, 0xb0_0000, 0x70_0000);
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 0x42, 0x11));
+    nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, 0, 0, 0));
+    nested!(cpu, 0x0606_e2ce, sgl::sl_page_rbg0(cpu, SCN_VDP2_RAM, 0, 0xc000));
+    cpu.call(SCN_PICTURE_B, &[0x060b_05f4]);
+    let colours = scn_part(cpu, SCN_COLOUR_PARTS, 0x1c);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0, 0x100));
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 23));
+}
+
+/// The third scroll's frame: the second plane's frame, its speed (-speed down), its map streamed;
+/// the stage scrolled on once the stream is done (-1).
+pub fn scroll_c_frame(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+    nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, 0, speed));
+    let r = nested!(cpu, 0x0605_f170, bg::map_stream(cpu, SCN_PLANE_1, SCN_MAP_1));
+    if r == 0xffff_ffff {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// The fourth scroll's start: colour calculation 0x102, the page and map of NBG1 (cells at
+/// 0x25e74000), the second plane's place (0xb00000, 0x700000), its frame, the backgrounds on
+/// (0x10016).
+pub fn scroll_d_start(cpu: &mut Cpu) {
+    nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 0x102));
+    nested!(cpu, 0x0606_e2e4, sgl::sl_page_nbg1(cpu, 0x25e7_0000, 0x200, 0x8000));
+    nested!(cpu, 0x0607_0d1c, sgl::sl_map_nbg1(cpu, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000));
+    scn_plane_set(cpu, SCN_PLANE_1, 0xb0_0000, 0x70_0000);
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x1_0016));
+}
+
+/// The fifth scroll's start (the object `s`): backgrounds on (23), the colour offset, the page and
+/// map of NBG0 (cells at 0x25e76000), the picture and colours (0xe0 from 0x200) queued, a map
+/// record at 0x060b20c0 made and cleared, the first plane's place (0xb00000, 0x1540000), the
+/// priorities of screens 1, 0 and 5 set (5, 4, 3), the message shown and the speed (+0x20) 0.
+pub fn scroll_e_start(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 23));
+    nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 0x53, 0));
+    nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, 0, 0, 0));
+    nested!(cpu, 0x0606_e300, sgl::sl_page_nbg0(cpu, 0x25e6_0000, 0x400, 0x8000));
+    nested!(cpu, 0x0607_0c4c, sgl::sl_map_nbg0(cpu, 0x25e7_6000, 0x25e7_6000, 0x25e7_6000, 0x25e7_6000));
+    let src = scn_part(cpu, SCN_CELL_PARTS, 12);
+    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, src, 0x25e6_0000, 0x6a20, 0x800));
+    let colours = scn_part(cpu, SCN_COLOUR_PARTS, 32);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0x200, 0xe0));
+    let m = SCN_MAP_0;
+    cpu.write8(m, 3);
+    cpu.write8(m + 1, 0);
+    cpu.write32(m + 20, 0x060a_fd54);
+    cpu.write32(m + 16, 0x25e7_6000);
+    cpu.write32(m + 8, 0xe0_0000);
+    cpu.write32(m + 12, 0x0200_0000);
+    cpu.write16(m + 4, 0);
+    cpu.write16(m + 6, 0x1fff);
+    cpu.write16(m + 2, 0x90);
+    cpu.write32(m + 28, 0);
+    cpu.write32(m + 24, 0);
+    nested!(cpu, 0x0605_f14c, bg::map_clear(cpu, m));
+    scn_plane_set(cpu, SCN_PLANE_0, 0xb0_0000, 0x154_0000);
+    for (screen, pri) in [(1, 5), (0, 4), (5, 3)] {
+        nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, screen, pri));
+    }
+    cpu.write32(s + SCN_SPEED, 0);
+    nested!(cpu, 0x0606_1620, super::text::message_set(cpu, 0x060a_ff58));
+}
+
+/// The fifth scroll's frame: the speed 0x800 more (until 0x80000), the matrix stack turned by it
+/// (the screen's matrix loaded, translated down by the speed, put back, inverted and its rotation
+/// parameters made), the first plane's frame and speed (-speed), its map streamed; the stage
+/// scrolled on once the stream is done (-1).
+pub fn scroll_e_frame(cpu: &mut Cpu, s: u32) {
+    let speed = cpu.read32(s + SCN_SPEED);
+    if speed as i32 <= 0x7_ffff {
+        cpu.write32(s + SCN_SPEED, speed.wrapping_add(0x800));
+    }
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let m = cpu.read32(0x0607_4740).wrapping_add(112);
+    nested!(cpu, 0x0606_db7c, sgl::sl_load_matrix(cpu, m));
+    let speed = cpu.read32(s + SCN_SPEED);
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, 0, speed, 0));
+    let m = cpu.read32(0x0607_4740).wrapping_add(112);
+    nested!(cpu, 0x0606_db9c, sgl::sl_get_matrix(cpu, m));
+    nested!(cpu, 0x0606_e4dc, sgl::sl_invers_matrix(cpu));
+    nested!(cpu, 0x0606_e50c, sgl::rotation_parameters(cpu));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+    nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, 0, speed));
+    let r = nested!(cpu, 0x0605_f170, bg::map_stream(cpu, SCN_PLANE_0, SCN_MAP_0));
+    if r == 0xffff_ffff {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// The sixth scroll's start (the object `s`, kept in the frame): backgrounds on (0x120005), the
+/// page of NBG0, the colours (0xe0 from 0x100) and four more tables put or queued (the pictures at
+/// 0x25e00000, 0x25e50000 and 0x25e68000, the colours 16 from 0 and 16 from 16, the tiles at
+/// 0x25e74000), the frames left (+0x24) 1500.
+pub fn scroll_f_start(cpu: &mut Cpu, s: u32) {
+    cpu.write32(cpu.stack(), s);
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x12_0005));
+    nested!(cpu, 0x0606_e300, sgl::sl_page_nbg0(cpu, 0x25e6_0000, 0x200, 0x8000));
+    let colours = scn_part(cpu, SCN_COLOUR_PARTS, 32);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0x100, 0xe0));
+    let src = scn_part(cpu, SCN_CELL_PARTS, 20);
+    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, src, SCN_VDP2_RAM, 0x1_0620, 0x800));
+    cpu.call(SCN_PICTURE_B, &[0x060b_0604]);
+    cpu.call(SCN_PICTURE_C, &[0x25e5_0000]);
+    let colours = scn_part(cpu, SCN_COLOUR_PARTS, 40);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0, 16));
+    let colours = scn_part(cpu, SCN_COLOUR_PARTS, 44);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 16, 16));
+    let src = scn_part(cpu, SCN_CELL_PARTS, 16);
+    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, src, 0x25e6_8000, 0x3940, 0x800));
+    let src = cpu.read32(SCN_BUFFER).wrapping_add(0x2_0000);
+    nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, src, 0x25e7_4000, 0x2000));
+    let colours = scn_part(cpu, SCN_COLOUR_PARTS, 36);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0x200, 0x100));
+    let s = cpu.read32(cpu.stack());
+    cpu.write32(s + SCN_LEFT, 0x5dc);
+}
+
+/// The sixth scroll's frame: the first plane's frame and speed (-speed); the frames left counted
+/// down, the stage scrolled on at 0.
+pub fn scroll_f_frame(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+    nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, 0, speed));
+    let left = cpu.read32(s + SCN_LEFT).wrapping_sub(1);
+    cpu.write32(s + SCN_LEFT, left);
+    if left == 0 {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// The panels' object byte (+9) that says they are shown, the record at 0x06074810 whose place
+/// (+12, +16) they are drawn from, the screen test's polygon (0x060b069c) and size (0x1200000),
+/// and the panel models' kind (kind 50: its table at +28 has four models at +8, +0, +12 and +4).
+const SCN_PANEL_SHOWN: u32 = 9;
+const SCN_PANEL_PLACE: u32 = 0x0607_4810;
+const SCN_PANEL_BOX: u32 = 0x060b_069c;
+const SCN_PANEL_SIZE: u32 = 0x0120_0000;
+const SCN_PANEL_KIND: u32 = 0x32;
+const SCN_PANEL_TABLE: u32 = 28;
+/// The rows' panels: where each is translated to (x, y) and the model's slot in the kind's table.
+const SCN_PANELS: [(u32, u32, u32); 4] =
+    [(0xe8_0000, 0x20_0000, 8), (0xe8_0000, 0x60_0000, 0), (0x18_0000, 0x20_0000, 12), (0x18_0000, 0x60_0000, 4)];
+
+/// The panels drawn (the object `s`) if shown: in window 0 the view matrix, moved to the record's
+/// place (y masked to 0x7fffff); then eight rows of four panels each (a panel at its place, put if
+/// the screen test on its box says it is on), the next row 0x800000 down; window 1 after. The row
+/// counter is the frame's word.
+pub fn panels_draw(cpu: &mut Cpu, s: u32) {
+    if cpu.read8(s + SCN_PANEL_SHOWN) as i8 == 0 {
+        return;
+    }
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 0));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let y = cpu.read32(SCN_PANEL_PLACE + 16) & 0x7f_ffff;
+    let x = cpu.read32(SCN_PANEL_PLACE + 12);
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, 0));
+    let counter = cpu.stack();
+    cpu.write32(counter, 0);
+    loop {
+        for (x, y, slot) in SCN_PANELS {
+            nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+            nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, 0));
+            let on = nested!(cpu, 0x0606_e9fc, sgl::sl_check_on_screen(cpu, SCN_PANEL_BOX, SCN_PANEL_SIZE));
+            if (on as i32) >= 0 {
+                let kind = cpu.read32(kind(SCN_PANEL_KIND));
+                let table = cpu.read32(kind + SCN_PANEL_TABLE);
+                let model = cpu.read32(table + slot);
+                let pd = cpu.read32(model);
+                nested!(cpu, 0x0606_745c, sgl::sl_put_polygon(cpu, pd));
+            }
+            nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+        }
+        nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, 0, 0x80_0000, 0));
+        let n = cpu.read32(counter).wrapping_add(1);
+        cpu.write32(counter, n);
+        if n as i32 > 7 {
+            break;
+        }
+    }
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 1));
+}
+
+/// The view's turn (a 16-bit angle) that picks the window `scene_window` sets, the two records the
+/// panels' matrices come from (0x06074770 and 0x06074750), the model number of the panel kind and its
+/// colour word (kind +0xc).
+const SCN_VIEW_TURN: u32 = 0x0607_4766;
+const SCN_MOVER: u32 = 0x0607_4770;
+const SCN_MOVER_SPIN: u32 = 0x0607_4750;
+const SCN_WINDOW_SET: u32 = 0x060a_b6ec;
+const SCN_POLAR: u32 = 0x0606_2f18;
+
+/// The panels' scene started (the object `s`): 50 lit models of 4 parts, the panels' colours (16 from
+/// the kind's colour) put and the kind's colour set with 0x1000; the colour offset 0x52/1, the
+/// backgrounds 0x20015 on, the overlay's set-up 3, the window (0, 0)-(0x15f, 0xdf) with the control
+/// 7/2 and the page of RBG0 set; the priorities of screens 1, 0, 5 and -8 (3, 5, 4, 3); the two
+/// records at 0x06074810 and 0x06074770 cleared (the second's z -4.0 and scales 4.0, 4.0, 1.0, the
+/// first's all 0xffff); 0x06074750's word 0; the view along the path 0x060b0614; the step (+8) 0,
+/// the frames (+0x24) 0 and the shown byte (+9) 1; the screen's draw (+88) the routine at 0x060a19a4; then
+/// the panels drawn.
+pub fn panels_start(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x0606_2f74, super::gouraud::models_hss(cpu, 50, 4));
+    let colour = cpu.read16(kind(SCN_PANEL_KIND) + K_COLOUR) as u32;
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, 0x060b_06a8, colour, 16));
+    let colour = cpu.read16(kind(SCN_PANEL_KIND) + K_COLOUR) as u32 | 0x1000;
+    nested!(cpu, 0x0604_5b60, models::models_colour(cpu, SCN_PANEL_KIND, colour));
+    nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 0x52, 1));
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x2_0015));
+    cpu.call(0x060a_b4dc, &[3]);
+    cpu.call(SCN_WINDOW_SET, &[0, 0, 0x15f, 0xdf]);
+    nested!(cpu, 0x0606_e17c, sgl::sl_window_control(cpu, 7, 2));
+    nested!(cpu, 0x0606_e2ce, sgl::sl_page_rbg0(cpu, SCN_VDP2_RAM, 0, 0xc000));
+    for (screen, pri) in [(1, 3), (0, 5), (5, 4), (0xffff_fff8, 3)] {
+        nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, screen, pri));
+    }
+    let p = SCN_PANEL_PLACE;
+    for k in [20, 16, 12, 32, 28, 24] {
+        cpu.write32(p + k, 0);
+    }
+    for k in [10, 8, 6, 4, 2, 0] {
+        cpu.write16(p + k, 0);
+    }
+    for k in [44, 40, 36] {
+        cpu.write32(p + k, 0xffff);
+    }
+    let m = SCN_MOVER;
+    cpu.write32(m + 12, 0);
+    cpu.write32(m + 16, 0);
+    cpu.write32(m + 20, 0xfc00_0000);
+    for k in [32, 28, 24] {
+        cpu.write32(m + k, 0);
+    }
+    for k in [10, 8, 6, 4, 2, 0] {
+        cpu.write16(m + k, 0);
+    }
+    cpu.write32(m + 40, 0x4_0000);
+    cpu.write32(m + 36, 0x4_0000);
+    cpu.write32(m + 44, 0x1_0000);
+    cpu.write32(SCN_MOVER_SPIN, 0);
+    nested!(cpu, 0x0605_f5b0, bg::view_along(cpu, 0x060b_0614));
+    cpu.write8(s + 8, 0);
+    cpu.write32(s + SCN_LEFT, 0);
+    cpu.write8(s + SCN_PANEL_SHOWN, 1);
+    let screen = cpu.read32(0x0607_4740);
+    cpu.write32(screen + 88, 0x060a_19a4);
+    nested!(cpu, 0x060a_1818, panels_draw(cpu, s));
+}
+
+/// The window the view's turn shows through (set up by the overlay's routine at 0x060ab6ec) and the
+/// place the scene is put at: with the turn `t` (16 bits), |t| up to 0x1fff the whole width (0xffff
+/// across, 223 down) and the point for (0x500000, -0x500000) turned by `t` + 0x2000 (a quarter turn
+/// x4) with 0x2000000 added; up to 0x6000 the window is cut by the turn's side (its first
+/// coordinate from the turned point's top half, the point (0, -0x1600000 or -0x1600000)
+/// turned by |t| - 0x2000 with 0x1b00000 or 0x2500000 added); over it the window across
+/// (0x15f) and the point turned by t + 0xa000. Returns the point.
+pub fn scene_window(cpu: &mut Cpu) -> u32 {
+    let turn = cpu.read16(SCN_VIEW_TURN) as i16 as i32;
+    let size = turn.abs();
+    if size <= 0x1fff {
+        cpu.call(SCN_WINDOW_SET, &[0, 0, 0xffff, 0xdf]);
+        let angle = (turn.wrapping_add(0x2000) as u32) << 2;
+        let p = cpu.call(SCN_POLAR, &[0x50_0000, 0xffb0_0000, angle]);
+        p.wrapping_add(0x0200_0000)
+    } else if size <= 0x6000 {
+        let angle = ((size - 0x2000) as u32) << 2;
+        if turn > 0 {
+            let p = cpu.call(SCN_POLAR, &[0, 0xfea0_0000, angle]);
+            let at = p.wrapping_add(0x01b0_0000);
+            let width = cpu.call(SCN_POLAR, &[0, 0x015f_ffff, angle]) >> 16;
+            cpu.call(SCN_WINDOW_SET, &[0, 0, width, 0xdf]);
+            at
+        } else {
+            let p = cpu.call(SCN_POLAR, &[0, 0x0160_0000, angle]);
+            let at = p.wrapping_add(0x0250_0000);
+            let left = cpu.call(SCN_POLAR, &[0x015f_ffff, 0, angle]) >> 16;
+            cpu.call(SCN_WINDOW_SET, &[left, 0, 0x15f, 0xdf]);
+            at
+        }
+    } else {
+        cpu.call(SCN_WINDOW_SET, &[0, 0, 0x15f, 0xdf]);
+        let angle = (turn.wrapping_add(0xa000) as u32) << 2;
+        cpu.call(SCN_POLAR, &[0x50_0000, 0xffb0_0000, angle])
+    }
+}
+
+/// The panels' scene each frame (the object `s`): the window set and its point written to the
+/// second plane's first word, that plane's frame and its speed (-|(+0x24 plus +0x20) / 16|), the view
+/// matrix and the overlay's rotation 0 and the record 0x06074810's matrix; the mover moved by the
+/// object's speeds; the record's word at +16 masked to 0x1ffffff and the rotation 1; the mover's
+/// matrix (turned about z by its angle, scaled, translated, inverted and its rotation parameters
+/// made); the routine at 0x0605f3c8 given the speeds / 4; the light turned by (-0x2000, the spin
+/// record's two angles plus 0x2000).
+pub fn panels_frame(cpu: &mut Cpu, s: u32) {
+    let point = nested!(cpu, 0x060a_1bbc, scene_window(cpu));
+    cpu.write32(SCN_PLANE_1, point);
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    let sum = (cpu.read32(s + SCN_LEFT) as i32).wrapping_add(cpu.read32(s + SCN_SPEED) as i32) >> 4;
+    let speed = if sum >= 0 { sum.wrapping_neg() } else { sum };
+    nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, 0, speed as u32));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    cpu.call(0x060a_b33c, &[0]);
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCN_PANEL_PLACE));
+    let dy = cpu.read32(s + SCN_SPEED);
+    let dx = cpu.read32(s + SCN_LEFT);
+    nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, dx, dy, 0));
+    let w = cpu.read32(SCN_PANEL_PLACE + 16) & 0x01ff_ffff;
+    cpu.write32(SCN_PANEL_PLACE + 16, w);
+    cpu.call(0x060a_b33c, &[1]);
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let m = SCN_MOVER;
+    let angle = cpu.read16(m + 4) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_726c, sgl::sl_rot_z(cpu, angle));
+    let (z, y, x) = (cpu.read32(m + 44), cpu.read32(m + 40), cpu.read32(m + 36));
+    nested!(cpu, 0x0606_73ec, sgl::sl_scale(cpu, x, y, z));
+    let (z, y, x) = (cpu.read32(m + 20), cpu.read32(m + 16), cpu.read32(m + 12));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, z));
+    nested!(cpu, 0x0606_e4dc, sgl::sl_invers_matrix(cpu));
+    nested!(cpu, 0x0606_e50c, sgl::rotation_parameters(cpu));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    let dy = (cpu.read32(s + SCN_SPEED) as i32) >> 2;
+    let dx = (cpu.read32(s + SCN_LEFT) as i32) >> 2;
+    cpu.call(0x0605_f3c8, &[dx as u32, dy as u32, 0]);
+    let w = cpu.read32(m + 16) & 0x01ff_ffff;
+    cpu.write32(m + 16, w);
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    let a = cpu.read16(SCN_MOVER_SPIN + 22) as i16 as i32 as u32;
+    let b = cpu.read16(SCN_MOVER_SPIN + 26) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_2fe8, super::gouraud::light_turned(cpu, 0xffff_e000, a.wrapping_add(0x2000) as i16 as i32 as u32, b));
+}
+
+/// The panels' scene's object: its step byte (+8), the radius (+0x28) its speeds (+0x20, +0x24) are
+/// turned about, the slide's two positions (+0x30, +0x34); the slide's tables (8 bytes an entry: a
+/// value, then what is added), the table of the spin record's steps (4 bytes a phase), and the path
+/// the view follows. The spin record (0x06074750) keeps its phase in its high half.
+const SCN_STEP: u32 = 8;
+const SCN_RADIUS: u32 = 0x28;
+const SCN_SLIDE_A: u32 = 0x30;
+const SCN_SLIDE_B: u32 = 0x34;
+const SCN_EASE_A: u32 = 0x060b_06c8;
+const SCN_EASE_B: u32 = 0x060b_0728;
+const SCN_TURNS: u32 = 0x060b_068c;
+const SCN_PATH: u32 = 0x060b_0614;
+
+/// The panels' scene's step (the object `s`), by its byte +8: 0 waits for the spin record's word
+/// +12 (negated, / 256) to pass 1.0, easing the first plane's scales and the colour offsets with it
+/// (lerps), then sets NBG1's page, map and tiles, colour calculation 0x102, the second plane's
+/// record and the backgrounds 0x10016 on and goes to 1; 1 widens the second plane's scales by 0x100
+/// until 1.0, then 2. Then, by the spin record's phase (its high half) the speeds (+0x20, +0x24)
+/// eased or lerped, the panels' frame made, the record advanced by the phase's step, the path
+/// followed (eased) and either the stage scrolled on (past 0x2ffff) or the panels drawn.
+pub fn panels_step(cpu: &mut Cpu, s: u32) {
+    let step = cpu.read8(s + SCN_STEP) as i8;
+    if step == 1 {
+        let plane = SCN_PLANE_1;
+        let mut next = None;
+        let a = cpu.read32(plane + 16);
+        if a as i32 > 0xffff {
+            next = Some(2);
+        } else {
+            cpu.write32(plane + 16, a.wrapping_add(0x100));
+            let b = cpu.read32(plane + 20).wrapping_add(0x100);
+            cpu.write32(plane + 20, b);
+        }
+        if let Some(n) = next {
+            cpu.write8(s + SCN_STEP, n);
+        }
+    } else if step == 0 {
+        let v = cpu.read32(SCN_MOVER_SPIN + 12).wrapping_neg();
+        nested!(cpu, 0x0600_8164, clib::ashiftrt_r4::<8>(cpu, v));
+        let r9 = ((v as i32) >> 8) as u32;
+        if r9 as i32 > 0x1_0000 {
+            nested!(cpu, 0x0606_e2e4, sgl::sl_page_nbg1(cpu, 0x25e6_8000, 0x400, 0x8000));
+            nested!(cpu, 0x0607_0d1c, sgl::sl_map_nbg1(cpu, 0x25e7_6000, 0x25e7_4000, 0x25e7_6000, 0x25e7_4000));
+            let src = cpu.read32(SCN_BUFFER).wrapping_add(0x1_e000);
+            nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, src, 0x25e7_6000, 0x2000));
+            nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 0x102));
+            let plane = SCN_PLANE_1;
+            cpu.write32(plane + 12, 0);
+            cpu.write32(plane + 8, 0);
+            cpu.write32(plane + 4, 0);
+            cpu.write32(plane + 20, 0xc000);
+            cpu.write32(plane + 16, 0xc000);
+            nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x1_0016));
+            let n = cpu.read8(s + SCN_STEP).wrapping_add(1);
+            cpu.write8(s + SCN_STEP, n);
+        } else {
+            let scale = nested!(cpu, 0x0606_2e7c, math::lerp(cpu, 0x1_0000, 0x2_0000, r9));
+            cpu.write32(SCN_PLANE_0 + 20, scale);
+            cpu.write32(SCN_PLANE_0 + 16, scale);
+            let o = nested!(cpu, 0x0606_2e7c, math::lerp(cpu, 0, 0xff01_0000, r9));
+            let o = (o >> 16) as i16 as i32 as u32;
+            nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, o, o, o));
+            nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+            let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+            nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, 0, speed));
+        }
+    }
+    let spin = cpu.read32(SCN_MOVER_SPIN);
+    let phase = (spin >> 16) as u16 as i16 as i32;
+    match phase {
+        0 => {
+            let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x8_0000, 0x2_0000, spin & 0xffff));
+            cpu.write32(s + SCN_SPEED, v);
+        }
+        1 => {
+            let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x2_0000, 0, spin & 0xffff));
+            cpu.write32(s + SCN_SPEED, v);
+            let spin = cpu.read32(SCN_MOVER_SPIN);
+            let v = nested!(cpu, 0x0606_2e7c, math::lerp(cpu, 0, 0x8_0000, spin & 0xffff));
+            cpu.write32(s + SCN_LEFT, v);
+        }
+        2 => {
+            if spin == 0x2_2000 {
+                nested!(cpu, 0x0607_1c4c, sgl::sl_map_rbg0(cpu, 0x25e4_c000));
+                cpu.write8(s + SCN_PANEL_SHOWN, 0);
+            }
+            let spin = cpu.read32(SCN_MOVER_SPIN);
+            let v = nested!(cpu, 0x0606_2e7c, math::lerp(cpu, 0x8_0000, 0x10_0000, spin & 0xffff));
+            cpu.write32(s + SCN_LEFT, v);
+        }
+        _ => {}
+    }
+    nested!(cpu, 0x060a_1cd4, panels_frame(cpu, s));
+    let spin = cpu.read32(SCN_MOVER_SPIN);
+    let k = (spin >> 16) as u16 as i16 as i32 as u32;
+    let add = cpu.read32(SCN_TURNS.wrapping_add(k << 2));
+    cpu.write32(SCN_MOVER_SPIN, spin.wrapping_add(add));
+    nested!(cpu, 0x0605_f648, bg::view_along_eased(cpu, SCN_PATH));
+    if cpu.read32(SCN_MOVER_SPIN) as i32 > 0x2_ffff {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    } else {
+        nested!(cpu, 0x060a_1818, panels_draw(cpu, s));
+    }
+}
+
+/// The panels' speeds turned (the object `s`): the first two records' words at +12 masked (to
+/// 0x1ffffff and 0x3ffffff), the radius (+0x28) times the cosine of the view's turn (0x0607476a)
+/// the first speed (+0x20) and times its sine the second (+0x24); the panels' frame.
+pub fn panels_turn(cpu: &mut Cpu, s: u32) {
+    let w = cpu.read32(SCN_PANEL_PLACE + 12) & 0x01ff_ffff;
+    cpu.write32(SCN_PANEL_PLACE + 12, w);
+    let w = cpu.read32(SCN_MOVER + 12) & 0x03ff_ffff;
+    cpu.write32(SCN_MOVER + 12, w);
+    let angle = cpu.read16(0x0607_476a) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, angle));
+    let radius = cpu.read32(s + SCN_RADIUS);
+    let across = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, radius, cos));
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, angle));
+    let radius = cpu.read32(s + SCN_RADIUS);
+    let down = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, radius, sin));
+    cpu.write32(s + SCN_LEFT, down);
+    cpu.write32(s + SCN_SPEED, across);
+    nested!(cpu, 0x060a_1cd4, panels_frame(cpu, s));
+}
+
+/// The panels' scene cleared (the object `s`): the screen's draw (+88) none, the colour offset
+/// 0x53/0 and the screen offsets 0, the step 0 and the slide's words (+0x2c, +0x30, +0x34) 0, the
+/// radius (+0x28) the sum of the two speeds.
+pub fn panels_reset(cpu: &mut Cpu, s: u32) {
+    let screen = cpu.read32(0x0607_4740);
+    cpu.write32(screen + 88, 0);
+    nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 83, 0));
+    nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, 0, 0, 0));
+    cpu.write8(s + SCN_STEP, 0);
+    cpu.write32(s + 44, 0);
+    cpu.write32(s + SCN_SLIDE_A, 0);
+    let a = cpu.read32(s + SCN_SPEED);
+    cpu.write32(s + SCN_SLIDE_B, 0);
+    let b = cpu.read32(s + SCN_LEFT);
+    cpu.write32(s + SCN_RADIUS, a.wrapping_add(b));
+}
+
+/// `panels_turn` called again.
+pub fn panels_turn_again(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x060a_205c, panels_turn(cpu, s));
+}
+
+/// The panels' slide (the object `s`): `panels_turn` first, then by the step byte. 0: the slide's
+/// position (+0x2c) 32 more; past 0x8000 the spin record's +20 eased from -1.2 to 1.0 (or -3.0
+/// if the byte at 0x060b3b80 is set) by twice what it is past; at 1.0 the position is 0 and the
+/// step 1. 1: the slide's two positions (+0x30, +0x34) each eased through a table (by their high
+/// half's entry and the entry on) into the spin record's +20 and +24, the entry's step added.
+pub fn panels_slide(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x060a_205c, panels_turn(cpu, s));
+    let step = cpu.read8(s + SCN_STEP) as i8;
+    if step == 0 {
+        let mut p = cpu.read32(s + 44).wrapping_add(32);
+        cpu.write32(s + 44, p);
+        if p as i32 > 0x8000 {
+            p = p.wrapping_sub(0x8000);
+            let flag = cpu.read8(0x060b_3b80);
+            p = p.wrapping_add(p);
+            let to = if flag == 0 { 0x1_0000 } else { 0xfffd_0000 };
+            let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0xfffe_c800, to, p));
+            cpu.write32(SCN_MOVER_SPIN + 20, v);
+        }
+        if cpu.read32(s + 44) == 0x1_0000 {
+            cpu.write32(s + 44, 0);
+            let n = cpu.read8(s + SCN_STEP).wrapping_add(1);
+            cpu.write8(s + SCN_STEP, n);
+        }
+    } else if step == 1 {
+        let t = cpu.read32(s + SCN_SLIDE_A);
+        let i = (t >> 16) as u16 as i16 as i32 as u32;
+        let a = cpu.read32(SCN_EASE_A + 8 * (i + 1));
+        let b = cpu.read32(SCN_EASE_A + 8 * i);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, b, a, t & 0xffff));
+        cpu.write32(SCN_MOVER_SPIN + 20, v);
+        let t = cpu.read32(s + SCN_SLIDE_A);
+        let d = cpu.read32(SCN_EASE_A + 8 * i + 4);
+        cpu.write32(s + SCN_SLIDE_A, t.wrapping_add(d));
+        let t = cpu.read32(s + SCN_SLIDE_B);
+        let j = (t >> 16) as u16 as i16 as i32 as u32;
+        let a = cpu.read32(SCN_EASE_B + 8 * (j + 1));
+        let b = cpu.read32(SCN_EASE_B + 8 * j);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, b, a, t & 0xffff));
+        cpu.write32(SCN_MOVER_SPIN + 24, v);
+        let t = cpu.read32(s + SCN_SLIDE_B);
+        let d = cpu.read32(SCN_EASE_B + 8 * j + 4);
+        cpu.write32(s + SCN_SLIDE_B, t.wrapping_add(d));
+    }
+}
+
+// ---- the slide, the warp and the floor scenes ---------------------------------------------------
+
+/// The slide's own words: its two start places (halves at +0x10 and +0x12), the position to ease
+/// from (+0x34) and its progress (+0x38, 16.16).
+const SCN_SLIDE_PLACE_X: u32 = 0x10;
+const SCN_SLIDE_PLACE_Y: u32 = 0x12;
+const SCN_SLIDE_FROM: u32 = 0x34;
+const SCN_SLIDE_PROGRESS: u32 = 0x38;
+const SCN_SLIDE_END: u32 = 0x1_0000;
+/// The table of three targets the slide eases the spin record's +4 to (the long at 0x060b0778).
+const SCN_SLIDE_TARGET: u32 = 0x060b_0778;
+
+/// The slide begun (the object `s`): step 0, progress 0, its place (+0x10, +0x12) the spin record's
+/// two halves at +22 and +26 and its start (+0x34) the spin record's +4.
+pub fn slide_start(cpu: &mut Cpu, s: u32) {
+    cpu.write8(s + SCN_STEP, 0);
+    cpu.write32(s + SCN_SLIDE_PROGRESS, 0);
+    let x = cpu.read16(SCN_MOVER_SPIN + 22);
+    cpu.write16(s + SCN_SLIDE_PLACE_X, x);
+    let y = cpu.read16(SCN_MOVER_SPIN + 26);
+    cpu.write16(s + SCN_SLIDE_PLACE_Y, y);
+    let from = cpu.read32(SCN_MOVER_SPIN + 4);
+    cpu.write32(s + SCN_SLIDE_FROM, from);
+}
+
+/// One step of the slide (the object `s`), by its step byte, `panels_turn` after each. 0: the progress
+/// 0x100 more, the spin record's +20 and +24 eased from the two places to 0 and its +4 from the
+/// start to the target; at 1.0 the progress is 0, the start the record 0x06074810's +12 and the
+/// step 1. 1: the progress 0x100 more, that record's +12 eased from the start to 0; at 1.0 the
+/// progress is 0 and the step 2. 2: the second plane's scale (+16) 0x800 less, written to +20, until
+/// 0xc000, then the step 3. 3: nothing.
+pub fn slide_step(cpu: &mut Cpu, s: u32) {
+    let state = cpu.read8(s + SCN_STEP);
+    let mut next = false;
+    match state {
+        0 => {
+            let p = cpu.read32(s + SCN_SLIDE_PROGRESS).wrapping_add(0x100);
+            cpu.write32(s + SCN_SLIDE_PROGRESS, p);
+            let x = cpu.read16(s + SCN_SLIDE_PLACE_X) as i16 as i32 as u32;
+            let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, x, 0, p));
+            cpu.write32(SCN_MOVER_SPIN + 20, v);
+            let p = cpu.read32(s + SCN_SLIDE_PROGRESS);
+            let y = cpu.read16(s + SCN_SLIDE_PLACE_Y) as i16 as i32 as u32;
+            let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, y, 0, p));
+            cpu.write32(SCN_MOVER_SPIN + 24, v);
+            let target = cpu.read32(SCN_SLIDE_TARGET);
+            let from = cpu.read32(s + SCN_SLIDE_FROM);
+            let p = cpu.read32(s + SCN_SLIDE_PROGRESS);
+            let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, from, target, p));
+            cpu.write32(SCN_MOVER_SPIN + 4, v);
+            if cpu.read32(s + SCN_SLIDE_PROGRESS) == SCN_SLIDE_END {
+                cpu.write32(s + SCN_SLIDE_PROGRESS, 0);
+                let w = cpu.read32(SCN_PANEL_PLACE + 12);
+                cpu.write32(s + SCN_SLIDE_FROM, w);
+                next = true;
+            }
+        }
+        1 => {
+            let p = cpu.read32(s + SCN_SLIDE_PROGRESS).wrapping_add(0x100);
+            cpu.write32(s + SCN_SLIDE_PROGRESS, p);
+            let from = cpu.read32(s + SCN_SLIDE_FROM);
+            let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, from, 0, p));
+            cpu.write32(SCN_PANEL_PLACE + 12, v);
+            if cpu.read32(s + SCN_SLIDE_PROGRESS) == SCN_SLIDE_END {
+                cpu.write32(s + SCN_SLIDE_PROGRESS, 0);
+                next = true;
+            }
+        }
+        2 => {
+            let v = cpu.read32(SCN_PLANE_1 + 16).wrapping_add(0xffff_f800);
+            cpu.write32(SCN_PLANE_1 + 20, v);
+            cpu.write32(SCN_PLANE_1 + 16, v);
+            next = v == 0xc000;
+        }
+        _ => {}
+    }
+    if next {
+        let n = cpu.read8(s + SCN_STEP).wrapping_add(1);
+        cpu.write8(s + SCN_STEP, n);
+    }
+    nested!(cpu, 0x060a_205c, panels_turn(cpu, s));
+}
+
+/// The warp scene started (the frame's word keeps the object `s`): colour calculation 0x100,
+/// backgrounds 0x20015 on, the colour offset 0x52/1, the screen offsets -255, the priorities of
+/// screens 1, 0, 5 and -8 (4, 5, 5, 4), the overlay's loader at 0x060ab664 and set-up 0, window
+/// control 7/0, the pages and maps of NBG0 and NBG1 (cells 0x25e76000 and 0x25e74000), the pictures
+/// and colours queued and put (0xf0 from 0x100, 80 from 0x200), the first plane's place (0xb00000,
+/// 0x700000, scales 2.0), the spin record's word 0, the view along the path 0x060b0778, the step
+/// (+8) 0, the shown byte (+9) 1, the screen's draw (+88) the routine at 0x060a19a4 and the message
+/// 0x060aff68 shown.
+pub fn warp_start(cpu: &mut Cpu, s: u32) {
+    let frame = cpu.stack();
+    cpu.write32(frame, s);
+    nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 0x100));
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x2_0015));
+    nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 82, 1));
+    nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, 0xffff_ff01, 0xffff_ff01, 0xffff_ff01));
+    for (screen, pri) in [(1, 4), (0, 5), (5, 5), (0xffff_fff8, 4)] {
+        nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, screen, pri));
+    }
+    cpu.call(SCN_PICTURE_B, &[0x060b_0604]);
+    cpu.call(0x060a_b4dc, &[0]);
+    nested!(cpu, 0x0606_e17c, sgl::sl_window_control(cpu, 7, 0));
+    nested!(cpu, 0x0606_e300, sgl::sl_page_nbg0(cpu, 0x25e6_0000, 0x200, 0xc000));
+    nested!(cpu, 0x0607_0c4c, sgl::sl_map_nbg0(cpu, 0x25e7_6000, 0x25e7_6000, 0x25e7_6000, 0x25e7_6000));
+    nested!(cpu, 0x0606_e2e4, sgl::sl_page_nbg1(cpu, 0x25e7_0000, 0x400, 0x8000));
+    nested!(cpu, 0x0607_0d1c, sgl::sl_map_nbg1(cpu, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000));
+    let src = scn_part(cpu, SCN_CELL_PARTS, 24);
+    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, src, 0x25e6_0000, 0xeb60, 0x800));
+    let src = cpu.read32(SCN_BUFFER).wrapping_add(0x2_6000);
+    nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, src, 0x25e7_6000, 0x2000));
+    let colours = scn_part(cpu, SCN_COLOUR_PARTS, 48);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0x100, 0xf0));
+    scn_plane_set(cpu, SCN_PLANE_0, 0xb0_0000, 0x70_0000);
+    cpu.write32(SCN_PLANE_0 + 20, 0x2_0000);
+    cpu.write32(SCN_PLANE_0 + 16, 0x2_0000);
+    let src = scn_part(cpu, SCN_CELL_PARTS, 28);
+    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, src, 0x25e7_0000, 0x1500, 0x800));
+    let colours = scn_part(cpu, SCN_COLOUR_PARTS, 52);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0x200, 80));
+    cpu.write32(SCN_MOVER_SPIN, 0);
+    nested!(cpu, 0x0605_f5b0, bg::view_along(cpu, 0x060b_0778));
+    let s = cpu.read32(frame);
+    cpu.write8(s + SCN_STEP, 0);
+    let shown = cpu.read32(frame).wrapping_add(SCN_PANEL_SHOWN);
+    cpu.write32(frame, shown);
+    cpu.write8(shown, 1);
+    let screen = cpu.read32(0x0607_4740);
+    cpu.write32(screen + 88, 0x060a_19a4);
+    nested!(cpu, 0x0606_1620, super::text::message_set(cpu, 0x060a_ff68));
+}
+
+/// The warp scene each frame (the object `s`): the first plane's scales eased 1.0 to 2.0 and the
+/// screen offsets (a lerp of the spin record's +12 from 0x3000000, / 1024; -255 past 1.0) set, its
+/// frame and speed (-speed / 2); the view matrix and the overlay's rotation 0 and the record
+/// 0x06074810's matrix; the mover moved by the speed; then, past 0x1ffff in the spin record's
+/// word, the speed eased to 0x7000 from 16.0; the word advanced by its phase's step from the table
+/// 0x060b07f0, the path 0x060b0778 followed (eased), and the stage scrolled on past 0x2ffff or the
+/// panels drawn.
+pub fn warp_frame(cpu: &mut Cpu, s: u32) {
+    let w = cpu.read32(SCN_MOVER_SPIN + 12);
+    let v = 0x0300_0000u32.wrapping_sub(w);
+    nested!(cpu, 0x0600_8160, clib::ashiftrt_r4::<10>(cpu, v));
+    let r9 = ((v as i32) >> 10) as u32;
+    let offset = if r9 as i32 > 0xffff {
+        0xffff_ff01
+    } else {
+        let scale = nested!(cpu, 0x0606_2e7c, math::lerp(cpu, 0x1_0000, 0x2_0000, r9));
+        cpu.write32(SCN_PLANE_0 + 20, scale);
+        cpu.write32(SCN_PLANE_0 + 16, scale);
+        let o = nested!(cpu, 0x0606_2e7c, math::lerp(cpu, 0, 0xffa0_0000, r9));
+        (o >> 16) as i16 as i32 as u32
+    };
+    nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, offset, offset, offset));
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+    nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, 0, ((speed as i32) >> 1) as u32));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    cpu.call(0x060a_b33c, &[0]);
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCN_PANEL_PLACE));
+    let dy = cpu.read32(s + SCN_SPEED);
+    let dx = cpu.read32(s + SCN_LEFT);
+    nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, dx, dy, 0));
+    let w = cpu.read32(SCN_PANEL_PLACE + 16) & 0x01ff_ffff;
+    cpu.write32(SCN_PANEL_PLACE + 16, w);
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    let spin = cpu.read32(SCN_MOVER_SPIN);
+    if spin as i32 > 0x1_ffff {
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x10_0000, 0x7000, spin & 0xffff));
+        cpu.write32(s + SCN_SPEED, v);
+    }
+    let spin = cpu.read32(SCN_MOVER_SPIN);
+    let k = (spin >> 16) as u16 as i16 as i32 as u32;
+    let add = cpu.read32(0x060b_07f0u32.wrapping_add(k << 2));
+    cpu.write32(SCN_MOVER_SPIN, spin.wrapping_add(add));
+    nested!(cpu, 0x0605_f648, bg::view_along_eased(cpu, SCN_SLIDE_TARGET));
+    if cpu.read32(SCN_MOVER_SPIN) as i32 > 0x2_ffff {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    } else {
+        nested!(cpu, 0x060a_1818, panels_draw(cpu, s));
+    }
+}
+
+/// The table the warp scene copies out of VDP2's RAM (0x25e2f800, 0x1000 bytes) into the game's
+/// own (0x060b2100), then makes 512 pairs of from the overlay's table (0x060b2900) into the same RAM.
+const SCN_TABLE_RAM: u32 = 0x25e2_f800;
+const SCN_TABLE_COPY: u32 = 0x060b_2100;
+const SCN_TABLE_SOURCE: u32 = 0x060b_2900;
+
+/// VDP2's table at 0x25e2f800 saved (0x400 longs) to 0x060b2100.
+pub fn warp_table_save(cpu: &mut Cpu) {
+    for k in 0..0x400 {
+        let v = cpu.read32(SCN_TABLE_RAM + 4 * k);
+        cpu.write32(SCN_TABLE_COPY + 4 * k, v);
+    }
+}
+
+/// The table made: for 512 steps the entry of the overlay's table 0x060b2900 picked by the high
+/// half of a position (0x01ff0000, less a step of 0x10000 that shrinks by 128 each time) is written
+/// both going up from 0x25e2f800 and going down from 0x25e30800.
+pub fn warp_table_make(cpu: &mut Cpu) {
+    let mut up = SCN_TABLE_RAM;
+    let mut down = SCN_TABLE_RAM + 0x1000;
+    let mut position: u32 = 0x01ff_0000;
+    let mut step: u32 = 0x1_0000;
+    for _ in 0..0x200 {
+        let k = (position >> 16) as u16 as i16 as i32 as u32;
+        position = position.wrapping_sub(step);
+        step = step.wrapping_sub(128);
+        let v = cpu.read32(SCN_TABLE_SOURCE.wrapping_add(k << 2));
+        down = down.wrapping_sub(4);
+        cpu.write32(down, v);
+        let v = cpu.read32(SCN_TABLE_SOURCE.wrapping_add(k << 2));
+        cpu.write32(up, v);
+        up = up.wrapping_add(4);
+    }
+}
+
+/// The floor scene started (the object `s`): the priority of screen 5 at 3, backgrounds 23 on, the
+/// colour offset 0x53/0, the page of RBG0 (cells at 0x25e18000) and its map at 0x25e52000, the
+/// picture queued (0x3fc0 long) and the colours (16 from 0) put; the record 0x06074810 cleared
+/// but its +4 half 0x4000 and its scales 1.0; the maps at 0x060b20c0 (kind 4) and 0x060b20e0
+/// (kind 7, its rows 0x2000000 less the word at 0x060ffd34 masked, cleared), the planes' records
+/// at 0x060747e0 (scales 1.0) and 0x060747b0 (place 0xb00000, 0x700000, scales 1.0) and the
+/// second plane's frame, the spin record's word 0, the view along 0x060b0914, the screen's draw
+/// (+88) none, the speed (+0x20) 0x7000 and +0x28 0xd98.
+pub fn floor_start(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 5, 3));
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 23));
+    nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 83, 0));
+    nested!(cpu, 0x0606_e2ce, sgl::sl_page_rbg0(cpu, 0x25e1_8000, 0, 0x8000));
+    nested!(cpu, 0x0607_1c4c, sgl::sl_map_rbg0(cpu, 0x25e5_2000));
+    let src = scn_part(cpu, SCN_CELL_PARTS, 32);
+    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, src, 0x25e1_8000, 0x3fc0, 0x800));
+    let colours = scn_part(cpu, SCN_COLOUR_PARTS, 56);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0, 16));
+    let p = SCN_PANEL_PLACE;
+    for k in [20, 16, 12, 32, 28, 24] {
+        cpu.write32(p + k, 0);
+    }
+    for (k, v) in [(2, 0), (0, 0), (4, 0x4000), (10, 0), (8, 0), (6, 0)] {
+        cpu.write16(p + k, v);
+    }
+    for k in [44, 40, 36] {
+        cpu.write32(p + k, 0x1_0000);
+    }
+    let rows = 0x0200_0000u32;
+    let m = SCN_MAP_0;
+    cpu.write8(m, 4);
+    cpu.write8(m + 1, 0);
+    cpu.write32(m + 20, 0x060a_fd60);
+    cpu.write32(m + 16, 0x25e7_6000);
+    let top = cpu.read32(0x060f_fd34) & 0x01ff_ffff;
+    cpu.write32(m + 8, rows.wrapping_sub(top));
+    cpu.write32(m + 12, rows);
+    cpu.write16(m + 4, 0);
+    cpu.write16(m + 6, 0x1fff);
+    cpu.write16(m + 2, 0x90);
+    cpu.write32(m + 28, 0);
+    cpu.write32(m + 24, 0);
+    cpu.write32(SCN_PLANE_0 + 20, 0x1_0000);
+    cpu.write32(SCN_PLANE_0 + 16, 0x1_0000);
+    let m = SCN_MAP_1;
+    cpu.write8(m, 7);
+    cpu.write8(m + 1, 0);
+    cpu.write32(m + 20, 0x060a_fd70);
+    cpu.write32(m + 16, 0x25e7_4000);
+    cpu.write32(m + 8, rows);
+    cpu.write32(m + 12, rows);
+    cpu.write16(m + 4, 0);
+    cpu.write16(m + 6, 0x1fff);
+    cpu.write16(m + 2, 0x90);
+    cpu.write32(m + 28, 0x060b_0908);
+    cpu.write32(m + 24, 0);
+    nested!(cpu, 0x0605_f14c, bg::map_clear(cpu, m));
+    let q = SCN_PLANE_1;
+    cpu.write32(q, 0xb0_0000);
+    cpu.write32(q + 4, 0x70_0000);
+    cpu.write32(q + 12, 0);
+    cpu.write32(q + 8, 0);
+    cpu.write32(q + 20, 0x1_0000);
+    cpu.write32(q + 16, 0x1_0000);
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    cpu.write32(SCN_MOVER_SPIN, 0);
+    nested!(cpu, 0x0605_f5b0, bg::view_along(cpu, 0x060b_0914));
+    let screen = cpu.read32(0x0607_4740);
+    cpu.write32(screen + 88, 0);
+    cpu.write32(s + SCN_SPEED, 0x7000);
+    cpu.write32(s + SCN_RADIUS, 0xd98);
+}
+
+/// The floor scene each frame (the object `s`): the view matrix and the overlay's rotation 0 and
+/// the record 0x06074810's matrix, the mover moved by (-speed / 4, 0); the record's +12 masked
+/// (0x1ffffff); the second plane's frame and speed (-speed); the second plane's place less 0xb00000
+/// put in the hit map; both maps streamed. Returns minus the sum of their results.
+pub fn floor_frame(cpu: &mut Cpu, s: u32) -> u32 {
+    cpu.holding(&[(11, s)], |cpu| floor_frame_body(cpu, s))
+}
+
+/// `floor_frame`'s work (the SH-2 code keeps the object in r11 throughout: the callees' prologues push it).
+fn floor_frame_body(cpu: &mut Cpu, s: u32) -> u32 {
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    cpu.call(0x060a_b33c, &[0]);
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCN_PANEL_PLACE));
+    let dx = ((cpu.read32(s + SCN_SPEED).wrapping_neg() as i32) >> 2) as u32;
+    nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, dx, 0, 0));
+    let w = cpu.read32(SCN_PANEL_PLACE + 12) & 0x01ff_ffff;
+    cpu.write32(SCN_PANEL_PLACE + 12, w);
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+    nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, 0, speed));
+    let x = cpu.read32(SCN_PLANE_1).wrapping_add(0xff50_0000);
+    nested!(cpu, 0x0605_ef58, bg::map_hit_on(cpu, x, SCN_MAP_1));
+    let a = nested!(cpu, 0x0605_f170, bg::map_stream(cpu, SCN_PLANE_1, SCN_MAP_1)).wrapping_neg();
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+    nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, 0, ((speed as i32) >> 1) as u32));
+    let b = nested!(cpu, 0x0605_f170, bg::map_stream(cpu, SCN_PLANE_0, SCN_MAP_0));
+    a.wrapping_sub(b)
+}
+
+/// The floor scene's frames-left word (+0x28; 0xd98 at the start) and the colours it puts when the
+/// first map has ended (16 from 0x200, at 0x060afff0).
+const SCN_FLOOR_LEFT: u32 = 0x28;
+const SCN_FLOOR_COLOURS: u32 = 0x060a_fff0;
+const SCN_FLOOR_STAGE: u32 = 10;
+
+/// One frame of the floor scene (the object `s`): at the first frame (+0x28 at 0xd98) the warp
+/// table made; the floor's frame; the frames left counted down and the stage scrolled on at 0.
+pub fn floor_step(cpu: &mut Cpu, s: u32) {
+    if cpu.read32(s + SCN_FLOOR_LEFT) == 0xd98 {
+        nested!(cpu, 0x060a_2708, warp_table_make(cpu));
+    }
+    nested!(cpu, 0x060a_2948, floor_frame(cpu, s));
+    let left = cpu.read32(s + SCN_FLOOR_LEFT).wrapping_sub(1);
+    cpu.write32(s + SCN_FLOOR_LEFT, left);
+    if left == 0 {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// A function that does nothing.
+pub fn floor_nothing(_cpu: &mut Cpu) {}
+
+/// The floor scene's wind-down (the object `s`): the speed (+0x20) 0x800 less while positive, the
+/// floor's frame.
+pub fn floor_wind(cpu: &mut Cpu, s: u32) {
+    let speed = cpu.read32(s + SCN_SPEED);
+    if speed as i32 > 0 {
+        cpu.write32(s + SCN_SPEED, speed.wrapping_add(0xffff_f800));
+    }
+    nested!(cpu, 0x060a_2948, floor_frame(cpu, s));
+}
+
+/// The floor scene's byte at +10 cleared.
+pub fn floor_clear(cpu: &mut Cpu, s: u32) {
+    cpu.write8(s + SCN_FLOOR_STAGE, 0);
+}
+
+/// The floor scene's run (the object `s`): the speed (+0x20) 0x800 more up to 0x80000, the floor's
+/// frame; when one map has ended (its result 1) the colours (16 from 0x200) put once (the byte at
+/// +10 set), when both the stage scrolled on.
+pub fn floor_run(cpu: &mut Cpu, s: u32) {
+    let speed = cpu.read32(s + SCN_SPEED);
+    if speed as i32 <= 0x7_ffff {
+        cpu.write32(s + SCN_SPEED, speed.wrapping_add(0x800));
+    }
+    let r = nested!(cpu, 0x060a_2948, floor_frame(cpu, s));
+    if r == 1 {
+        if cpu.read8(s + SCN_FLOOR_STAGE) as i8 == 0 {
+            nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, SCN_FLOOR_COLOURS, 0x200, 16));
+            cpu.write8(s + SCN_FLOOR_STAGE, 1);
+        }
+    } else if r == 2 {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// The second floor scene started (the object `s`): backgrounds 0x10016 on, colour calculation
+/// 0x102, the page of NBG1 (cells at 0x25e60000), the second plane's place (0xb00000, 0x700000,
+/// scales 1.0) and frame, the picture (0x9ca0 long) and tiles (0x2000 at 0x25e74000) queued, the
+/// frames (+0x28) 0 and the speed (+0x20) 0x80000.
+pub fn floor2_start(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x1_0016));
+    nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 0x102));
+    nested!(cpu, 0x0606_e2e4, sgl::sl_page_nbg1(cpu, 0x25e6_0000, 0x400, 0xc000));
+    scn_plane_set(cpu, SCN_PLANE_1, 0xb0_0000, 0x70_0000);
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    let src = scn_part(cpu, SCN_CELL_PARTS, 36);
+    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, src, 0x25e6_0000, 0x9ca0, 0x800));
+    let src = cpu.read32(SCN_BUFFER).wrapping_add(0x2_e000);
+    nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, src, 0x25e7_4000, 0x2000));
+    cpu.write32(s + SCN_FLOOR_LEFT, 0);
+    cpu.write32(s + SCN_SPEED, 0x8_0000);
+}
+
+/// A blend of 16 colours on the frame (16 from 0x200): the struct at frame +32 with how far `v` / 16,
+/// the count 16, the colours from 0x060afff0, to the stage data's part at +60 and the frame itself
+/// the result's place; the blend made, then the frame's colours put.
+pub fn fade_colours(cpu: &mut Cpu, v: u32) {
+    let frame = cpu.stack();
+    let b = frame + 32;
+    cpu.write16(b, ((v as i32) >> 4) as u16);
+    cpu.write16(b + 2, 16);
+    cpu.write32(b + 4, SCN_FLOOR_COLOURS);
+    let to = scn_part(cpu, SCN_COLOUR_PARTS, 60);
+    cpu.write32(b + 8, to);
+    cpu.write32(b + 12, frame);
+    nested!(cpu, 0x0600_5ba4, palette::colours_blend(cpu, b));
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, frame, 0x200, 16));
+}
+
+/// The second floor's view (the object `s`): the view matrix and the overlay's rotation 0 and
+/// the record 0x06074810's matrix, the mover moved by (-speed / 4, 0); the record's +12 masked.
+pub fn floor2_view(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    cpu.call(0x060a_b33c, &[0]);
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCN_PANEL_PLACE));
+    let dx = ((cpu.read32(s + SCN_SPEED).wrapping_neg() as i32) >> 2) as u32;
+    nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, dx, 0, 0));
+    let w = cpu.read32(SCN_PANEL_PLACE + 12) & 0x01ff_ffff;
+    cpu.write32(SCN_PANEL_PLACE + 12, w);
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+}
+
+/// One frame of the second floor scene (the object `s`): while the frames word (+0x28) is up to
+/// 1.0 the blend made with it and it 0x200 more; the view; the second plane's frame and speed
+/// (-speed / 2).
+pub fn floor2_step(cpu: &mut Cpu, s: u32) {
+    let v = cpu.read32(s + SCN_FLOOR_LEFT);
+    if v as i32 <= 0x1_0000 {
+        nested!(cpu, 0x060a_2bf8, fade_colours(cpu, v));
+        let v = cpu.read32(s + SCN_FLOOR_LEFT).wrapping_add(0x200);
+        cpu.write32(s + SCN_FLOOR_LEFT, v);
+    }
+    nested!(cpu, 0x060a_2c5c, floor2_view(cpu, s));
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+    nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, 0, ((speed as i32) >> 1) as u32));
+}
