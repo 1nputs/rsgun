@@ -360,18 +360,22 @@ fn view_translate(cpu: &mut Cpu) {
 /// The rotation scroll's matrix from `o`: moved by its position (+0x0c), turned by its angles
 /// (words x, y, z at +0; about y, x, then z) and scaled by its scale (+0x24).
 pub fn rotation_matrix(cpu: &mut Cpu, o: u32) {
-    cpu.call(SL_PUSH_MATRIX, &[]);
-    let p = [0, 1, 2].map(|i| cpu.read32(o + 0x0c + 4 * i));
-    cpu.call(SL_TRANSLATE, &p);
-    let [x, y, z] = [0, 1, 2].map(|i| cpu.read16(o + 2 * i) as i16 as i32 as u32);
-    cpu.call(SL_ROT_Y, &[y]);
-    cpu.call(SL_ROT_X, &[x]);
-    cpu.call(SL_ROT_Z, &[z]);
-    let s = [0, 1, 2].map(|i| cpu.read32(o + 0x24 + 4 * i));
-    cpu.call(SL_SCALE, &s);
-    cpu.call(SL_INVERS_MATRIX, &[]);
-    cpu.call(ROTATION_PARAMETERS, &[]);
-    cpu.call(SL_POP_MATRIX, &[]);
+    // as the SH-2 code: `o` kept in r8, each call with its own return address (the callees push
+    // both, and STG03's effect struct reads the stack they leave)
+    cpu.holding(&[(8, o)], |cpu| {
+        cpu.call_returning(0x0605_f53e, SL_PUSH_MATRIX, &[]);
+        let p = [0, 1, 2].map(|i| cpu.read32(o + 0x0c + 4 * i));
+        cpu.call_returning(0x0605_f548, SL_TRANSLATE, &p);
+        let [x, y, z] = [0, 1, 2].map(|i| cpu.read16(o + 2 * i) as i16 as i32 as u32);
+        cpu.call_returning(0x0605_f554, SL_ROT_Y, &[y]);
+        cpu.call_returning(0x0605_f55a, SL_ROT_X, &[x]);
+        cpu.call_returning(0x0605_f566, SL_ROT_Z, &[z]);
+        let s = [0, 1, 2].map(|i| cpu.read32(o + 0x24 + 4 * i));
+        cpu.call_returning(0x0605_f570, SL_SCALE, &s);
+        cpu.call_returning(0x0605_f576, SL_INVERS_MATRIX, &[]);
+        cpu.call_returning(0x0605_f57c, ROTATION_PARAMETERS, &[]);
+        cpu.call_returning(0x0605_f582, SL_POP_MATRIX, &[]);
+    });
 }
 
 /// The view's position and angles at its place on `path` (keys of six longs), from its key to
