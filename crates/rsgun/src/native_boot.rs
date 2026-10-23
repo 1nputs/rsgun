@@ -368,8 +368,96 @@ pub fn build(img: &Inputs) -> Machine {
     master(&mut m, &loader);
     onchip(&mut m);
     devices(&mut m, img);
+    sound_ram(&mut m);
     m
 }
+
+/// ROM 0x1760: the LZ decompressor the BIOS runs over the sound driver. A control byte gives
+/// eight flags, low bit first: 1, a literal byte; 0 then 1, a long copy (a 16-bit word: the
+/// distance back in the high 13 bits, a count of 2 to 9 in the low three, or a count byte + 1
+/// after it if those are 0; a zero word ends); 0 then 0, a short copy (two flag bits give a
+/// count of 2 to 5, a byte the distance back, 1 to 256). Returns the bytes written.
+fn lz_decode(src: &[u8], out: &mut [u8]) -> usize {
+    let (mut p, mut o) = (0, 0);
+    let (mut control, mut left) = (0u32, 0);
+    let mut flag = |p: &mut usize| {
+        if left == 0 {
+            control = src[*p] as u32;
+            *p += 1;
+            left = 8;
+        }
+        left -= 1;
+        let f = control & 1 != 0;
+        control >>= 1;
+        f
+    };
+    loop {
+        if flag(&mut p) {
+            out[o] = src[p];
+            p += 1;
+            o += 1;
+            continue;
+        }
+        let (back, count);
+        if flag(&mut p) {
+            let word = src[p] as usize | (src[p + 1] as usize) << 8;
+            let low = src[p] as usize & 7;
+            p += 2;
+            if word == 0 {
+                return o;
+            }
+            back = 0x2000 - (word >> 3);
+            count = if low != 0 {
+                low + 2
+            } else {
+                p += 1;
+                src[p - 1] as usize + 1
+            };
+        } else {
+            let hi = flag(&mut p) as usize;
+            let lo = flag(&mut p) as usize;
+            count = (hi << 1 | lo) + 2;
+            back = 0x100 - src[p] as usize;
+            p += 1;
+        }
+        for _ in 0..count {
+            out[o] = out[o - back];
+            o += 1;
+        }
+    }
+}
+
+/// Sound RAM as the BIOS loads it (ROM 0x1140, 0x3f44-0x3f7c, 0x4018, 0x40b8): the 68000 driver
+/// decompressed from ROM 0x32000, tables copied from ROM, a fill of halfwords 0x6000 over
+/// 0x20000-0x3ffff. Then the sound CPU runs from its reset vectors (the 68000 makes the rest of
+/// the RAM itself; the reference has it 34 million steps in).
+fn sound_ram(m: &mut Machine) {
+    let bios = m.sys.bios.clone();
+    let ram = &mut m.sys.scsp.ram;
+    lz_decode(&bios[0x3_2000..], ram);
+    // (destination, ROM source, bytes)
+    for (dst, src, len) in [(0xA000, 0x3_4F4C, 0x4E), (0x1_0000, 0x3_4F70, 0x497 * 4), (0x4_0000, 0x3_61CC, 0x3EC5 * 4), (0x5_0000, 0x4_5CE0, 0x150 * 4)] {
+        ram[dst..dst + len].copy_from_slice(&bios[src..src + len]);
+    }
+    for h in ram[0x2_0000..0x4_0000].as_chunks_mut::<2>().0 {
+        *h = 0x6000u16.to_be_bytes();
+    }
+    m.sys.start_sound_cpu();
+    // the driver sets itself up in its first few thousand steps (the BIOS waits for it)
+    let (mut in_sample, sys) = (0u32, &mut *m.sys);
+    for _ in 0..SOUND_PREROLL {
+        sys.m68k.ipl = sys.scsp.ipl();
+        let mut bus = stv::scsp::SoundBus { scsp: &mut sys.scsp };
+        in_sample += sys.m68k.step(&mut bus).max(4);
+        if in_sample >= 256 {
+            in_sample -= 256;
+            sys.scsp.sample();
+        }
+    }
+}
+
+/// How many 68000 steps the native boot runs the sound driver before the game starts.
+const SOUND_PREROLL: u32 = 50_000;
 
 /// What the BIOS's loader (ROM 0x4500-0x4550) leaves in the master's registers.
 struct Loader {
@@ -417,6 +505,7 @@ fn onchip(m: &mut Machine) {
     // run dependent (the boot's length): the counter and its flags at the instant
     o.frt.ftcsr = 0x0E;
     o.frt.frc = 0x9CB0;
+    o.frt.sub = 2;
 }
 
 /// The devices as the BIOS's init (ROM 0x31c4 on) leaves them.
@@ -462,6 +551,28 @@ fn devices(m: &mut Machine, img: &Inputs) {
     s.vdp1.ptmr = 2;
     s.vdp1.ewrr = 0x58E0;
     s.vdp1.edsr = 3;
+    s.vdp1.draw = 1;
+    s.vdp2.vblank = true;
+    // VDP2's colour RAM: the palettes the BIOS copies from its ROM (the rest of its screens'
+    // leftovers, in colour RAM 0x420-0x600 and 0x800-0x900, are computed and left out)
+    let bios = &s.bios;
+    let cram = &mut s.vdp2.cram;
+    for (dst, src, len) in [(0, 0x5_5A24, 0x200), (0x200, 0x5_5C44, 0x200), (0x400, 0x5_5A04, 0x20), (0x420, 0x6_5C60, 0xE0), (0x500, 0x6_5C60, 0x20), (0x520, 0x5_5C24, 0x20)] {
+        cram[dst..dst + len].copy_from_slice(&bios[src..src + len]);
+    }
+    // eight palettes of one colour each over a common base (ROM 0x2b2e0)
+    for (i, colour) in [0x7C00u16, 0x7C00, 0x001F, 0x7C1F, 0x03E0, 0x7FE0, 0x03FF, 0x7FFF].into_iter().enumerate() {
+        let p = &mut cram[0x800 + 0x20 * i..][..0x20];
+        p.copy_from_slice(&bios[0x2_B2E0..][..0x20]);
+        p[2..4].copy_from_slice(&colour.to_be_bytes());
+    }
+    for i in 0..6 {
+        cram[0x540 + 0x20 * i..][..0x20].copy_from_slice(&bios[0x5_5A04..][..0x20]);
+    }
+    // VDP2's VRAM: the part of the BIOS's fill and ROM copy that the game's screens do not reuse
+    // (the rest of its leftovers, the BIOS screens' pictures, are left out)
+    fill_sega(&mut s.vdp2.vram[0x6_3600..0x6_3C00]);
+    s.vdp2.vram[0x6_35FC..0x6_3650].copy_from_slice(&s.bios[0x8AC..0x900]);
     // VDP2: the display registers the BIOS set
     for (a, v) in VDP2_REGS {
         s.vdp2.regs[a..a + 2].copy_from_slice(&v.to_be_bytes());
@@ -557,6 +668,36 @@ fn cmp_debug(name: &str, native: &dyn std::fmt::Debug, reference: &dyn std::fmt:
     diffs.len()
 }
 
+/// An SCSP without its RAM and registers (compared on their own), as saved bytes.
+struct Rest<'a>(&'a stv::scsp::Scsp);
+
+impl State for Rest<'_> {
+    fn save(&self, w: &mut Vec<u8>) {
+        let mut all = Vec::new();
+        self.0.save(&mut all);
+        // the RAM (0x80000) and registers (0x1000) come first
+        w.extend_from_slice(&all[0x8_1000..]);
+    }
+
+    fn load(&mut self, _: &mut stv::state::Reader) -> Result<(), String> {
+        Err("read only".into())
+    }
+}
+
+/// Compares named numbers.
+fn cmp_scalars(name: &str, native: &[(&str, u64)], reference: &[(&str, u64)]) -> usize {
+    let d: Vec<String> = native.iter().zip(reference).filter(|(a, b)| a.1 != b.1).map(|(a, b)| format!("{}: {} / {}", a.0, a.1, b.1)).collect();
+    if d.is_empty() {
+        println!("{name}: equal");
+    } else {
+        println!("{name}: {} differ (native / reference)", d.len());
+        for l in &d {
+            println!("  {l}");
+        }
+    }
+    d.len()
+}
+
 /// Compares a part's saved bytes.
 fn cmp_saved(name: &str, native: &dyn State, reference: &dyn State) -> usize {
     let (mut a, mut b) = (Vec::new(), Vec::new());
@@ -590,8 +731,6 @@ pub fn check(entry_state: &[u8], img: &Inputs, show: usize) -> Result<usize, Str
         part(cmp_debug(&format!("cpu[{i}]"), &native.cpu[i], &reference.cpu[i], show));
         part(cmp_debug(&format!("onchip[{i}]"), &n.onchip[i], &r.onchip[i], show));
     }
-    part(usize::from(n.slave_on != r.slave_on));
-    println!("slave_on: native {} reference {}", n.slave_on, r.slave_on);
     println!("== devices");
     part(cmp_debug("scu", &n.scu, &r.scu, show));
     part(cmp_debug("smpc", &n.smpc, &r.smpc, show));
@@ -600,23 +739,20 @@ pub fn check(entry_state: &[u8], img: &Inputs, show: usize) -> Result<usize, Str
     part(cmp_mem("vdp2 cram", 0, &n.vdp2.cram, &r.vdp2.cram, show));
     part(cmp_mem("vdp2 regs", 0, &n.vdp2.regs, &r.vdp2.regs, show));
     part(cmp_mem("sound RAM", 0, &n.scsp.ram, &r.scsp.ram, show));
-    part(cmp_saved("vdp1 (all)", &n.vdp1, &r.vdp1));
-    part(cmp_saved("vdp2 (all)", &n.vdp2, &r.vdp2));
-    part(cmp_saved("scsp (all)", &n.scsp, &r.scsp));
+    part(cmp_mem("vdp1 framebuffer 0", 0, &n.vdp1.fb[0], &r.vdp1.fb[0], show));
+    part(cmp_mem("vdp1 framebuffer 1", 0, &n.vdp1.fb[1], &r.vdp1.fb[1], show));
+    part(cmp_mem("scsp regs", 0, &n.scsp.regs, &r.scsp.regs, show));
+    let vdp1 = |v: &stv::video::Vdp1| {
+        vec![("draw", v.draw as u64), ("tvmr", v.tvmr.into()), ("fbcr", v.fbcr.into()), ("ptmr", v.ptmr.into()), ("ewdr", v.ewdr.into()), ("ewlr", v.ewlr.into()), ("ewrr", v.ewrr.into()), ("edsr", v.edsr.into()), ("lopr", v.lopr.into()), ("copr", v.copr.into()), ("change_requested", v.change_requested.into())]
+    };
+    let vdp2 = |v: &stv::video::Vdp2| vec![("vblank", v.vblank as u64), ("hblank", v.hblank.into()), ("odd", v.odd.into())];
+    part(cmp_scalars("vdp1 registers", &vdp1(&n.vdp1), &vdp1(&r.vdp1)));
+    part(cmp_scalars("vdp2 flags", &vdp2(&n.vdp2), &vdp2(&r.vdp2)));
+    part(cmp_saved("scsp (all but RAM: slots, DSP, timers)", &Rest(&n.scsp), &Rest(&r.scsp)));
     part(cmp_debug("m68k", &n.m68k, &r.m68k, show));
     println!("== machine");
-    for (name, a, b) in [
-        ("sound_on", n.sound_on as u64, r.sound_on as u64),
-        ("clock352", n.clock352 as u64, r.clock352 as u64),
-        ("line", n.line as u64, r.line as u64),
-        ("frame", n.frame, r.frame),
-        ("sound_steps", n.sound_steps, r.sound_steps),
-    ] {
-        if a != b {
-            println!("{name}: native {a} reference {b}");
-            bad += 1;
-        }
-    }
+    let sys = |s: &stv::machine::Sys| vec![("sound_on", s.sound_on as u64), ("slave_on", s.slave_on.into()), ("clock352", s.clock352.into()), ("line", s.line.into()), ("frame", s.frame), ("sound_steps", s.sound_steps)];
+    part(cmp_scalars("system", &sys(n), &sys(r)));
     println!("{bad} parts differ");
     Ok(bad)
 }
