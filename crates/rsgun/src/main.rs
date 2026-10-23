@@ -2,7 +2,7 @@
 //! cabinet's controls, the settings EEPROM and backup RAM kept between runs.
 //!
 //!     rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute]
-//!           [--native] [--cold] [--cpu-speed N]
+//!           [--native] [--cold] [--cpu-speed N] [--frame-delay MS] [--no-gpu-sync]
 //!     rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--evidence FILE]
 //!           [--dump F,F --dump-dir DIR] [--native | --compare REPORT] [--cold] [--cpu-speed N] [--rom DIR]
 //!           [--save DIR] [--load-state FILE] [--save-state FILE] [--states F,F]
@@ -18,6 +18,10 @@
 //! the port's code (build/port, tools/port) in place of the SH-2 code it was made from; `--compare`
 //! runs the SH-2 code and checks each call the port has against it (stv::compare), writing what it
 //! found to REPORT. `--cpu-speed N` runs the SH-2s N times as fast as built: no slowdown.
+//! `--frame-delay MS` waits that long after each refresh before reading the controls and running
+//! the frame (less lag; a frame's run must still fit in what is left of the refresh: try 6-10 with
+//! `--native`); `--no-gpu-sync` lets the driver queue frames ahead (by default each present waits
+//! for the frame to be drawn, which keeps the picture at most one refresh behind the controls).
 //! `--load-state FILE` starts a headless run from a save state (one `--save-state FILE` wrote at
 //! the end of another, or `--states F,F` at frames, into the `--dump-dir`; not while native code is
 //! in a call, so not in native play).
@@ -66,6 +70,12 @@ struct Options {
     scale: u32,
     fullscreen: bool,
     smooth: bool,
+    /// Waits for the GPU after each present (`--no-gpu-sync` not), so the driver cannot queue
+    /// frames ahead of the display and the pictures (and the controls behind them) lag.
+    gpu_sync: bool,
+    /// `--frame-delay MS`: waits this long after the display's refresh before reading the controls
+    /// and running the frame, so they are fresher when it is shown.
+    frame_delay: Duration,
     headless: bool,
     frames: u64,
     shot: Option<PathBuf>,
@@ -102,6 +112,8 @@ fn parse_args() -> Result<Options, String> {
         scale: 3,
         fullscreen: false,
         smooth: false,
+        gpu_sync: true,
+        frame_delay: Duration::ZERO,
         headless: false,
         frames: 0,
         shot: None,
@@ -133,6 +145,11 @@ fn parse_args() -> Result<Options, String> {
             "--scale" => o.scale = value()?.parse().map_err(|_| "--scale: a number")?,
             "--fullscreen" => o.fullscreen = true,
             "--smooth" => o.smooth = true,
+            "--no-gpu-sync" => o.gpu_sync = false,
+            "--frame-delay" => {
+                let ms: u64 = value()?.parse().map_err(|_| "--frame-delay: milliseconds")?;
+                o.frame_delay = Duration::from_millis(ms.min(14));
+            }
             "--headless" => o.headless = true,
             "--frames" => o.frames = value()?.parse().map_err(|_| "--frames: a number")?,
             "--shot" => o.shot = Some(PathBuf::from(value()?)),
@@ -527,6 +544,10 @@ fn windowed(o: &Options, script: Option<&Script>) -> Result<(), String> {
             canvas.copy(t, None, Some(Rect::new(((cw - dw) / 2) as i32, ((ch - dh) / 2) as i32, dw, dh)))?;
         }
         canvas.present();
+        if o.gpu_sync && !fast {
+            // a pixel read back waits for the frame to be drawn: no frames queued ahead
+            let _ = canvas.read_pixels(Some(Rect::new(0, 0, 1, 1)), PixelFormatEnum::RGB24);
+        }
 
         // vsync that does not wait (no compositor, or a driver that ignores it): pace by the clock
         if lock_to_vsync && !fast && !paused {
@@ -548,6 +569,9 @@ fn windowed(o: &Options, script: Option<&Script>) -> Result<(), String> {
             }
         } else if paused {
             std::thread::sleep(Duration::from_millis(15));
+        } else if !fast && !o.frame_delay.is_zero() {
+            // just after the refresh: the controls are read this much later
+            std::thread::sleep(o.frame_delay);
         }
     }
     let secs = started.elapsed().as_secs_f64();
@@ -562,7 +586,7 @@ fn main() -> ExitCode {
             if !e.is_empty() {
                 eprintln!("rsgun: {e}");
             }
-            eprintln!("usage: rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute] [--native] [--cold] [--cpu-speed N]");
+            eprintln!("usage: rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute] [--native] [--cold] [--cpu-speed N] [--frame-delay MS] [--no-gpu-sync]");
             eprintln!("       rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--native] [--cold] [--cpu-speed N] [--rom DIR] [--save DIR]");
             return ExitCode::from(2);
         }
