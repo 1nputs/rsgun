@@ -7850,3 +7850,934 @@ pub fn window_draw(cpu: &mut Cpu, s: u32) {
     cpu.write32(d + S_POSITION, x.wrapping_sub(px));
     nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
 }
+
+// ---- the head's steps (the boss' second phase) ------------------------------------------------------
+
+/// The boss's round (+0xe6, a byte), its timer (+0xea, a halfword), its flags (+0x94, a
+/// halfword: bit 0 a hit, bit 14 the move's end), its three tilts (+0x172, +0x174, +0x176,
+/// halfwords eased by `approach`), its depth (+0x138), and the words the heads' moves keep:
+/// +0x160, +0x164, +0x168, +0x16c (longs), +0x170 and +0x17f (bytes), +0x17c (a long).
+const HEAD_ROUND: u32 = 0xe6;
+const HEAD_TIME: u32 = 0xea;
+const HEAD_FLAGS: u32 = 0x94;
+const HEAD_TILT_A: u32 = 0x172;
+const HEAD_TILT_B: u32 = 0x174;
+const HEAD_TILT_C: u32 = 0x176;
+const HEAD_DEPTH: u32 = 0x138;
+const HEAD_K160: u32 = 0x160;
+const HEAD_K164: u32 = 0x164;
+const HEAD_K168: u32 = 0x168;
+const HEAD_K16C: u32 = 0x16c;
+const HEAD_COUNT: u32 = 0x170;
+const HEAD_K17C: u32 = 0x17c;
+const HEAD_K17F: u32 = 0x17f;
+const HEAD_IDLE: u32 = 0x0609_6024;
+const HEAD_FACE_AWAY: u32 = 0x0609_6034;
+const HEAD_FACE_PLAYER: u32 = 0x0609_6098;
+const HEAD_ARM_SCRIPT: u32 = 0x060a_cf86;
+
+/// A halfword tilt of the head (a signed halfword) eased toward `to` by `step`.
+fn head_tilt(cpu: &mut Cpu, o: u32, at: u32, to: u32, step: u32) {
+    let v = cpu.read16(o + at) as i16 as i32 as u32;
+    let r = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, to, step));
+    cpu.write16(o + at, r as u16);
+}
+
+fn shift_8(cpu: &mut Cpu, v: u32) {
+    nested!(cpu, 0x0600_8164, clib::ashiftrt_r4::<8>(cpu, v));
+}
+
+/// The turn (+0x30) eased toward the opposite of the angle to the nearer player, by a share of
+/// the difference (`quotient` by `share`).
+fn head_turn_toward_player(cpu: &mut Cpu, o: u32, share: u32) {
+    let near = nested!(cpu, 0x0605_6a58, aim::nearer_player(cpu, o + O_FLAGS));
+    let a = nested!(cpu, 0x0604_5e30, aim::angle_to(cpu, o, near));
+    let want = (a as i16 as i32 as u32).wrapping_add(0x8000);
+    let turn = cpu.read16(o + O_ANGLE) as i16 as i32 as u32;
+    let d = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, turn, want));
+    let q = nested!(cpu, 0x0600_6a78, math::quotient(cpu, d, share));
+    let t = q.wrapping_add(cpu.read16(o + O_ANGLE) as i16 as i32 as u32);
+    cpu.write16(o + O_ANGLE, t as u16);
+}
+
+/// The depth eased to 0xc0000 by 0x1000 and the third tilt to 0 by 8; on a hit (flags bit 0) the
+/// sound 0x59; at the move's end (bit 14) the pose script restarted; past 0xb4 frames the boss
+/// turns to face the player.
+pub fn head_close(cpu: &mut Cpu, o: u32) {
+    let d = cpu.read32(o + HEAD_DEPTH);
+    let d = nested!(cpu, 0x0604_6168, actors::approach(cpu, d, 0xc_0000, 0x1000));
+    cpu.write32(o + HEAD_DEPTH, d);
+    head_tilt(cpu, o, HEAD_TILT_C, 0, 8);
+    nested!(cpu, HEAD_IDLE, boss_idle_framed(cpu));
+    if cpu.read16(o + HEAD_FLAGS) & 1 != 0 {
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 0x59));
+    }
+    if cpu.read16(o + HEAD_FLAGS) & 0x4000 != 0 {
+        nested!(cpu, 0x0605_6628, actors::script_start(cpu, o + 0x6c, HEAD_ARM_SCRIPT));
+    }
+    if cpu.read16(o + HEAD_TIME) > 0xb4 {
+        nested!(cpu, HEAD_FACE_PLAYER, boss_face_player(cpu, o));
+    }
+}
+
+/// The first two tilts eased to 0x40 by 3; after 50 frames the timer is cleared and the round
+/// is 4; +0x16c rises by 0x200; the boss turns away.
+pub fn head_wind(cpu: &mut Cpu, o: u32) {
+    head_tilt(cpu, o, HEAD_TILT_A, 0x40, 3);
+    head_tilt(cpu, o, HEAD_TILT_B, 0x40, 3);
+    nested!(cpu, HEAD_IDLE, boss_idle_framed(cpu));
+    if cpu.read16(o + HEAD_TIME) > 50 {
+        cpu.write16(o + HEAD_TIME, 0);
+        cpu.write8(o + HEAD_ROUND, 4);
+    }
+    let k = cpu.read32(o + HEAD_K16C).wrapping_add(0x200);
+    cpu.write32(o + HEAD_K16C, k);
+    nested!(cpu, HEAD_FACE_AWAY, boss_face_away(cpu, o));
+}
+
+/// At the timer's 10th frame: the round and the count up one, the tilts -128, debris made, the
+/// pose script restarted (0x060acff4), +0x16c cleared, and a cross flash made at the place kept at
+/// +0x154 (a description on the stack: its place +0x154, +0x158 and 0, a kind of 48, a size of
+/// 0x18000 and the halfword at +0x30 of the boss); the boss turns away.
+pub fn head_burst(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, HEAD_IDLE, boss_idle_framed(cpu));
+    if cpu.read16(o + HEAD_TIME) == 10 {
+        let r = cpu.read8(o + HEAD_ROUND).wrapping_add(1);
+        cpu.write8(o + HEAD_ROUND, r);
+        let c = cpu.read8(o + HEAD_COUNT).wrapping_add(1);
+        cpu.write8(o + HEAD_COUNT, c);
+        cpu.write16(o + HEAD_TILT_A, 0xff80);
+        cpu.write16(o + HEAD_TILT_B, 0xff80);
+        nested!(cpu, 0x0609_54b4, debris_make(cpu, o));
+        nested!(cpu, 0x0605_6628, actors::script_start(cpu, o + 0x6c, 0x060a_cff4));
+        cpu.write32(o + HEAD_K16C, 0);
+        let d = cpu.stack();
+        let (x, y) = (cpu.read32(o + 0x154), cpu.read32(o + 0x158));
+        cpu.write32(d, x);
+        cpu.write32(d + 4, y);
+        cpu.write32(d + 8, 0);
+        cpu.write16(d + 32, 48);
+        cpu.write32(d + 16, 0x1_8000);
+        let h = cpu.read16(o + O_ANGLE);
+        cpu.write16(d + 24, h);
+        nested!(cpu, 0x0605_7e38, explosions::cross_flash(cpu, d));
+    }
+    nested!(cpu, HEAD_FACE_AWAY, boss_face_away(cpu, o));
+}
+
+/// At the move's end (flags bit 14): past 11 on the count the round is 6, the timer cleared,
+/// +0x168 0x30000 and the sound 0x46; else the boss faces the player; the pose script restarted.
+/// The boss turns away.
+pub fn head_open(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, HEAD_IDLE, boss_idle_framed(cpu));
+    if cpu.read16(o + HEAD_FLAGS) & 0x4000 != 0 {
+        if cpu.read8(o + HEAD_COUNT) as i8 > 11 {
+            cpu.write8(o + HEAD_ROUND, 6);
+            cpu.write16(o + HEAD_TIME, 0);
+            cpu.write32(o + HEAD_K168, 0x3_0000);
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 0x46));
+        } else {
+            nested!(cpu, HEAD_FACE_PLAYER, boss_face_player(cpu, o));
+        }
+        nested!(cpu, 0x0605_6628, actors::script_start(cpu, o + 0x6c, HEAD_ARM_SCRIPT));
+    }
+    nested!(cpu, HEAD_FACE_AWAY, boss_face_away(cpu, o));
+}
+
+const HEAD_ORBIT_KIND: u32 = 44;
+const HEAD_ORBIT_COLOUR: u32 = 32;
+const HEAD_ORBIT_SCALE: u32 = 12;
+const HEAD_ORBIT_ANGLE: u32 = 24;
+const HEAD_ORBIT_RADIUS: u32 = 36;
+const HEAD_ORBIT_OFFSET: u32 = 46;
+const HEAD_ORBIT_TURN: u32 = 48;
+const HEAD_ORBIT_LIFT: u32 = 50;
+const HEAD_ORBIT_SCALE_SPEED: u32 = 52;
+static HEAD_ORBIT_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
+
+/// An orbiter made around the boss's place (+0x154): kind 3, colours 2, scales 0x6000 (the
+/// second one by +0x168 over -80), a random angle offset (0x3800 less 0x8000) and turn (0x80),
+/// radii -0x80000 and -0x1000, watching the bits of 64 in +0xf2, its angle the turn (+0x30).
+pub fn head_orbit_set(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    cpu.write16(d + HEAD_ORBIT_KIND, 3);
+    cpu.write16(d + HEAD_ORBIT_COLOUR, 2);
+    cpu.write32(d + HEAD_ORBIT_SCALE, 0x6000);
+    let k = cpu.read32(o + HEAD_K168);
+    cpu.write32(d + HEAD_ORBIT_SCALE + 4, k);
+    cpu.write32(d + HEAD_ORBIT_SCALE_SPEED, 0);
+    let k = cpu.read32(o + HEAD_K168);
+    let q = nested!(cpu, 0x0600_6a78, math::quotient(cpu, k, 0xffff_ffb0));
+    cpu.write32(d + HEAD_ORBIT_SCALE_SPEED + 4, q);
+    cpu.write16(d + HEAD_ORBIT_ANGLE, 0);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x3800));
+    cpu.write16(d + HEAD_ORBIT_OFFSET, r.wrapping_sub(0x8000) as u16);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x80));
+    cpu.write16(d + HEAD_ORBIT_TURN, r as u16);
+    cpu.write16(d + HEAD_ORBIT_LIFT, 0);
+    cpu.write32(d + HEAD_ORBIT_RADIUS, 0xfff8_0000);
+    cpu.write32(d + HEAD_ORBIT_RADIUS + 4, 0xffff_f000);
+    let angle_from = o + O_ANGLE;
+    cpu.nested_with_stack(&HEAD_ORBIT_PROLOGUE, 0x0605_9554, &[angle_from], |cpu| {
+        super::orbits::orbit_set(cpu, d, o + 0xf2, 64, o + 0x154, angle_from)
+    });
+}
+
+/// The tilts eased to 0x80 by 1; +0x168 down 0x100 and +0x16c up 0xa0; once +0x168 is over
+/// 0x1000 on an even game frame an orbiter is made; past 0xf0 frames the round is up one, the
+/// timer and +0x164 cleared and +0x17c the sound 0x5b's control; with a difficulty the boss's turn
+/// is eased (a seventieth) toward the opposite of the angle to the nearer player.
+pub fn head_rise(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, HEAD_IDLE, boss_idle_framed(cpu));
+    head_tilt(cpu, o, HEAD_TILT_A, 0x80, 1);
+    head_tilt(cpu, o, HEAD_TILT_B, 0x80, 1);
+    let a = cpu.read32(o + HEAD_K168).wrapping_add(0xffff_ff00);
+    cpu.write32(o + HEAD_K168, a);
+    let b = cpu.read32(o + HEAD_K16C).wrapping_add(0xa0);
+    cpu.write32(o + HEAD_K16C, b);
+    if cpu.read32(o + HEAD_K168) as i32 > 0x1000 && cpu.read32(GAME_FRAMES) & 1 == 0 {
+        nested!(cpu, 0x0609_6354, head_orbit_set(cpu, o));
+    }
+    if cpu.read16(o + HEAD_TIME) > 0xf0 {
+        let r = cpu.read8(o + HEAD_ROUND).wrapping_add(1);
+        cpu.write8(o + HEAD_ROUND, r);
+        cpu.write16(o + HEAD_TIME, 0);
+        cpu.write32(o + HEAD_K164, 0);
+        let c = nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 0x5b));
+        cpu.write32(o + HEAD_K17C, c as i8 as i32 as u32);
+    }
+    if cpu.read8(DIFFICULTY_AT) != 0 {
+        head_turn_toward_player(cpu, o, 0x70);
+    }
+}
+
+/// +0x16c eased to 0 by 0x200, the first two tilts to -256 by 12.
+pub fn head_settle(cpu: &mut Cpu, o: u32) {
+    let k = cpu.read32(o + HEAD_K16C);
+    let k = nested!(cpu, 0x0604_6168, actors::approach(cpu, k, 0, 0x200));
+    cpu.write32(o + HEAD_K16C, k);
+    head_tilt(cpu, o, HEAD_TILT_A, 0xffff_ff00, 12);
+    head_tilt(cpu, o, HEAD_TILT_B, 0xffff_ff00, 12);
+}
+
+/// The charge: while the timer is within 0xf0 frames +0x160 is brought down by 0x18000 a frame
+/// (past it, once +0x160 is gone, the round goes up, +0x160 and +0x164 and the timer are cleared
+/// and the sound 0x5b stopped on the control kept at +0x17f; before that it is settled, and
+/// brought down by -0x1000); +0x164 eased to the share of the gap (a sixteenth) by its size over
+/// 256; +0x160 rises by it, and past 0x8000 the tail is made. At difficulty 2 and up the turn
+/// is eased (a three-hundredth) toward the opposite of the angle to the nearer player; the head
+/// idles.
+pub fn head_charge(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, HEAD_IDLE, boss_idle_framed(cpu));
+    if cpu.read8(DIFFICULTY_AT) as i8 > 1 {
+        head_turn_toward_player(cpu, o, 0x300);
+    }
+    let step: u32;
+    if cpu.read16(o + HEAD_TIME) > 0xf0 {
+        if cpu.read32(o + HEAD_K160) as i32 <= 0 {
+            let r = cpu.read8(o + HEAD_ROUND).wrapping_add(1);
+            cpu.write8(o + HEAD_ROUND, r);
+            cpu.write32(o + HEAD_K160, 0);
+            cpu.write32(o + HEAD_K164, 0);
+            cpu.write16(o + HEAD_TIME, 0);
+            let control = cpu.read8(o + HEAD_K17F) as i8 as i32 as u32;
+            nested!(cpu, 0x0600_52e0, sound::se_stop(cpu, 0x5b, control));
+            return;
+        }
+        step = 0xffff_f000;
+        nested!(cpu, 0x0609_6528, head_settle(cpu, o));
+    } else {
+        step = 0x1_8000;
+    }
+    let gap = cpu.read32(o + HEAD_K160).wrapping_sub(step) as i32;
+    let biased = if gap < 0 { gap.wrapping_add(0xff) } else { gap };
+    shift_8(cpu, biased as u32);
+    let size = (biased >> 8).wrapping_abs() as u32;
+    let back = gap.wrapping_neg();
+    let to = (if back < 0 { back.wrapping_add(15) } else { back } >> 4) as u32;
+    let v = cpu.read32(o + HEAD_K164);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, to, size));
+    cpu.write32(o + HEAD_K164, v);
+    let k = cpu.read32(o + HEAD_K160).wrapping_add(v);
+    cpu.write32(o + HEAD_K160, k);
+    if k as i32 > 0x8000 {
+        nested!(cpu, 0x0609_5674, tail_make(cpu, o));
+    }
+}
+
+/// Settled; past 60 frames the boss faces the player, the count is cleared and +0xf0 rises.
+pub fn head_recover(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, HEAD_IDLE, boss_idle_framed(cpu));
+    nested!(cpu, 0x0609_6528, head_settle(cpu, o));
+    if cpu.read16(o + HEAD_TIME) > 60 {
+        nested!(cpu, HEAD_FACE_PLAYER, boss_face_player(cpu, o));
+        cpu.write8(o + HEAD_COUNT, 0);
+        let k = cpu.read16(o + 0xf0).wrapping_add(1);
+        cpu.write16(o + 0xf0, k);
+    }
+}
+
+/// The three tilts eased to -192 by 12; at the timer's 60th frame an explosion at the boss's
+/// place (the boss at +0x3c of its description); past 0xd2 frames it ends.
+pub fn head_end(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, HEAD_IDLE, boss_idle_framed(cpu));
+    head_tilt(cpu, o, HEAD_TILT_A, 0xffff_ff40, 12);
+    head_tilt(cpu, o, HEAD_TILT_B, 0xffff_ff40, 12);
+    head_tilt(cpu, o, HEAD_TILT_C, 0xffff_ff40, 12);
+    if cpu.read16(o + HEAD_TIME) == 60 {
+        let d = cpu.stack();
+        for k in 0..3 {
+            let v = cpu.read32(o + O_POSITION + 4 * k);
+            cpu.write32(d + 4 * k, v);
+        }
+        cpu.write32(d + 60, o);
+        nested!(cpu, 0x0605_8ba4, explosions::explosion_set(cpu, d));
+    }
+    if cpu.read16(o + HEAD_TIME) > 0xd2 {
+        cpu.write8(o + O_MODE, MODE_DONE);
+    }
+}
+
+const HEAD_AIM_AT: u32 = 0x80;
+const HEAD_SPIN: u32 = 0xdc;
+const HEAD_SPIN_SPEED: u32 = 0xde;
+const HEAD_SPIN_RATE: u32 = 0xe0;
+const HEAD_LEAN: u32 = 0xd0;
+const HEAD_LEAN_SPEED: u32 = 0xd2;
+const HEAD_LEAN_RATE: u32 = 0xd4;
+const HEAD_ROLL: u32 = 0xd6;
+const HEAD_ROLL_SPEED: u32 = 0xd8;
+const HEAD_ROLL_RATE: u32 = 0xda;
+static HEAD_TURN_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
+
+/// The pose script stepped; three angles (the spin, lean and roll, each with a speed and a rate) are
+/// sprung (aim::turn_toward, the arguments left pushed across the first two calls as the SH-2
+/// code leaves them) toward the halfwords at +14, +0 and +6 of the table the boss keeps at +0x80;
+/// each moves by its speed. The lean and the roll turn about (speed and rate negated) when they pass
+/// 0xf000 or fall within 0x1ffe of 0x8000 (the lean) and past 0xfff or within 0xffe of 0xb001 (the
+/// roll, which also jumps to 0xc000).
+pub fn head_wobble(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0605_6644, models::pose_step(cpu, o + 0x6c));
+    let table = cpu.read32(o + HEAD_AIM_AT);
+    let from = cpu.read16(o + HEAD_SPIN) as u32;
+    let to = cpu.read16(table.wrapping_add(14)) as u32;
+    cpu.push(&[0x8000, 10, 0x100]);
+    nested!(cpu, 0x0605_70d8, aim::turn_toward(cpu, o + HEAD_SPIN_SPEED, o + HEAD_SPIN_RATE, from, to, 0x8000, 10, 0x100));
+    let spin = (cpu.read16(o + HEAD_SPIN) as i16).wrapping_add(cpu.read16(o + HEAD_SPIN_SPEED) as i16);
+    cpu.write16(o + HEAD_SPIN, spin as u16);
+    let from = cpu.read16(o + HEAD_LEAN) as u32;
+    let table = cpu.read32(o + HEAD_AIM_AT);
+    let to = cpu.read16(table) as u32;
+    cpu.push(&[0x8000, 10, 0x10]);
+    nested!(cpu, 0x0605_70d8, aim::turn_toward(cpu, o + HEAD_LEAN_SPEED, o + HEAD_LEAN_RATE, from, to, 0x8000, 10, 0x10));
+    cpu.pop(24);
+    let lean = (cpu.read16(o + HEAD_LEAN) as i16).wrapping_add(cpu.read16(o + HEAD_LEAN_SPEED) as i16);
+    cpu.write16(o + HEAD_LEAN, lean as u16);
+    if lean as u16 > 0xf000 {
+        cpu.write16(o + HEAD_LEAN, 0);
+        head_negate(cpu, o, HEAD_LEAN_SPEED, HEAD_LEAN_RATE);
+    }
+    let lean = cpu.read16(o + HEAD_LEAN).wrapping_add(0x7fff);
+    if lean <= 0x1ffe {
+        cpu.write16(o + HEAD_LEAN, 0x8000);
+        head_negate(cpu, o, HEAD_LEAN_SPEED, HEAD_LEAN_RATE);
+    }
+    let table = cpu.read32(o + HEAD_AIM_AT);
+    let from = cpu.read16(o + HEAD_ROLL) as u32;
+    let to = cpu.read16(table.wrapping_add(6)) as u32;
+    cpu.nested_with_stack(&HEAD_TURN_PROLOGUE, 0x0605_70d8, &[0x8000, 10, 0x40], |cpu| {
+        aim::turn_toward(cpu, o + HEAD_ROLL_SPEED, o + HEAD_ROLL_RATE, from, to, 0x8000, 10, 0x40)
+    });
+    let roll = (cpu.read16(o + HEAD_ROLL) as i16).wrapping_add(cpu.read16(o + HEAD_ROLL_SPEED) as i16);
+    cpu.write16(o + HEAD_ROLL, roll as u16);
+    if roll as u16 <= 0xfff {
+        cpu.write16(o + HEAD_ROLL, 0);
+        head_negate(cpu, o, HEAD_ROLL_SPEED, HEAD_ROLL_RATE);
+    }
+    let roll = cpu.read16(o + HEAD_ROLL).wrapping_add(0x4fff);
+    if roll <= 0xffe {
+        cpu.write16(o + HEAD_ROLL, 0xc000);
+    }
+}
+
+fn head_negate(cpu: &mut Cpu, o: u32, speed: u32, rate: u32) {
+    let v = cpu.read16(o + speed).wrapping_neg();
+    cpu.write16(o + speed, v);
+    let v = cpu.read16(o + rate).wrapping_neg();
+    cpu.write16(o + rate, v);
+}
+
+const HEAD_LIFE: u32 = 0xf8;
+/// The object's flag that the boss has been hit.
+const HEAD_HIT_FLAG: u32 = 0x80_0000;
+const HEAD_HIT_COUNT: u32 = 0xf0;
+const HEAD_DYING: u32 = 0xf2;
+const HEAD_STEPS: u32 = 0x060a_d2c4;
+const HEAD_DEAD_SCRIPT: u32 = 0x060a_cfce;
+const STAGE_SCORE_AT: u32 = 0x0607_46f4;
+const STAGE_RATE_AT: u32 = 0x0607_46f0;
+
+/// The head's step. Once the boss has been hit (flags 0x800000): the gauge set to its life
+/// (+0xf8); while the round is within 8, and the life is gone or the hit count (+0xf0) is over 3,
+/// the round is 9, the bullets are cleared, the sound 0x5b stopped on its control, the bit of 64
+/// set in +0xf2, the timer and the words +0x16c and +0x160 cleared; the stage's score is 0x4e20
+/// and its rate up 2 if the life is gone (else the score cleared), the life cleared, the death
+/// script started; the wobble. Then the round's step (the table at 0x060ad2c4, by the round), the
+/// camera, the move, and the timer up one.
+pub fn head_step(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(o + O_FLAGS) & HEAD_HIT_FLAG != 0 {
+        let life = cpu.read32(o + HEAD_LIFE);
+        nested!(cpu, 0x0604_64b8, hud::boss_gauge_life(cpu, life));
+        let round = cpu.read8(o + HEAD_ROUND);
+        let dying = round <= 8
+            && (cpu.read32(o + HEAD_LIFE) as i32 <= 0 || cpu.read16(o + HEAD_HIT_COUNT) as i16 > 3);
+        if dying {
+            cpu.write8(o + HEAD_ROUND, 9);
+            nested!(cpu, 0x0605_61e0, screen::bullets_cleared(cpu));
+            let control = cpu.read8(o + HEAD_K17F) as i8 as i32 as u32;
+            nested!(cpu, 0x0600_52e0, sound::se_stop(cpu, 0x5b, control));
+            let d = cpu.read16(o + HEAD_DYING) | 64;
+            cpu.write16(o + HEAD_DYING, d);
+            cpu.write16(o + HEAD_TIME, 0);
+            cpu.write32(o + HEAD_K16C, 0);
+            cpu.write32(o + HEAD_K160, 0);
+            if cpu.read32(o + HEAD_LIFE) as i32 > 0 {
+                cpu.write32(STAGE_SCORE_AT, 0);
+            } else {
+                cpu.write32(STAGE_SCORE_AT, 0x4e20);
+                let rate = cpu.read32(STAGE_RATE_AT).wrapping_add(2);
+                cpu.write32(STAGE_RATE_AT, rate);
+            }
+            cpu.write32(o + HEAD_LIFE, 0);
+            nested!(cpu, 0x0605_6628, actors::script_start(cpu, o + 0x6c, HEAD_DEAD_SCRIPT));
+        }
+        nested!(cpu, 0x0609_67c4, head_wobble(cpu, o));
+    }
+    let round = cpu.read8(o + HEAD_ROUND) as u32;
+    let f = cpu.read32(HEAD_STEPS + 4 * round);
+    cpu.call_returning(0x0609_69e2, f, &[o]);
+    nested!(cpu, 0x0609_5d48, boss_camera(cpu, o));
+    nested!(cpu, 0x0609_5d24, boss_move(cpu, o));
+    let t = cpu.read16(o + HEAD_TIME).wrapping_add(1);
+    cpu.write16(o + HEAD_TIME, t);
+}
+
+const HEAD_FORM: u32 = 0xf2;
+const HEAD_MODELS: u32 = 0x430;
+const HEAD_POINTS: u32 = 0x060a_ce08;
+const HEAD_POINTS_OUT: u32 = 0xfc;
+const HEAD_WORLD: u32 = 0x154;
+const HEAD_GLOW: u32 = 0x160;
+const HEAD_SPARK: u32 = 0x16c;
+const HEAD_FLIP_BITS: u32 = 0x0604_5cdc;
+const HEAD_SPARK_DRAW_SCALE: u32 = 0xfffb_c000;
+
+/// The head's model set (the kinds' record at +0x430): its list's `k`th entry, a pair, the one
+/// the form's bit 0 picks.
+fn head_model(cpu: &mut Cpu, o: u32, k: u32) -> u32 {
+    let x = cpu.read32(KINDS + HEAD_MODELS);
+    let y = cpu.read32(x + 28);
+    let z = cpu.read32(y + 4 * k);
+    let flip = (cpu.read16(o + HEAD_FORM) & 1) as u32;
+    cpu.read32(z + 4 * flip)
+}
+
+fn head_put(cpu: &mut Cpu, o: u32, k: u32) {
+    let m = head_model(cpu, o, k);
+    cpu.call(SL_PUT_POLYGON, &[m]);
+}
+
+fn head_half(cpu: &mut Cpu, at: u32) -> u32 {
+    cpu.read16(at) as i16 as i32 as u32
+}
+
+/// The head's draw (its sprite `s`, at the object + 0x10). The form (+0xf2) loses its bits 0 and 1
+/// if bit 1 is set, and bit 0 sets bit 1; the matrix pushed, moved to the head's place and
+/// turned (x, y, z). Unless the form's bit 7 is set: the body put, three points of the table at
+/// 0x060ace08 turned into the room at +0xfc; then the parts, each in a matrix of its own (the
+/// jaw's and its hinges by the table the boss keeps at +0x80, the pods turned by 0x5555 and 0xaaaa
+/// and by +0xd6, the nose), the world place of a point (0, 0x100000, 0) kept at +0x154, the glow
+/// (+0x160: a flashing disc, turned by the game frames, scaled by it) while it lasts, the two
+/// cheeks, the matrix popped. Then, while the sparks (+0x16c) last, a spark is drawn at +0x154,
+/// flickering with the game frames.
+pub fn head_draw(cpu: &mut Cpu, s: u32) {
+    let o = s.wrapping_sub(0x10);
+    let mut form = cpu.read16(o + HEAD_FORM);
+    if form & 2 != 0 {
+        cpu.write16(o + HEAD_FORM, form & 0xfffc);
+        form = cpu.read16(o + HEAD_FORM);
+    }
+    if form & 1 != 0 {
+        cpu.write16(o + HEAD_FORM, form | 2);
+    }
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    let p = [0, 1, 2].map(|i| cpu.read32(o + O_POSITION + 4 * i));
+    cpu.call(SL_TRANSLATE, &p);
+    let a = head_half(cpu, s + 28);
+    cpu.call(SL_ROT_X, &[a]);
+    let a = head_half(cpu, s + 30);
+    cpu.call(SL_ROT_Y, &[a]);
+    let a = head_half(cpu, s + 32);
+    cpu.call(SL_ROT_Z, &[a]);
+    if cpu.read16(o + HEAD_FORM) & 0x80 == 0 {
+        head_parts(cpu, o);
+    }
+    cpu.call(SL_POP_MATRIX, &[]);
+    if cpu.read32(o + HEAD_SPARK) != 0 {
+        head_spark_draw(cpu, o);
+    }
+}
+
+fn head_parts(cpu: &mut Cpu, o: u32) {
+    head_put(cpu, o, 0);
+    for i in 0..3u32 {
+        let at = HEAD_POINTS + 8 * i;
+        let x = cpu.read16(at) as u32;
+        let y = cpu.read16(at + 2) as u32;
+        let z = cpu.read16(at + 4) as u32;
+        cpu.call(SL_CALC_POINT, &[x << 16, y << 16, z << 16, o + HEAD_POINTS_OUT + 12 * i]);
+    }
+    let table = |cpu: &mut Cpu| cpu.read32(o + HEAD_AIM_AT);
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    cpu.call(SL_TRANSLATE, &[0, 0xffe5_0000, 0]);
+    let t = table(cpu);
+    let a = head_half(cpu, t + 12);
+    cpu.call(SL_ROT_X, &[a]);
+    head_put(cpu, o, 1);
+    cpu.call(SL_POP_MATRIX, &[]);
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    cpu.call(SL_TRANSLATE, &[0xffee_0000, 0, 0xffe2_0000]);
+    let a = head_half(cpu, o + HEAD_LEAN);
+    cpu.call(SL_ROT_Y, &[a]);
+    head_put(cpu, o, 2);
+    cpu.call(SL_POP_MATRIX, &[]);
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    cpu.call(SL_TRANSLATE, &[0x12_0000, 0, 0xffe2_0000]);
+    let a = head_half(cpu, o + HEAD_LEAN) as i32;
+    cpu.call(SL_ROT_Y, &[a.wrapping_neg() as i16 as i32 as u32]);
+    head_put(cpu, o, 3);
+    cpu.call(SL_POP_MATRIX, &[]);
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    let t = table(cpu);
+    let z = head_half(cpu, t + 4).wrapping_mul(0x80).wrapping_add(0xfff2_0000);
+    let y = head_half(cpu, t + 2).wrapping_mul(0x80).wrapping_add(0xfffb_0000);
+    cpu.call(SL_TRANSLATE, &[0, y, z]);
+    let a = head_half(cpu, o + HEAD_SPIN);
+    cpu.call(SL_ROT_Y, &[a.wrapping_add(a) as i16 as i32 as u32]);
+    head_put(cpu, o, 4);
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    for (turn, k) in [(0, 5), (0x5555, 6), (0xffff_aaaa, 7)] {
+        if turn != 0 {
+            cpu.call(SL_ROT_Y, &[turn]);
+        }
+        cpu.call(SL_TRANSLATE, &[0, 0x12_0000, 0xfff3_0000]);
+        let a = head_half(cpu, o + HEAD_ROLL);
+        cpu.call(SL_ROT_X, &[a]);
+        head_put(cpu, o, k);
+        cpu.call(SL_POP_MATRIX, &[]);
+        cpu.call(SL_PUSH_MATRIX, &[]);
+    }
+    let t = table(cpu);
+    let y = head_half(cpu, t + 8).wrapping_mul(0x80);
+    cpu.call(SL_TRANSLATE, &[0, y, 0x1_0000]);
+    head_put(cpu, o, 10);
+    cpu.call(SL_CALC_POINT, &[0, 0x10_0000, 0, o + HEAD_WORLD]);
+    if cpu.read32(o + HEAD_GLOW) != 0 {
+        let loops = cpu.read32(LOOPS);
+        let bits = if loops & 1 != 0 { 0x100 } else { 0 };
+        nested!(cpu, HEAD_FLIP_BITS, models::model_flip_bits(cpu, 1, 0, bits));
+        cpu.call(SL_TRANSLATE, &[0, 0x4_0000, 0]);
+        let loops = cpu.read32(LOOPS);
+        cpu.call(SL_ROT_Y, &[loops.wrapping_mul(0x840) as i16 as i32 as u32]);
+        cpu.call(SL_ROT_Z, &[0xffff_8000]);
+        let g = cpu.read32(o + HEAD_GLOW);
+        cpu.call(SL_SCALE, &[g, 0x1_8000, g]);
+        let a = cpu.read32(KINDS + 16);
+        let b = cpu.read32(a + 28);
+        let c = cpu.read32(b);
+        let m = cpu.read32(c);
+        cpu.call(SL_PUT_POLYGON, &[m]);
+    }
+    cpu.call(SL_POP_MATRIX, &[]);
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    cpu.call(SL_TRANSLATE, &[0, 0xffed_0000, 0xfff3_0000]);
+    let t = table(cpu);
+    let a = head_half(cpu, t + 10);
+    cpu.call(SL_ROT_X, &[a]);
+    head_put(cpu, o, 8);
+    cpu.call(SL_POP_MATRIX, &[]);
+    cpu.call(SL_PUSH_MATRIX, &[]);
+    cpu.call(SL_TRANSLATE, &[0, 0xffed_0000, 0xd_0000]);
+    let t = table(cpu);
+    let a = head_half(cpu, t + 10) as i32;
+    cpu.call(SL_ROT_X, &[a.wrapping_neg() as i16 as i32 as u32]);
+    head_put(cpu, o, 9);
+    cpu.call(SL_POP_MATRIX, &[]);
+    cpu.call(SL_POP_MATRIX, &[]);
+}
+
+/// A spark at the place kept at +0x154/+0x158, its scales the spark counter (+0x16c) plus
+/// a quarter of it for each of the game frame's low two bits, its kind flickering with the
+/// frame (-44 less its bit 0), a random turn, its colour the stage base plus 48 or 112 (frame
+/// bit 1).
+fn head_spark_draw(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, d));
+    let loops = cpu.read32(LOOPS);
+    if loops & 1 == 0 {
+        cpu.write32(d + S_FLAGS, 0x100);
+    }
+    let low = cpu.read8(LOOPS + 3) as u32;
+    cpu.write8(d + S_FRAME, (0u32.wrapping_sub(44).wrapping_sub(low & 1)) as u8);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    cpu.write16(d + S_TURN, r as u16);
+    cpu.write8(d + S_LIFT, 8);
+    cpu.write8(d + S_KIND, 0);
+    let base = cpu.read16(CHAR_BASE);
+    let colour = if cpu.read32(LOOPS) & 2 != 0 { base.wrapping_add(48) } else { base.wrapping_add(112) };
+    cpu.write16(d + S_COLOUR, colour);
+    let spark = cpu.read32(o + HEAD_SPARK) as i32;
+    let quarter = (if spark < 0 { spark + 3 } else { spark }) >> 2;
+    let scale = quarter.wrapping_mul((cpu.read32(LOOPS) & 3) as i32).wrapping_add(spark) as u32;
+    cpu.write32(d + S_SCALES, scale);
+    cpu.write32(d + S_SCALES + 4, scale);
+    let x = cpu.read32(o + HEAD_WORLD);
+    cpu.write32(d + S_POSITION, x);
+    let y = cpu.read32(o + HEAD_WORLD + 4);
+    cpu.write32(d + S_POSITION + 4, y);
+    cpu.write32(d + S_POSITION + 8, HEAD_SPARK_DRAW_SCALE);
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+}
+
+const HEAD_EXEC: u32 = 0x0604_d600;
+const HEAD_SIZE: u32 = 0x180;
+const HEAD_PARTS: u32 = 0x060a_ce08;
+const HEAD_MAKE_LIFE: u32 = 0xea60;
+const HEAD_ANCHORS: [(u32, u32); 3] = [(0xff80_0000, 0xff80_0000), (0xfe80_0000, 0xff00_0000), (0xfd80_0000, 0xfe80_0000)];
+
+/// Sets up the head (the object `o`, numbered `number`): its step (0x06096930), flags
+/// 0x80080000 and draw (0x06096a44), its number's place in the numbered objects, the words the
+/// moves keep cleared, the stage's score and rate cleared, its form 0xa0 and life 0xea60 with
+/// the parts of the table at 0x060ace08 (3 of them, their points at +0xfc), the camera's place
+/// cleared and the scene's anchors set from it, the stage scrolled on, the tilts, the pose
+/// (script 0x060acf78 over the angles at 0x060ace60), the tilt words cleared and the colour of
+/// model 1 set. The parts' arguments stay pushed, as in the SH-2 code.
+pub fn head_init(cpu: &mut Cpu, o: u32, number: u32) {
+    let number = number as i8 as i32 as u32;
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    cpu.write32(o + O_BEHAVIOUR, 0x0609_6930);
+    cpu.write32(o + O_FLAGS, 0x8008_0000);
+    cpu.write32(o + O_DRAW, 0x0609_6a44);
+    cpu.write8(o + O_NUMBER, number as u8);
+    let n = cpu.read8(o + O_NUMBER) as i8 as i32 as u32;
+    cpu.write32(NUMBERED.wrapping_add(n << 2), o);
+    for k in 0..3 {
+        cpu.write32(o + O_POSITION + 4 * k, 0);
+    }
+    cpu.write8(o + HEAD_ROUND, 0);
+    for at in [0xec, 0xee, 0xe2, 0xe4, 0xea, 0xe8, 0xf0] {
+        cpu.write16(o + at, 0);
+    }
+    cpu.write32(o + HEAD_K17C, 0);
+    cpu.write32(STAGE_RATE_AT, 0);
+    cpu.write32(STAGE_SCORE_AT, 0);
+    cpu.write16(o + HEAD_FORM, 0xa0);
+    cpu.write8(o + 0xf4, 0);
+    cpu.write32(o + HEAD_LIFE, HEAD_MAKE_LIFE);
+    let n = cpu.read8(o + O_NUMBER) as u32;
+    cpu.push(&[HEAD_PARTS, n]);
+    nested!(cpu, 0x0605_6ea4, parts::parts_set(cpu, 3, o + HEAD_POINTS_OUT, o + HEAD_FORM, o + HEAD_LIFE, HEAD_PARTS, n));
+    cpu.write8(o + LINKS_PHASE, 0);
+    for at in [CAM_X, CAM_Y, CAM_VX, CAM_VY] {
+        cpu.write32(o + at, 0);
+    }
+    let (x, y) = (cpu.read32(o + CAM_X), cpu.read32(o + CAM_Y));
+    for (k, (ax, ay)) in HEAD_ANCHORS.into_iter().enumerate() {
+        cpu.write32(WIN_ANCHOR + 12 * k as u32 + 4, x.wrapping_add(ax));
+        cpu.write32(WIN_ANCHOR + 12 * k as u32 + 8, y.wrapping_add(ay));
+    }
+    nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    cpu.write8(o + LINKS_ROUND, 0);
+    cpu.write32(o + CAM_DEPTH, 0);
+    cpu.write32(o + HEAD_GLOW, 0);
+    cpu.write32(o + HEAD_SPARK, 0);
+    cpu.write8(o + HEAD_COUNT, 0);
+    cpu.write16(o + FACE_TARGET, 0x8000);
+    cpu.write16(o + HEAD_TILT_A, 0xff80);
+    cpu.write16(o + HEAD_TILT_B, 0xff80);
+    cpu.write16(o + HEAD_TILT_C, 0xff00);
+    nested!(cpu, HEAD_IDLE, boss_idle_framed(cpu));
+    cpu.write16(o + 124, 8);
+    cpu.write32(o + HEAD_AIM_AT, o + 0x98);
+    cpu.write32(o + HEAD_AIM_AT + 4, o + 0xa8);
+    cpu.write32(o + HEAD_AIM_AT + 8, 0x060a_cf40);
+    nested!(cpu, 0x0605_65f0, models::pose_set(cpu, o + 108, 0x060a_ce60));
+    nested!(cpu, 0x0605_6628, actors::script_start(cpu, o + 108, 0x060a_cf78));
+    nested!(cpu, 0x0605_6644, models::pose_step(cpu, o + 108));
+    for at in [0xd0, 0xd2, 0xd4, 0xd6, 0xd8, 0xda, 0xdc, 0xde, 0xe0] {
+        cpu.write16(o + at, 0);
+    }
+    let colour = cpu.read16(CHAR_BASE).wrapping_add(48) as u32;
+    nested!(cpu, 0x0604_5b1c, models::model_colour(cpu, 1, 0, colour));
+}
+
+/// Makes the head: a free number in list 2, an object of 0x180 bytes of the exec 0x0604d600,
+/// set up (the number given); the number, or 0.
+pub fn head_spawn(cpu: &mut Cpu) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, 2)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, HEAD_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, HEAD_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0609_6fc0, head_init(cpu, o, n as i32 as u32));
+    n as i32 as u32
+}
+
+/// The angle toward the point `at` (x and y), 30 frames ahead (aim::angle_to_target of a stack
+/// description with the point at +20 and +24), as a halfword.
+pub fn head_aim_at(cpu: &mut Cpu, _from: u32, at: u32) -> u32 {
+    let d = cpu.stack();
+    let x = cpu.read32(at);
+    cpu.write32(d + 20, x);
+    let y = cpu.read32(at + 4);
+    cpu.write32(d + 24, y);
+    nested!(cpu, 0x0605_6ad4, aim::angle_to_target(cpu, d, 30)) & 0xffff
+}
+
+/// Whether the point `p` (its z moved by -0xb00000 meanwhile) is on the screen: SGL's convert of
+/// it to (x, y), within 0xbfffff of the middle across and 0x6fffff down; then that place is
+/// written at `out` and the result is 1 (else 0).
+pub fn head_on_screen(cpu: &mut Cpu, _from: u32, p: u32, out: u32) -> u32 {
+    let d = cpu.stack();
+    let z = cpu.read32(p + 8).wrapping_add(0xff50_0000);
+    cpu.write32(p + 8, z);
+    cpu.call(0x0606_750c, &[p, d]);
+    let z = cpu.read32(p + 8).wrapping_add(0x00b0_0000);
+    cpu.write32(p + 8, z);
+    let x = cpu.read32(d) as i32;
+    if x.wrapping_abs() > 0xbf_ffff {
+        return 0;
+    }
+    let y = cpu.read32(d + 4) as i32;
+    if y.wrapping_abs() > 0x6f_ffff {
+        return 0;
+    }
+    cpu.write32(out, x as u32);
+    cpu.write32(out + 4, y as u32);
+    1
+}
+
+/// The mean of a long's high word and the nine records' (24 bytes apart) high words, over ten,
+/// as a 16.16 value.
+fn head_mean(cpu: &mut Cpu, o: u32, first: u32, records: u32) -> u32 {
+    let high = |v: u32| {
+        let v = v as i32;
+        (v.wrapping_add(if v < 0 { 0xffff } else { 0 }) >> 16) as i16 as i32
+    };
+    let mut sum = high(cpu.read32(o + first));
+    for i in 0..9u32 {
+        sum = sum.wrapping_add(high(cpu.read32(o + records + 24 * i)));
+    }
+    nested!(cpu, 0x0600_6a78, math::quotient(cpu, sum as u32, 10)) << 16
+}
+
+/// The middle of the head's nine records (x then y; the longs at +0x13c and +0x140 count in), at
+/// `out`.
+pub fn head_centre(cpu: &mut Cpu, o: u32, out: u32) {
+    let x = head_mean(cpu, o, 0x13c, 0x728);
+    cpu.write32(out, x);
+    let y = head_mean(cpu, o, 0x140, 0x72c);
+    cpu.write32(out + 4, y);
+}
+
+/// A drifting piece's step: unless the bullet check (bullets::bullet_ends) ends it, a count (+0x8c)
+/// runs down and, while it lasts, the speeds +0x8e and +0x90 are added to the drift (+0x80,
+/// +0x84); the place moves by the drift, the scales (+0x20, +0x24) ease to 0x10000 by 0x1800 and
+/// the turn goes by 0x1000 a frame (the way the drift's x points). The sprite's lift (+0x33) flickers
+/// 126 and 8 with the game frame.
+pub fn head_shard_step(cpu: &mut Cpu, o: u32) {
+    let ended = nested!(cpu, 0x0605_3b10, bullets::bullet_ends(cpu, o, 0)) as u8;
+    if ended == 0 {
+        let count = cpu.read16(o + 0x8c) as i16;
+        if count > 0 {
+            cpu.write16(o + 0x8c, (count - 1) as u16);
+            let v = cpu.read32(o + 0x80).wrapping_add(cpu.read16(o + 0x8e) as i16 as i32 as u32);
+            cpu.write32(o + 0x80, v);
+            let v = cpu.read32(o + 0x84).wrapping_add(cpu.read16(o + 0x90) as i16 as i32 as u32);
+            cpu.write32(o + 0x84, v);
+        }
+        let x = cpu.read32(o + 20).wrapping_add(cpu.read32(o + 0x80));
+        cpu.write32(o + 20, x);
+        let y = cpu.read32(o + 24).wrapping_add(cpu.read32(o + 0x84));
+        cpu.write32(o + 24, y);
+        let a = cpu.read32(o + 32);
+        let a = nested!(cpu, 0x0604_6168, actors::approach(cpu, a, 0x1_0000, 0x1800));
+        cpu.write32(o + 32, a);
+        let b = cpu.read32(o + 36);
+        let b = nested!(cpu, 0x0604_6168, actors::approach(cpu, b, 0x1_0000, 0x1800));
+        cpu.write32(o + 36, b);
+        let step = if cpu.read32(o + 0x80) as i32 > 0 { 0xffff_f000 } else { 0x1000 };
+        let turn = (cpu.read16(o + 48) as i16 as i32 as u32).wrapping_add(step);
+        cpu.write16(o + 48, turn as u16);
+    }
+    let lift = if cpu.read32(GAME_FRAMES) & 1 == 0 { 126 } else { 8 };
+    cpu.write8(o + 51, lift);
+}
+
+const HEAD_SHARD_EXEC: u32 = 0x0604_d780;
+const HEAD_SHARD_SIZE: u32 = 0xbc;
+
+/// A shard of the head's break made at the place `p` (x, y; its number a byte at +30, its angle a
+/// halfword at +44): an object of 0xbc bytes (exec 0x0604d780, step 0x060973d0, flags 0x400,
+/// colour the base plus 64, script 0x060ad4a0), thrown along the angle (the sine and the cosine
+/// over 14, as the drift speeds +0x8e and +0x90) for 24 frames, its turn the angle plus 0x800 cut to
+/// the top four bits, scales 0x18000 and 0x2000.
+pub fn head_shard_make(cpu: &mut Cpu, p: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, HEAD_SHARD_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, HEAD_SHARD_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    let n = cpu.read8(p + 30);
+    cpu.write8(o + O_NUMBER, n);
+    cpu.write32(o + O_BEHAVIOUR, 0x0609_73d0);
+    cpu.write32(o + O_FLAGS, 0x400);
+    let x = cpu.read32(p);
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(p + 4);
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    cpu.write8(o + 51, 8);
+    cpu.write8(o + 47, 0xc9);
+    cpu.write8(o + 46, 0);
+    let c = cpu.read16(CHAR_BASE).wrapping_add(64);
+    cpu.write16(o + 42, c);
+    cpu.write16(o + 40, c);
+    cpu.write32(o + O_SCRIPT, 0x060a_d4a0);
+    cpu.write8(o + 84, 1);
+    cpu.write8(o + 85, 5);
+    let angle = (cpu.read16(p + 44) as i16 as i32 as u32).wrapping_add(0x800) & 0xffff_f000;
+    cpu.write16(o + 48, angle as u16);
+    cpu.write16(o + 0x8c, 24);
+    let a = cpu.read16(o + 48) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let v = nested!(cpu, 0x0600_6a78, math::quotient(cpu, sin, 14));
+    cpu.write16(o + 0x8e, v as u16);
+    let a = cpu.read16(o + 48) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let v = nested!(cpu, 0x0600_6a78, math::quotient(cpu, cos.wrapping_neg(), 14));
+    cpu.write16(o + 0x90, v as u16);
+    cpu.write32(o + 32, 0x1_8000);
+    cpu.write32(o + 36, 0x2000);
+}
+
+/// A spark's step: unless the bullet check ends it, the place moves by the drift (+0x80, +0x84)
+/// and, on odd game frames, the frame (+0x2f) counts to 10 and starts over.
+pub fn head_spark_step(cpu: &mut Cpu, o: u32) {
+    let ended = nested!(cpu, 0x0605_3b10, bullets::bullet_ends(cpu, o, 0)) as u8;
+    if ended != 0 {
+        return;
+    }
+    let x = cpu.read32(o + 20).wrapping_add(cpu.read32(o + 0x80));
+    cpu.write32(o + 20, x);
+    let y = cpu.read32(o + 24).wrapping_add(cpu.read32(o + 0x84));
+    cpu.write32(o + 24, y);
+    if cpu.read32(GAME_FRAMES) & 1 != 0 {
+        let f = cpu.read8(o + 47).wrapping_add(1);
+        cpu.write8(o + 47, f);
+        if f > 10 {
+            cpu.write8(o + 47, 0);
+        }
+    }
+}
+
+/// A spark made at the place `p` (as the shard, but the drift is the angle's sine and cosine times
+/// the speed at +48, the frame 0, the lift 7, the kind 69, the colour the base plus 80, the
+/// script 0x060ad4a8, the step 0x060975e4 and the flags 0x410).
+pub fn head_spark_make(cpu: &mut Cpu, p: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, HEAD_SHARD_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, HEAD_SHARD_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    let n = cpu.read8(p + 30);
+    cpu.write8(o + O_NUMBER, n);
+    cpu.write32(o + O_BEHAVIOUR, 0x0609_75e4);
+    cpu.write32(o + O_FLAGS, 0x410);
+    let x = cpu.read32(p);
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(p + 4);
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    cpu.write8(o + 51, 7);
+    cpu.write8(o + 47, 0);
+    cpu.write8(o + 46, 69);
+    let c = cpu.read16(CHAR_BASE).wrapping_add(80);
+    cpu.write16(o + 42, c);
+    cpu.write16(o + 40, c);
+    cpu.write32(o + O_SCRIPT, 0x060a_d4a8);
+    cpu.write8(o + 84, 1);
+    cpu.write8(o + 85, 5);
+    let speed = cpu.read32(p + 48);
+    let a = cpu.read16(p + 44) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let v = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, sin, speed));
+    cpu.write32(o + 0x80, v);
+    let speed = cpu.read32(p + 48);
+    let a = cpu.read16(p + 44) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let v = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, cos.wrapping_neg(), speed));
+    cpu.write32(o + 0x84, v);
+}
+
+const HEAD_FIRE_POINTS: u32 = 0xce8;
+const HEAD_FIRE_STEPS: u32 = 0x060a_d4b0;
+
+/// Fire from the head's nine places (the longs at +0x6f8 live, +0x128 plus four a place counted
+/// against the difficulty's period): a description on the stack (the head's number, z 0, kind 2,
+/// speed 0x12000) with the place's world point (two records of 12 bytes at +0xce8 + 24 a place,
+/// one picked at random) when it is on the screen and its angle toward the players, a spark or
+/// a shot by chance.
+pub fn head_fire(cpu: &mut Cpu, p: u32) {
+    let d = cpu.stack();
+    for i in 0..9u32 {
+        if (cpu.read32(p + 4 * i + 0x6f8) as i32) <= 0 {
+            continue;
+        }
+        let level = cpu.read8(DIFFICULTY_AT) as i8 as i32 as u32;
+        let period = cpu.read8(HEAD_FIRE_STEPS.wrapping_add(level)) as u32;
+        let counter = cpu.read32(p + 0x128).wrapping_add(4 * i);
+        if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, counter, period)) != 0 {
+            continue;
+        }
+        let n = cpu.read8(p + 50);
+        cpu.write8(d + 30, n);
+        cpu.write32(d + 8, 0);
+        cpu.write16(d + 46, 2);
+        cpu.write32(d + 48, 0x1_2000);
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+        let at = p + 24 * i + HEAD_FIRE_POINTS + if r & 64 != 0 { 12 } else { 0 };
+        if nested!(cpu, 0x0609_72a8, head_on_screen(cpu, p, at, d)) as u8 == 0 {
+            continue;
+        }
+        let angle = nested!(cpu, 0x0609_7280, head_aim_at(cpu, p, at));
+        cpu.write16(d + 44, angle as u16);
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+        if r & 1 != 0 {
+            nested!(cpu, 0x0609_74b0, head_shard_make(cpu, d));
+        } else {
+            nested!(cpu, 0x0605_3db0, bullets::bullet_set(cpu, d));
+        }
+    }
+}
