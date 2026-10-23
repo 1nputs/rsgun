@@ -264,7 +264,6 @@ fn boot_program(ram: &mut Ram, cart: &[u8], eeprom: &[u8; 128], backup: &[u8]) {
     ram.w8(0x0600_2CC9, bit);
     ram.w32(0x0600_2CCC, 0x24);
     ram.w32(0x0600_2CD0, 0x0D);
-    leftovers(ram);
     // the boot program's data after the game: copied from the BIOS ROM (0x066000), zeros after
     let data = ram.bios[0x6_6000..0x7_0000].to_vec();
     ram.bytes(0x060F_0000, &data);
@@ -320,30 +319,6 @@ fn backup_boot(backup: &mut [u8], eeprom: &[u8; 128]) {
                 backup[at + copy + 2] = lo;
             }
         }
-    }
-}
-
-/// What the BIOS leaves that nothing reads (docs/HANDOFF.md, "What does not matter"): the boot
-/// program's variables inside the game's image (0x06041aa0-0x06041b28; the game's `.bss` is
-/// there, cleared by its `main`) and the stack below the master's r15 (0x06100000): an interrupt's
-/// register frame and the loader's calls. Kept so that the state is byte for byte the BIOS's.
-fn leftovers(ram: &mut Ram) {
-    ram.fill(0x0604_1AA0, 0x88, 0);
-    for a in (0x0604_1AD4..0x0604_1AE0).step_by(4).chain((0x0604_1B14..0x0604_1B20).step_by(4)) {
-        ram.w32(a, u32::from_be_bytes(SEGA));
-    }
-    for (a, v) in [(0x0604_1AA4, 0x40), (0x0604_1AE4, 0x9_E520), (0x0604_1AFC, 0xFFFF_FFF8), (0x0604_1B24, 0x9_E4E0)] {
-        ram.w32(a, v);
-    }
-    const STACK: [u32; 51] = [
-        0x060f_ff40, 0, 0, 0x0600_2cc8, 0x2b, 0x0601_547e, 0x060f_ff58, 0, 0x060f_ff60, 0, 0x060f_ff68, 0, 0x14b6,
-        0x1458, 0x1_0000, 1, 1, 0x0600_081d, 0x0600_12ca, 0x0c00_0c3e, 0x0600_0c3e, 0x14b6, 0x0600_2030, 0x060f_ff9c,
-        0, 0, 0, 0, 0, 0, 0x0600_081d, 0x0600_12ca, 0x0c00_0c3e, 0x0600_0c3e, 0, 0x0600_2030, 0, 0xffff_fe00, 0x4516,
-        0x0600_4000, 0x50d, 0x222b_6bd0, 0x0603_abcc, 0xffff_7ffe, 0x0600_0254, 0x0600_40ec, 0x2220_0000, 0, 0x4550,
-        0, 0x4516,
-    ];
-    for (i, v) in STACK.into_iter().enumerate() {
-        ram.w32(0x060F_FF34 + 4 * i as u32, v);
     }
 }
 
@@ -442,22 +417,53 @@ fn sound_ram(m: &mut Machine) {
     for h in ram[0x2_0000..0x4_0000].as_chunks_mut::<2>().0 {
         *h = 0x6000u16.to_be_bytes();
     }
+    sound_driver_start(m);
+}
+
+/// What the BIOS's sound-driver load (ROM 0x1124: after the copies above, the main CPU's commands
+/// from the line the 68000 is released) does to the sound side, line by line as the machine runs
+/// it: the sound CPU is reset at line 0 of this list, the SCSP's sample clock is where the real
+/// boot had it then, and the main CPU's writes to the driver's mailbox (sound RAM 0x700, the
+/// functions at ROM 0x149a, 0x1502, 0x12f2-0x1330, 0x141c-0x142a) and its command queue
+/// (0x504, 0x514, 0x51c: ROM 0x3ffc-0x400c) come at the lines the real boot made them. Run to the
+/// instant before line [`SOUND_LINES`], the 68000 is where it is at the handover.
+fn sound_driver_start(m: &mut Machine) {
+    // the clock's phase at the release (the real boot's, a run dependent constant)
+    m.sys.set_sound_phase(28_542_268, 156);
     m.sys.start_sound_cpu();
-    // the driver sets itself up in its first few thousand steps (the BIOS waits for it)
-    let (mut in_sample, sys) = (0u32, &mut *m.sys);
-    for _ in 0..SOUND_PREROLL {
-        sys.m68k.ipl = sys.scsp.ipl();
-        let mut bus = stv::scsp::SoundBus { scsp: &mut sys.scsp };
-        in_sample += sys.m68k.step(&mut bus).max(4);
-        if in_sample >= 256 {
-            in_sample -= 256;
-            sys.scsp.sample();
+    // (line, address, value, size in bytes)
+    const WRITES: [(u32, u32, u32, u8); 15] = [
+        (0, 0x700, 0x0c00, 2),
+        (101, 0x700, 0x0d00, 2),
+        (199, 0x702, 0, 1),
+        (199, 0x700, 0x0800, 2),
+        (218, 0x702, 0, 1),
+        (218, 0x700, 0x0800, 2),
+        (239, 0x702, 0, 1),
+        (239, 0x703, 0, 1),
+        (239, 0x700, 0x8700, 2),
+        (239, 0x504, 0x8001, 2),
+        (239, 0x506, 0, 2),
+        (239, 0x514, 0x8001, 2),
+        (239, 0x516, 0, 2),
+        (239, 0x51c, 0x8001, 2),
+        (239, 0x51e, 0, 2),
+    ];
+    let per_line = m.sys.cycles_per_line();
+    for line in 0..SOUND_LINES {
+        for &(_, addr, v, size) in WRITES.iter().filter(|w| w.0 == line) {
+            match size {
+                1 => m.sys.ext_write8(0x05A0_0000 + addr, v as u8),
+                _ => m.sys.ext_write16(0x05A0_0000 + addr, v as u16),
+            }
         }
+        m.sys.run_sound(per_line);
     }
 }
 
-/// How many 68000 steps the native boot runs the sound driver before the game starts.
-const SOUND_PREROLL: u32 = 50_000;
+/// The lines the real boot runs the sound CPU before the handover: from frame 1157 line 173 to
+/// frame 1159 line 227.
+const SOUND_LINES: u32 = 263 - 173 + 263 + 228;
 
 /// What the BIOS's loader (ROM 0x4500-0x4550) leaves in the master's registers.
 struct Loader {
@@ -609,6 +615,28 @@ fn extents(a: &[u8], b: &[u8], gap: usize) -> Vec<(usize, usize)> {
     out
 }
 
+/// Never-read leftovers of the BIOS's boot that the native boot does not make (docs/HANDOFF.md,
+/// "What does not matter": play1 to frame 4000 from a state with each zeroed gives the same pictures
+/// and sound): (name, start, end, what it is). The check lists their differences as ignored.
+const IGNORED_RAM_H: [(&str, u32, u32); 2] = [
+    ("the boot program's variables inside the game's .bss (cleared by its main)", 0x0604_1AA0, 0x0604_1B28),
+    ("the boot program's stack residue below the master's r15", 0x060F_FF34, 0x0610_0000),
+];
+
+/// Like [`cmp_mem`], with the `ignored` ranges (absolute addresses; what each is) compared apart: their
+/// differences are listed and not counted.
+fn cmp_mem_ignoring(name: &str, base: u32, native: &[u8], reference: &[u8], show: usize, ignored: &[(&str, u32, u32)]) -> usize {
+    let (mut n, mut r) = (native.to_vec(), reference.to_vec());
+    for &(what, s, e) in ignored {
+        let (s, e) = ((s - base) as usize, (e - base) as usize);
+        let d = n[s..e].iter().zip(&r[s..e]).filter(|(a, b)| a != b).count();
+        println!("{name}: ignored {:#x}-{:#x} ({what}): {d:#x} of {:#x} bytes differ", s as u32 + base, e as u32 + base, e - s);
+        n[s..e].fill(0);
+        r[s..e].fill(0);
+    }
+    cmp_mem(name, base, &n, &r, show)
+}
+
 /// Compares a memory; prints the extents; returns the number of bytes that differ.
 fn cmp_mem(name: &str, base: u32, native: &[u8], reference: &[u8], show: usize) -> usize {
     let n = native.iter().zip(reference).filter(|(a, b)| a != b).count();
@@ -698,16 +726,38 @@ fn cmp_scalars(name: &str, native: &[(&str, u64)], reference: &[(&str, u64)]) ->
     d.len()
 }
 
-/// Compares a part's saved bytes.
-fn cmp_saved(name: &str, native: &dyn State, reference: &dyn State) -> usize {
+/// What the earlier loads of the BIOS's sound driver left in the SCSP's engine and the native boot
+/// does not make, as (start, end, what) in the saved bytes of [`Rest`]: the sound CPU, the RAM and
+/// the registers are equal; no slot sounds in either; a slot that is keyed on starts afresh. The
+/// run from the native boot gives the same sound as from the reference (docs/HANDOFF.md).
+const IGNORED_SCSP: [(usize, usize, &str); 4] = [
+    (0x288, 0x2a0, "one inactive slot's phase and envelope"),
+    (0x309, 0x389, "the sound stack (the slots' last outputs)"),
+    (0xa51, 0xad1, "the DSP's MEMS"),
+    (0xad1, 0xb15, "the DSP's MIXS and the rest"),
+];
+
+/// Compares a part's saved bytes, the `ignored` ranges apart (listed with their number of differing
+/// bytes, not counted).
+fn cmp_saved(name: &str, native: &dyn State, reference: &dyn State, ignored: &[(usize, usize, &str)]) -> usize {
     let (mut a, mut b) = (Vec::new(), Vec::new());
     native.save(&mut a);
     reference.save(&mut b);
+    for &(s, e, what) in ignored {
+        let d = a[s..e].iter().zip(&b[s..e]).filter(|(x, y)| x != y).count();
+        println!("{name}: ignored {s:#x}-{e:#x} ({what}): {d} of {} bytes differ", e - s);
+        a[s..e].fill(0);
+        b[s..e].fill(0);
+    }
     let n = if a.len() == b.len() { extents(&a, &b, 1).len() } else { usize::MAX };
     if n == 0 {
         println!("{name}: equal ({} bytes saved)", a.len());
     } else {
         println!("{name}: differs ({} extents of {} saved bytes)", n, a.len());
+        for (s, e) in extents(&a, &b, 1).into_iter().take(12) {
+            let end = (s + 10).min(e);
+            println!("  {s:#x}-{e:#x}  {} / {}", hex(&a[s..end]), hex(&b[s..end]));
+        }
     }
     n
 }
@@ -723,7 +773,7 @@ pub fn check(entry_state: &[u8], img: &Inputs, show: usize) -> Result<usize, Str
     let mut bad = 0;
     let mut part = |d: usize| bad += usize::from(d > 0);
     println!("== work RAM, backup RAM");
-    part(cmp_mem("work RAM-H", RAM_H, &n.wram_h, &r.wram_h, show));
+    part(cmp_mem_ignoring("work RAM-H", RAM_H, &n.wram_h, &r.wram_h, show, &IGNORED_RAM_H));
     part(cmp_mem("work RAM-L", RAM_L, &n.wram_l, &r.wram_l, show));
     part(cmp_mem("backup RAM", 0, &n.backup, &r.backup, show));
     println!("== CPUs");
@@ -748,11 +798,13 @@ pub fn check(entry_state: &[u8], img: &Inputs, show: usize) -> Result<usize, Str
     let vdp2 = |v: &stv::video::Vdp2| vec![("vblank", v.vblank as u64), ("hblank", v.hblank.into()), ("odd", v.odd.into())];
     part(cmp_scalars("vdp1 registers", &vdp1(&n.vdp1), &vdp1(&r.vdp1)));
     part(cmp_scalars("vdp2 flags", &vdp2(&n.vdp2), &vdp2(&r.vdp2)));
-    part(cmp_saved("scsp (all but RAM: slots, DSP, timers)", &Rest(&n.scsp), &Rest(&r.scsp)));
+    part(cmp_saved("scsp (all but RAM: slots, DSP, timers)", &Rest(&n.scsp), &Rest(&r.scsp), &IGNORED_SCSP));
+    println!("sounding slots native:\n{}reference:\n{}", native.sys.scsp.describe_slots(), reference.sys.scsp.describe_slots());
     part(cmp_debug("m68k", &n.m68k, &r.m68k, show));
     println!("== machine");
-    let sys = |s: &stv::machine::Sys| vec![("sound_on", s.sound_on as u64), ("slave_on", s.slave_on.into()), ("clock352", s.clock352.into()), ("line", s.line.into()), ("frame", s.frame), ("sound_steps", s.sound_steps)];
+    let sys = |s: &stv::machine::Sys| vec![("sound_on", s.sound_on as u64), ("slave_on", s.slave_on.into()), ("clock352", s.clock352.into()), ("line", s.line.into()), ("frame", s.frame)];
     part(cmp_scalars("system", &sys(n), &sys(r)));
+    println!("(not compared: sound_steps, a statistic: {} / {})", n.sound_steps, r.sound_steps);
     println!("{bad} parts differ");
     Ok(bad)
 }
