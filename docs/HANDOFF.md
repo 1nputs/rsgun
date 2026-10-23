@@ -591,8 +591,9 @@ start reach the Trial Ride tutorial with the ship moving and firing. Gameplay fr
    delay slots).
    **The overlay loop** (since 21 October; about 25 functions an hour). In address order, a
    function at a time: its disassembly from `build/dis/FINGERPRINT.dis` (tools/setup_debian.sh
-   makes it: `tools/rom/dis.py out/evidence/marathon-end.overlays/FP.bin 0 06080000 75776`; skip the
-   `nop` lines but mind delay slots), Ghidra's draft beside it, tables (jump tables, step
+   makes it: `tools/rom/dis.py out/evidence/marathon-end.overlays/FP.bin 0 06080000 75776`; keep the
+   `nop` lines: a jsr's delay slot is often a nop, and the next instruction shown then runs after
+   the call), Ghidra's draft beside it, tables (jump tables, step
    tables) read from the overlay image with a few lines of Python (the image is the window from
    0x06080000). The list of an overlay's functions: `grep -o "fn f_[0-9a-f]*_FP"
    build/port/generated.rs`; a function's callers: `grep "= ADDR" build/dis/FP.dis` (a function
