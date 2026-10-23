@@ -9,6 +9,20 @@
 //! runs the rest of the system before going on with it; interrupts are taken there too, between
 //! blocks.
 //!
+//! Natives may be registered anywhere the CPU executes: work RAM-H (cache mirrors folded) and the
+//! BIOS ROM (0x00000000-0x0007FFFF, and its cache-through mirror). Code in RAM can be overwritten
+//! and a native then stands in for code that is gone: only the overlay window is watched (below);
+//! the client registers RAM natives for code that stays where it was put. ROM cannot change.
+//!
+//! An exception entry (`Native::exception`, registered through [`Natives::register_exception`]) is
+//! a native for the code at a vector's target: it is entered as the CPU takes an interrupt or an
+//! exception there (SR then PC already pushed by the hardware) and ends as the SH-2 code does, with
+//! [`rte`] (PC and SR back from that stack), not at PR. Its function calls `rte` itself, so it ends
+//! right whether the machine entered it, or native code that took an interrupt ran it
+//! ([`tick`]), or the interpreter did. Compare mode takes its return from the stack the exception
+//! pushed (the PC saved and the stack pointer above it) and checks the registers it leaves, SR and
+//! PC among them, as for other natives.
+//!
 //! A game's overlay window (stv::evidence::Overlay, as the client gives it) holds different code
 //! from mode to mode: a function there is registered for the code it belongs to, by the window's
 //! fingerprint as that code was loaded, or by the name the client gives that code (`Natives::namer`,
@@ -28,6 +42,8 @@ pub struct Native {
     /// For code in the overlay window: the window's code the function belongs to.
     pub overlay: Option<OverlayCode>,
     pub contract: Contract,
+    /// An exception entry: entered as the CPU takes an exception, ends with [`rte`].
+    pub exception: bool,
 }
 
 /// The client's namer for the overlay window's code: given work RAM-H, the name of what the game
@@ -94,11 +110,30 @@ pub struct Natives {
     pub interpreted_by: HashMap<u32, (u64, u64)>,
 }
 
-/// Folds the cache mirrors: the address as work RAM-H's offset, if it is in work RAM-H.
+/// The size of the space natives are keyed in: work RAM-H's 1 MB, then the BIOS ROM's 512 KB.
+const CODE_SPACE: u32 = 0x18_0000;
+/// Where the BIOS ROM's offsets start in that space.
+const ROM_BASE: u32 = 0x10_0000;
+const ROM_SIZE: u32 = 0x8_0000;
+
+/// Folds the cache mirrors: the address as an offset in the code space (work RAM-H's, or the BIOS
+/// ROM's from ROM_BASE), if it is in either.
 #[inline]
-fn wram_h_offset(a: u32) -> Option<u32> {
+fn code_offset(a: u32) -> Option<u32> {
     let p = a & 0x07FF_FFFF;
-    (0x0600_0000..0x0800_0000).contains(&p).then_some(p & 0xF_FFFF)
+    if (0x0600_0000..0x0800_0000).contains(&p) {
+        Some(p & 0xF_FFFF)
+    } else if p < ROM_SIZE {
+        Some(ROM_BASE + p)
+    } else {
+        None
+    }
+}
+
+/// Whether an offset in the code space is work RAM-H's.
+#[inline]
+fn is_ram(off: u32) -> bool {
+    off < ROM_BASE
 }
 
 impl Natives {
@@ -111,19 +146,25 @@ impl Natives {
     /// Registers a native function with its contract, in place of what was registered at `addr` for
     /// the same overlay.
     pub fn register_as(&mut self, addr: u32, f: NativeFn, name: &'static str, overlay: Option<u64>, contract: Contract) {
-        self.add(addr, Native { f, name, overlay: overlay.map(OverlayCode::Print), contract });
+        self.add(addr, Native { f, name, overlay: overlay.map(OverlayCode::Print), contract, exception: false });
     }
 
     /// Registers a native function for the overlay window's code the client names `overlay`, in
     /// place of what was registered at `addr` for that name.
     pub fn register_in(&mut self, overlay: &'static str, addr: u32, f: NativeFn, name: &'static str, contract: Contract) {
-        self.add(addr, Native { f, name, overlay: Some(OverlayCode::Named(overlay)), contract });
+        self.add(addr, Native { f, name, overlay: Some(OverlayCode::Named(overlay)), contract, exception: false });
+    }
+
+    /// Registers a native function for the code at an exception's entry (a vector's target, in work
+    /// RAM-H or the ROM) with its contract: it must end with [`rte`].
+    pub fn register_exception(&mut self, addr: u32, f: NativeFn, name: &'static str, contract: Contract) {
+        self.add(addr, Native { f, name, overlay: None, contract, exception: true });
     }
 
     fn add(&mut self, addr: u32, native: Native) {
-        let Some(off) = wram_h_offset(addr) else { panic!("{}: native code must be in work RAM-H", native.name) };
+        let Some(off) = code_offset(addr) else { panic!("{}: native code must be in work RAM-H or the BIOS ROM", native.name) };
         if self.entries.is_empty() {
-            self.entries = vec![0; 0x10_0000 / 2 / 64];
+            self.entries = vec![0; CODE_SPACE as usize / 2 / 64];
         }
         let i = (off >> 1) as usize;
         self.entries[i / 64] |= 1 << (i % 64);
@@ -139,7 +180,7 @@ impl Natives {
 
     /// The name of a function registered at `addr` (any of them, for overlay code).
     pub fn name(&self, addr: u32) -> &'static str {
-        wram_h_offset(addr).and_then(|off| self.map.get(&off)).and_then(|l| l.first()).map_or("", |n| n.name)
+        code_offset(addr).and_then(|off| self.map.get(&off)).and_then(|l| l.first()).map_or("", |n| n.name)
     }
 
     pub fn len(&self) -> usize {
@@ -153,7 +194,7 @@ impl Natives {
     /// Whether a function may start here (the quick test before `get`).
     #[inline]
     pub fn maybe(&self, pc: u32) -> bool {
-        match wram_h_offset(pc) {
+        match code_offset(pc) {
             Some(off) if !self.entries.is_empty() => {
                 let i = (off >> 1) as usize;
                 self.entries[i / 64] >> (i % 64) & 1 != 0
@@ -168,9 +209,9 @@ impl Natives {
         if !self.maybe(pc) {
             return None;
         }
-        let off = wram_h_offset(pc)?;
+        let off = code_offset(pc)?;
         let list = self.map.get(&off)?;
-        let Some(o) = self.overlay.as_ref().filter(|o| o.holds(0x0600_0000 | off)) else {
+        let Some(o) = self.overlay.as_ref().filter(|o| is_ram(off) && o.holds(0x0600_0000 | off)) else {
             return list.first().copied();
         };
         let fp = *self.overlay_now.get_or_insert_with(|| o.fingerprint(wram_h));
@@ -199,6 +240,15 @@ pub fn call(cpu: &mut Sh2, bus: &mut dyn Bus, target: u32) {
         Some(f) => f(cpu, bus),
         None => interpret_call(cpu, bus, target),
     }
+}
+
+/// Ends an exception entry as the SH-2 code does with `rte`: PC and SR back from the stack the
+/// exception pushed (PC at the stack pointer, SR above it).
+pub fn rte(cpu: &mut Sh2, bus: &mut dyn Bus) {
+    cpu.pc = bus.read32(cpu.r[15]);
+    cpu.r[15] = cpu.r[15].wrapping_add(4);
+    cpu.sr = bus.read32(cpu.r[15]) & crate::sh2::SR_MASK;
+    cpu.r[15] = cpu.r[15].wrapping_add(4);
 }
 
 /// The PC an interrupt taken in native code saves (odd: no code is there); the handler's RTE comes
@@ -260,5 +310,82 @@ fn run_until(cpu: &mut Sh2, bus: &mut dyn Bus, ret: u32, sp: u32) {
         if cpu.pc == ret && cpu.r[15] == sp && cpu.delay.is_none() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nop(_: &mut Sh2, _: &mut dyn Bus) {}
+
+    /// 1 KB of RAM, mirrored, for the stack.
+    struct Mem(Vec<u8>);
+    impl Bus for Mem {
+        fn read8(&mut self, a: u32) -> u8 {
+            self.0[a as usize & 0x3ff]
+        }
+        fn read16(&mut self, a: u32) -> u16 {
+            u16::from_be_bytes([self.read8(a), self.read8(a + 1)])
+        }
+        fn read32(&mut self, a: u32) -> u32 {
+            (self.read16(a) as u32) << 16 | self.read16(a + 2) as u32
+        }
+        fn write8(&mut self, a: u32, v: u8) {
+            self.0[a as usize & 0x3ff] = v;
+        }
+        fn write16(&mut self, a: u32, v: u16) {
+            self.write8(a, (v >> 8) as u8);
+            self.write8(a + 1, v as u8);
+        }
+        fn write32(&mut self, a: u32, v: u32) {
+            self.write16(a, (v >> 16) as u16);
+            self.write16(a + 2, v as u16);
+        }
+        fn fetch16(&mut self, a: u32) -> u16 {
+            self.read16(a)
+        }
+    }
+
+    #[test]
+    fn natives_in_rom_and_ram_with_mirrors() {
+        let mut n = Natives::default();
+        n.register(0x0000_0efc, nop, "rom", None);
+        n.register(0x0600_1f48, nop, "ram", None);
+        assert!(n.maybe(0x0000_0efc) && n.maybe(0x2000_0efc));
+        assert!(n.maybe(0x0600_1f48) && n.maybe(0x2600_1f48) && n.maybe(0x0610_1f48));
+        assert!(!n.maybe(0x0000_0efe) && !n.maybe(0x0600_1f4a));
+        // a RAM address and the ROM address with the same low bits are different entries
+        assert!(!n.maybe(0x0000_1f48) && !n.maybe(0x0600_0efc));
+        assert_eq!(n.name(0x0000_0efc), "rom");
+        assert_eq!(n.get(0x0000_0efc, &[]).map(|x| x.name), Some("rom"));
+        assert_eq!(n.get(0x0600_1f48, &[]).map(|x| x.name), Some("ram"));
+        assert!(n.get(0x0008_0000, &[]).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "native code must be in")]
+    fn natives_outside_code_refused() {
+        Natives::default().register(0x0020_0000, nop, "cart", None);
+    }
+
+    #[test]
+    fn exception_entries_are_marked() {
+        let mut n = Natives::default();
+        n.register_exception(0x0600_1f48, nop, "stub", Contract::Keeps(0xffff));
+        n.register(0x0600_1f50, nop, "plain", None);
+        assert!(n.get(0x0600_1f48, &[]).unwrap().exception);
+        assert!(!n.get(0x0600_1f50, &[]).unwrap().exception);
+    }
+
+    #[test]
+    fn rte_pops_pc_then_sr() {
+        let mut mem = Mem(vec![0; 0x400]);
+        mem.write32(0x100, 0x0600_1234);
+        mem.write32(0x104, 0xffff_f0f3);
+        let mut cpu = Sh2::default();
+        cpu.r[15] = 0x100;
+        rte(&mut cpu, &mut mem);
+        assert_eq!((cpu.pc, cpu.r[15], cpu.sr), (0x0600_1234, 0x108, 0xf3));
     }
 }

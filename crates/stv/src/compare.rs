@@ -107,8 +107,16 @@ impl Compare {
 
     /// CPU `c` reached a function the port has: its call is logged from here (`log`: the CPU's
     /// accesses so far).
-    pub fn enter(&mut self, c: usize, entry: u32, name: &'static str, contract: Contract, cpu: &Sh2, log: &[Access]) {
-        let (ret, sp) = self.taken[c].take().unwrap_or((cpu.pr, cpu.r[15]));
+    ///
+    /// An exception entry (`saved_pc`: the PC the exception pushed, at the stack pointer) returns by
+    /// RTE: to that PC with the stack above the two words pushed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn enter(&mut self, c: usize, entry: u32, name: &'static str, contract: Contract, cpu: &Sh2, log: &[Access], saved_pc: Option<u32>) {
+        let taken = self.taken[c].take();
+        let (ret, sp) = match saved_pc {
+            Some(pc) => (pc, cpu.r[15].wrapping_add(8)),
+            None => taken.unwrap_or((cpu.pr, cpu.r[15])),
+        };
         let relaxed = contract != Contract::Exact;
         if relaxed {
             for k in &mut self.calls[c] {

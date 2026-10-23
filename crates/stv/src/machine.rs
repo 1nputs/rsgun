@@ -1436,7 +1436,8 @@ impl Machine {
             if let Some(cmp) = &mut self.compare {
                 // the SH-2 code runs; the call is logged to be checked when it returns
                 if let Some(n) = self.sys.natives.get(cpu.pc, &self.sys.wram_h) {
-                    cmp.enter(c, cpu.pc, n.name, n.contract, cpu, &self.sys.access_log[c]);
+                    let saved_pc = n.exception.then(|| self.sys.cpu_read32(c, cpu.r[15]));
+                    cmp.enter(c, cpu.pc, n.name, n.contract, cpu, &self.sys.access_log[c], saved_pc);
                     self.sys.logging[c] = true;
                 }
             } else if let Some(f) = bus.native_at(cpu.pc) {
