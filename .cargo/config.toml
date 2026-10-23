@@ -1,0 +1,4 @@
+# rustc's own stack for the large `rewrites!` blocks in crates/rsgun/src/game/mod.rs: with the
+# default 8 MB it can crash (SIGSEGV) expanding them.
+[env]
+RUST_MIN_STACK = "268435456"
