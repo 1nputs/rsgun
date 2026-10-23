@@ -991,6 +991,13 @@ fn turn_struct(cpu: &mut Cpu, obj: u32, t: u32) {
     cpu.write16(t + 0x18, angle);
 }
 
+/// register_boxes' frame locals, from its bottom.
+const LOCAL_INDEX: u32 = 0x40;
+const LOCAL_REGISTERED: u32 = 0x44;
+const LOCAL_DESC_4: u32 = 0x48;
+const LOCAL_DESC_2: u32 = 0x4c;
+const LOCAL_FIXED_MUL: u32 = 0x50;
+
 /// Registers `obj`'s boxes in the hit manager's lists (those on screen, while the lists have
 /// room): 1, or (none registered) -5; -1 without a manager, -2 with NO_HITS, -3 without boxes, -4
 /// with an empty hit set.
@@ -1013,6 +1020,13 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
     let t = cpu.stack();
     let mut registered = 0i8;
     let mut index = 0i8;
+    // The SH-2 code keeps its loop's variables in the frame, where later code (a spawn reading a
+    // field its caller never set) finds them: the index, the number registered, the box's
+    // places +4 and +2, and fixed_mul's address.
+    cpu.write32(t + LOCAL_INDEX, 0);
+    cpu.write32(t + LOCAL_REGISTERED, 0);
+    cpu.write32(t + LOCAL_DESC_4, desc + 4);
+    cpu.write32(t + LOCAL_DESC_2, desc + 2);
     loop {
         let (list, most) = box_list(cpu, obj, desc);
         let hits = cpu.read32(HITS);
@@ -1047,6 +1061,7 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
         let e = entry(cpu);
         let y = cpu.read32(obj + POSITION + 4).wrapping_add(dy);
         cpu.write16(e + Y, pixels(y));
+        cpu.write32(t + LOCAL_FIXED_MUL, 0x0600_6a58);
         for (k, scale) in [(6, OBJ_SCALE_X), (7, OBJ_SCALE_Y)] {
             let half = cpu.read8(desc + k) as u32;
             let s = cpu.read32(obj + scale);
@@ -1104,12 +1119,16 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
             let n = cpu.read16(count).wrapping_add(1);
             cpu.write16(count, n);
             registered = registered.wrapping_add(1);
+            cpu.write32(t + LOCAL_REGISTERED, registered as i32 as u32);
         }
         if cpu.read8(desc) & LAST_BOX != 0 {
             break;
         }
         desc += 8;
+        cpu.write32(t + LOCAL_DESC_4, desc + 4);
+        cpu.write32(t + LOCAL_DESC_2, desc + 2);
         index = index.wrapping_add(1);
+        cpu.write32(t + LOCAL_INDEX, index as i32 as u32);
     }
     if registered == 0 {
         return -5i32 as u32;
