@@ -150,6 +150,9 @@ into the next brief for that overlay.
   copying it for a compare (the orchestrator once started runs on a stale binary).
 - **Rebase, then rerun.** A batch checked before its rebase onto merged shared fixes is rerun on
   the rebased tree before merging (two STG03 batches were checked without the stale-stack fixes).
+  Two batches of the same overlay whose new functions run in different segments (grep each
+  batch's addresses in the baseline's reports) need no rerun after merging one onto the other:
+  in each segment only the code that runs there changed, and it was checked.
 - **Usage limits**: long-lived agents hit them; batch agents with short reports do not. If an
   agent stops on a limit, message it to resume rather than starting over.
 
