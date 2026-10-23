@@ -13893,7 +13893,7 @@ pub fn links_clear(cpu: &mut Cpu, boss: u32) {
 /// entry) and its number kept.
 fn links_link(cpu: &mut Cpu, boss: u32, k: u32, wave: usize, kind: u32) {
     let (table, time, _) = LINKS_WAVES[wave];
-    let n = cpu.call(LINKS_LINK, &[boss, kind, time, table + LINKS_TABLE_STEP * k]);
+    let n = nested!(cpu, LINKS_LINK, swarm_make(cpu, boss, kind, time, table + LINKS_TABLE_STEP * k));
     cpu.write8(boss + k + LINKS, n as u8);
 }
 
@@ -13998,7 +13998,7 @@ pub fn links_last_wave(cpu: &mut Cpu, boss: u32) {
     cpu.write32(boss + O_FLAGS, 0xc8_0000);
     nested!(cpu, 0x0604_64d8, hud::boss_gauge_set(cpu, 60000));
     for (k, (table, _)) in LAST_SLOTS.into_iter().enumerate() {
-        let n = cpu.call(LINKS_LINK, &[boss, 2, 0x708, table]);
+        let n = nested!(cpu, LINKS_LINK, swarm_make(cpu, boss, 2, 0x708, table));
         cpu.write8(boss + LINKS + k as u32, n as u8);
     }
     nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 0x54));
@@ -14035,7 +14035,7 @@ pub fn links_refill(cpu: &mut Cpu, boss: u32) {
         }
         cpu.write8(boss + LAST_COUNTS + k, (count + 1) as u8);
         let count = cpu.read8(boss + LAST_COUNTS + k) as i8 as i32 as u32;
-        let n = cpu.call(LINKS_LINK, &[boss, 2, 0, table.wrapping_add(count * LINKS_TABLE_STEP)]);
+        let n = nested!(cpu, LINKS_LINK, swarm_make(cpu, boss, 2, 0, table.wrapping_add(count * LINKS_TABLE_STEP)));
         cpu.write8(boss + LINKS + k, n as u8);
     }
 }
@@ -18709,9 +18709,37 @@ const END_TIMELINE_AT: u32 = 0x0607_4734;
 /// (`scroll_next`); then, once the next part is ready (0x06074804), the timeline 0x060ae364 started
 /// and -1 returned. 0 otherwise.
 pub fn end_step(cpu: &mut Cpu, s: u32) -> u32 {
+    end_run(cpu, s, |cpu| nested!(cpu, END_PICK_NUMBER, lead_make(cpu)), END_TIMELINE)
+}
+
+/// The later boss's end step: `end_step` with the number picked by `head_spawn` (0x06097220) and
+/// the timeline 0x060aecc4.
+pub fn end_step_b(cpu: &mut Cpu, s: u32) -> u32 {
+    end_run(cpu, s, |cpu| nested!(cpu, 0x0609_7220, head_spawn(cpu)), END_B_TIMELINE)
+}
+
+const END_B_TIMELINE: u32 = 0x060a_ecc4;
+const END_C_TIMELINE: u32 = 0x060a_f684;
+const END_D_TIMELINE: u32 = 0x060a_f784;
+/// The function (in the overlay's loaded data) that picks the fourth end step's player number.
+const END_D_PICK: u32 = 0x060a_af3c;
+
+/// The fourth boss end step: `end_step` with the number picked by the function at 0x060aaf3c and
+/// the timeline 0x060af784.
+pub fn end_step_d(cpu: &mut Cpu, s: u32) -> u32 {
+    end_run(cpu, s, |cpu| cpu.call(END_D_PICK, &[]), END_D_TIMELINE)
+}
+
+/// The third boss end step: `end_step` with the number picked by `mother_make` (0x0609c6dc) and
+/// the timeline 0x060af684.
+pub fn end_step_c(cpu: &mut Cpu, s: u32) -> u32 {
+    end_run(cpu, s, |cpu| nested!(cpu, 0x0609_c6dc, mother_make(cpu)), END_C_TIMELINE)
+}
+
+fn end_run(cpu: &mut Cpu, s: u32, pick: impl FnOnce(&mut Cpu) -> u32, timeline_at: u32) -> u32 {
     match cpu.read8(s + END_STATE) {
         0 => {
-            let n = cpu.call(END_PICK_NUMBER, &[]) as i8 as i32 as u32;
+            let n = pick(cpu) as i8 as i32 as u32;
             if n != 0 {
                 let v = cpu.read8(s + END_STATE).wrapping_add(1);
                 cpu.write8(s + END_STATE, v);
@@ -18739,7 +18767,7 @@ pub fn end_step(cpu: &mut Cpu, s: u32) -> u32 {
             }
         }
         3 if cpu.read32(END_NEXT) != 0 => {
-            let t = nested!(cpu, 0x0605_7354, timeline::timeline_set(cpu, END_TIMELINE));
+            let t = nested!(cpu, 0x0605_7354, timeline::timeline_set(cpu, timeline_at));
             cpu.write32(END_TIMELINE_AT, t);
             return 0xffff_ffff;
         }
@@ -18762,9 +18790,1163 @@ pub fn tables_set_a(cpu: &mut Cpu) -> u32 {
     tables_set(cpu, 0x0607_47ec)
 }
 
+/// The tables' pointers with the middle one 0x060ad760 (the overlay's own data). 1.
+pub fn tables_set_c(cpu: &mut Cpu) -> u32 {
+    tables_set(cpu, 0x060a_d760)
+}
+
+/// The tables' pointers with the middle one 0x06072f60 (the game's own data). 1.
+pub fn tables_set_d(cpu: &mut Cpu) -> u32 {
+    tables_set(cpu, 0x0607_2f60)
+}
+
 /// The tables' pointers with the middle one 0x060ad75c (the overlay's own data). 1.
 pub fn tables_set_b(cpu: &mut Cpu) -> u32 {
     tables_set(cpu, 0x060a_d75c)
+}
+
+// ---- more kind loads ---------------------------------------------------------------------------
+
+/// The fifth kind load's sprite kinds, loaded one after the other (22, 24, 25, 23), each with its
+/// colours counted on.
+const KLOAD_E_SPRITES: [u32; 4] = [22, 24, 25, 23];
+
+/// The fifth kind load, in ten steps: the game's places taken; each of the four sprite kinds read
+/// (state 1, 3, 5, 7) and, once in, put in place (state 2, 4, 6, 8); state 9 reports done (1).
+/// The handle (+0x10) is kept.
+pub fn kinds_load_e(cpu: &mut Cpu, s: u32) -> u32 {
+    let mut handle = cpu.read32(s + 0x10);
+    let mut done = 0;
+    let state = cpu.read8(s + 1);
+    let mut next = false;
+    if state <= 9 {
+        match state {
+            0 => {
+                kload_start(cpu, s);
+                next = true;
+            }
+            9 => done = 1,
+            odd if odd & 1 == 1 => {
+                let k = KLOAD_E_SPRITES[(odd / 2) as usize];
+                let dst = cpu.read32(s + KLOAD_BUFFER);
+                handle = nested!(cpu, 0x0604_56cc, kinds::kind_load(cpu, k, dst));
+                next = handle != 0;
+            }
+            even => {
+                if nested!(cpu, 0x0600_6074, files::load_done(cpu, handle)) != 0 {
+                    kload_sprite(cpu, s, KLOAD_E_SPRITES[(even / 2 - 1) as usize], true);
+                    next = true;
+                }
+            }
+        }
+    }
+    if next {
+        let v = cpu.read8(s + 1).wrapping_add(1);
+        cpu.write8(s + 1, v);
+    }
+    cpu.write32(s + 0x10, handle);
+    done
+}
+
+/// A load's first step: the game's places for the buffer, VDP1 place, character and colour taken.
+fn kload_start(cpu: &mut Cpu, s: u32) {
+    let v = cpu.read32(KLOAD_START[0]);
+    cpu.write32(s + KLOAD_BUFFER, v);
+    let v = cpu.read32(KLOAD_START[1]);
+    cpu.write32(s + KLOAD_VRAM, v);
+    let v = cpu.read16(KLOAD_START[2]);
+    cpu.write16(s + KLOAD_CHAR, v);
+    let v = cpu.read16(KLOAD_START[3]);
+    cpu.write16(s + KLOAD_COLOUR, v);
+}
+
+/// The sixth kind load's model (kind 0x44) and sprite (0x45), and what is set once the model is in:
+/// its fifteen frames flipped by 0x1000 (the last by 0x1100), `model_sort` of frame 7 by 2, the
+/// frames but the last lit, the ramp (24, 25, 30), floor (8, 8, 14) and light (0x2000, -0x3000, -0x1000).
+const KLOAD_F_MODEL: u32 = 0x44;
+const KLOAD_F_SPRITE: u32 = 0x45;
+const KLOAD_F_FRAMES: u32 = 14;
+const KLOAD_F_FLIP: u32 = 0x1000;
+const KLOAD_F_FLIP_LAST: u32 = 0x1100;
+const KLOAD_F_SORT: (u32, u32) = (7, 2);
+const KLOAD_F_RAMP: [u32; 3] = [24, 25, 30];
+const KLOAD_F_FLOOR: [u32; 3] = [8, 8, 14];
+const KLOAD_F_LIGHT: [u32; 3] = [0x2000, 0xffff_d000, 0xffff_f000];
+
+/// The sixth kind load, in eight steps: the game's places taken; the model kind 0x44 read, waited
+/// for and put in place; the model's frames flipped and lit (the state 4 set first); the sprite kind
+/// 0x45 read, waited for and put in place; one step to go on; state 7 reports done (1).
+pub fn kinds_load_f(cpu: &mut Cpu, s: u32) -> u32 {
+    let mut handle = cpu.read32(s + 0x10);
+    let mut done = 0;
+    let state = cpu.read8(s + 1);
+    let mut next = false;
+    if state <= 7 {
+        match state {
+            0 => {
+                kload_start(cpu, s);
+                next = true;
+            }
+            1 => {
+                let dst = cpu.read32(s + KLOAD_BUFFER);
+                handle = nested!(cpu, 0x0604_5910, kinds::kind_load(cpu, KLOAD_F_MODEL, dst));
+                next = handle != 0;
+            }
+            2 => {
+                if nested!(cpu, 0x0600_6074, files::load_done(cpu, handle)) != 0 {
+                    kload_model(cpu, s, KLOAD_F_MODEL);
+                    next = true;
+                }
+            }
+            3 => {
+                cpu.write8(s + 1, 4);
+                for frame in 0..=KLOAD_F_FRAMES {
+                    let bits = if frame == KLOAD_F_FRAMES { KLOAD_F_FLIP_LAST } else { KLOAD_F_FLIP };
+                    nested!(cpu, 0x0604_5cdc, models::model_flip_bits(cpu, KLOAD_F_MODEL, frame, bits));
+                }
+                let (frame, sort) = KLOAD_F_SORT;
+                nested!(cpu, 0x0606_3428, super::gouraud::model_sort(cpu, KLOAD_F_MODEL, frame, sort));
+                for frame in 0..=KLOAD_F_FRAMES {
+                    if frame != KLOAD_F_FRAMES {
+                        nested!(cpu, 0x0606_333c, models::model_lit(cpu, KLOAD_F_MODEL, frame));
+                    }
+                }
+                let [r, g, b] = KLOAD_F_RAMP;
+                nested!(cpu, 0x0606_3168, super::gouraud::table_ramp(cpu, r, g, b));
+                let [r, g, b] = KLOAD_F_FLOOR;
+                nested!(cpu, 0x0606_30e0, super::gouraud::table_floor(cpu, r, g, b));
+                let [x, y, z] = KLOAD_F_LIGHT;
+                nested!(cpu, 0x0606_2fe8, super::gouraud::light_turned(cpu, x, y, z));
+                cpu.write32(s + 0x10, handle);
+                return 0;
+            }
+            4 => {
+                let dst = cpu.read32(s + KLOAD_BUFFER);
+                handle = nested!(cpu, 0x0604_56cc, kinds::kind_load(cpu, KLOAD_F_SPRITE, dst));
+                next = handle != 0;
+            }
+            5 => {
+                if nested!(cpu, 0x0600_6074, files::load_done(cpu, handle)) != 0 {
+                    kload_sprite(cpu, s, KLOAD_F_SPRITE, true);
+                    next = true;
+                }
+            }
+            6 => next = true,
+            _ => done = 1,
+        }
+    }
+    if next {
+        let v = cpu.read8(s + 1).wrapping_add(1);
+        cpu.write8(s + 1, v);
+    }
+    cpu.write32(s + 0x10, handle);
+    done
+}
+
+/// The seventh kind load's model (kind 0x46) and sprite (0x47), and the shading steps (6) the model
+/// is given once in (`models_hss` and `models_lit`).
+const KLOAD_G_MODEL: u32 = 0x46;
+const KLOAD_G_SPRITE: u32 = 0x47;
+const KLOAD_G_SHADES: u32 = 6;
+
+/// The seventh kind load, in seven steps: the game's places taken; the model kind 0x46 read, waited
+/// for, put in place and lit; the sprite kind 0x47 read, waited for and put in place; one step to
+/// go on; state 6 reports done (1).
+pub fn kinds_load_g(cpu: &mut Cpu, s: u32) -> u32 {
+    let mut handle = cpu.read32(s + 0x10);
+    let mut done = 0;
+    let state = cpu.read8(s + 1);
+    let mut next = false;
+    if state <= 6 {
+        match state {
+            0 => {
+                kload_start(cpu, s);
+                next = true;
+            }
+            1 => {
+                let dst = cpu.read32(s + KLOAD_BUFFER);
+                handle = nested!(cpu, 0x0604_5910, kinds::kind_load(cpu, KLOAD_G_MODEL, dst));
+                next = handle != 0;
+            }
+            2 => {
+                if nested!(cpu, 0x0600_6074, files::load_done(cpu, handle)) != 0 {
+                    kload_model(cpu, s, KLOAD_G_MODEL);
+                    nested!(cpu, 0x0606_2f74, super::gouraud::models_hss(cpu, KLOAD_G_MODEL, KLOAD_G_SHADES));
+                    nested!(cpu, 0x0606_3380, super::gouraud::models_lit(cpu, KLOAD_G_MODEL, KLOAD_G_SHADES));
+                    next = true;
+                }
+            }
+            3 => {
+                let dst = cpu.read32(s + KLOAD_BUFFER);
+                handle = nested!(cpu, 0x0604_56cc, kinds::kind_load(cpu, KLOAD_G_SPRITE, dst));
+                next = handle != 0;
+            }
+            4 => {
+                if nested!(cpu, 0x0600_6074, files::load_done(cpu, handle)) != 0 {
+                    kload_sprite(cpu, s, KLOAD_G_SPRITE, true);
+                    next = true;
+                }
+            }
+            5 => next = true,
+            _ => done = 1,
+        }
+    }
+    if next {
+        let v = cpu.read8(s + 1).wrapping_add(1);
+        cpu.write8(s + 1, v);
+    }
+    cpu.write32(s + 0x10, handle);
+    done
+}
+
+/// The eighth kind load's kinds: the sprite kinds 73 and 11, the model kind 18, the sprite kinds 30
+/// and 74 (the last without its colours counted on); and what is set once the model is in: shading
+/// steps 3, the ramp (28, 28, 28), floor (8, 8, 8) and light (0x2000, 0x2000, 0).
+const KLOAD_H_SPRITES: [u32; 2] = [73, 11];
+const KLOAD_H_MODEL: u32 = 18;
+const KLOAD_H_LATE: [(u32, bool); 2] = [(30, true), (74, false)];
+const KLOAD_H_SHADES: u32 = 3;
+const KLOAD_H_RAMP: [u32; 3] = [28, 28, 28];
+const KLOAD_H_FLOOR: [u32; 3] = [8, 8, 8];
+const KLOAD_H_LIGHT: [u32; 3] = [0x2000, 0x2000, 0];
+
+/// The eighth kind load, in twelve steps: the game's places taken; the sprite kinds 73 and 11 each
+/// read (state 1, 3) and put in place (2, 4); the model kind 18 read (5) and, once in, put in place
+/// and lit (6); the sprite kinds 30 and 74 read (7, 9) and put in place (8, 10); state 11 reports
+/// done (1).
+pub fn kinds_load_h(cpu: &mut Cpu, s: u32) -> u32 {
+    let mut handle = cpu.read32(s + 0x10);
+    let mut done = 0;
+    let state = cpu.read8(s + 1);
+    let mut next = false;
+    if state <= 11 {
+        // the kind a loading state reads and the same kind's placing state after it
+        let sprite_at = |state: u32| -> Option<(u32, bool)> {
+            match state {
+                1 | 2 => Some((KLOAD_H_SPRITES[0], true)),
+                3 | 4 => Some((KLOAD_H_SPRITES[1], true)),
+                7 | 8 => Some(KLOAD_H_LATE[0]),
+                9 | 10 => Some(KLOAD_H_LATE[1]),
+                _ => None,
+            }
+        };
+        match state as u32 {
+            0 => {
+                kload_start(cpu, s);
+                next = true;
+            }
+            5 => {
+                let dst = cpu.read32(s + KLOAD_BUFFER);
+                handle = nested!(cpu, 0x0604_5910, kinds::kind_load(cpu, KLOAD_H_MODEL, dst));
+                next = handle != 0;
+            }
+            6 => {
+                if nested!(cpu, 0x0600_6074, files::load_done(cpu, handle)) != 0 {
+                    kload_model(cpu, s, KLOAD_H_MODEL);
+                    nested!(cpu, 0x0606_2f74, super::gouraud::models_hss(cpu, KLOAD_H_MODEL, KLOAD_H_SHADES));
+                    nested!(cpu, 0x0606_3380, super::gouraud::models_lit(cpu, KLOAD_H_MODEL, KLOAD_H_SHADES));
+                    let [r, g, b] = KLOAD_H_RAMP;
+                    nested!(cpu, 0x0606_3168, super::gouraud::table_ramp(cpu, r, g, b));
+                    let [r, g, b] = KLOAD_H_FLOOR;
+                    nested!(cpu, 0x0606_30e0, super::gouraud::table_floor(cpu, r, g, b));
+                    let [x, y, z] = KLOAD_H_LIGHT;
+                    nested!(cpu, 0x0606_2fe8, super::gouraud::light_turned(cpu, x, y, z));
+                    next = true;
+                }
+            }
+            11 => done = 1,
+            n => {
+                let (k, colours) = sprite_at(n).unwrap();
+                if n & 1 == 1 {
+                    let dst = cpu.read32(s + KLOAD_BUFFER);
+                    handle = nested!(cpu, 0x0604_56cc, kinds::kind_load(cpu, k, dst));
+                    next = handle != 0;
+                } else if nested!(cpu, 0x0600_6074, files::load_done(cpu, handle)) != 0 {
+                    kload_sprite(cpu, s, k, colours);
+                    next = true;
+                }
+            }
+        }
+    }
+    if next {
+        let v = cpu.read8(s + 1).wrapping_add(1);
+        cpu.write8(s + 1, v);
+    }
+    cpu.write32(s + 0x10, handle);
+    done
+}
+
+/// The gauge made (`gauge_make`), its result left. 1.
+pub fn gauge_made(cpu: &mut Cpu) -> u32 {
+    nested!(cpu, 0x0608_4b54, gauge_make(cpu));
+    1
+}
+
+/// The ninth kind load's model (kind 72), and what is set once it is in: shading steps 30, the ramp
+/// (28, 28, 28), floor (8, 8, 8) and light (0, 0x2000, 0).
+const KLOAD_I_MODEL: u32 = 72;
+const KLOAD_I_SHADES: u32 = 30;
+const KLOAD_I_RAMP: [u32; 3] = [28, 28, 28];
+const KLOAD_I_FLOOR: [u32; 3] = [8, 8, 8];
+const KLOAD_I_LIGHT: [u32; 3] = [0, 0x2000, 0];
+
+/// The ninth kind load, in four steps: the game's places taken; the model kind 72 read, waited
+/// for, put in place and lit; state 3 reports done (1).
+pub fn kinds_load_i(cpu: &mut Cpu, s: u32) -> u32 {
+    let mut handle = cpu.read32(s + 0x10);
+    let mut done = 0;
+    match cpu.read8(s + 1) {
+        0 => {
+            kload_start(cpu, s);
+            cpu.write8(s + 1, 1);
+        }
+        1 => {
+            let dst = cpu.read32(s + KLOAD_BUFFER);
+            handle = nested!(cpu, 0x0604_5910, kinds::kind_load(cpu, KLOAD_I_MODEL, dst));
+            if handle != 0 {
+                cpu.write8(s + 1, 2);
+            }
+        }
+        2 => {
+            if nested!(cpu, 0x0600_6074, files::load_done(cpu, handle)) != 0 {
+                kload_model(cpu, s, KLOAD_I_MODEL);
+                nested!(cpu, 0x0606_2f74, super::gouraud::models_hss(cpu, KLOAD_I_MODEL, KLOAD_I_SHADES));
+                nested!(cpu, 0x0606_3380, super::gouraud::models_lit(cpu, KLOAD_I_MODEL, KLOAD_I_SHADES));
+                let [r, g, b] = KLOAD_I_RAMP;
+                nested!(cpu, 0x0606_3168, super::gouraud::table_ramp(cpu, r, g, b));
+                let [r, g, b] = KLOAD_I_FLOOR;
+                nested!(cpu, 0x0606_30e0, super::gouraud::table_floor(cpu, r, g, b));
+                let [x, y, z] = KLOAD_I_LIGHT;
+                nested!(cpu, 0x0606_2fe8, super::gouraud::light_turned(cpu, x, y, z));
+                let v = cpu.read8(s + 1).wrapping_add(1);
+                cpu.write8(s + 1, v);
+            }
+        }
+        3 => done = 1,
+        _ => {}
+    }
+    cpu.write32(s + 0x10, handle);
+    done
+}
+
+// ---- the spinner scene -----------------------------------------------------------------------------
+
+/// The game object (0x060746e0)'s flags byte (+62): bit 0 asks the scroll to go on.
+const SCENE_GAME: u32 = 0x0607_46e0;
+const SCENE_GAME_FLAGS: u32 = 62;
+
+/// The scroll gone on once the game object's flags (+62) have bit 0 set.
+pub fn scene_scroll_check(cpu: &mut Cpu) {
+    let game = cpu.read32(SCENE_GAME);
+    if cpu.read8(game + SCENE_GAME_FLAGS) & 1 != 0 {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// The screen object (0x06074740): its matrix (+112) is the view the spinner is put in.
+const SCENE_SCREEN: u32 = 0x0607_4740;
+const SCENE_SCREEN_MATRIX: u32 = 112;
+/// The distance the spinner is checked on screen at, the behaviour's mode byte (+3) set to 112 where
+/// it is not.
+const SCENE_SPINNER_REACH: u32 = 0x50_0000;
+const SCENE_SPINNER_OFF: u32 = 112;
+const SCENE_MODE: u32 = 3;
+const SCENE_POSITION: u32 = 0x14;
+const SCENE_BEHAVIOUR: u32 = 0x38;
+const SCENE_PLAIN_EXEC: u32 = 0x0604_dcb4;
+
+/// The scene spinner's behaviour: in the screen object's matrix, its place (+20) checked on
+/// screen; the mode byte (+3) set to 112 where it is not; then the model turned.
+pub fn scene_spinner_step(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let screen = cpu.read32(SCENE_SCREEN);
+    nested!(cpu, 0x0606_db7c, sgl::sl_load_matrix(cpu, screen + SCENE_SCREEN_MATRIX));
+    let on = nested!(cpu, 0x0606_e9fc, sgl::sl_check_on_screen(cpu, o + SCENE_POSITION, SCENE_SPINNER_REACH));
+    if (on as i32) < 0 {
+        cpu.write8(o + SCENE_MODE, SCENE_SPINNER_OFF as u8);
+    }
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0606_2aa0, models::spinner_turn(cpu, o));
+}
+
+/// The scene spinner made (list 2, 72 bytes, plain_exec's): a spinner model at (0, -0x500000,
+/// 0xe0000), lit (kind 32, 1); the screen object's matrix kept. Gives the object.
+pub fn scene_spinner_set(cpu: &mut Cpu) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 72)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, SCENE_PLAIN_EXEC));
+    if o != 0 {
+        nested!(cpu, 0x0606_2af8, models::spinner_init(cpu, o));
+        cpu.write32(o + SCENE_BEHAVIOUR, 0x0609_fce4);
+        cpu.write32(o + SCENE_POSITION, 0);
+        cpu.write32(o + SCENE_POSITION + 4, 0xffb0_0000);
+        cpu.write32(o + SCENE_POSITION + 8, 0x000e_0000);
+    }
+    nested!(cpu, 0x0606_3380, super::gouraud::models_lit(cpu, 32, 1));
+    let screen = cpu.read32(SCENE_SCREEN);
+    nested!(cpu, SL_GET_MATRIX, sgl::sl_get_matrix(cpu, screen + SCENE_SCREEN_MATRIX));
+    o
+}
+
+/// The camera's struct (0x06074810), the spin's (0x060747e0), the view's (0x060747b0) and the
+/// scroll speed (0x06074750) the scene start sets.
+const SCENE_CAMERA: u32 = 0x0607_4810;
+const SCENE_SPIN: u32 = 0x0607_47e0;
+const SCENE_VIEW: u32 = 0x0607_47b0;
+const SCENE_SPEED: u32 = 0x0607_4750;
+const SCENE_PATH: u32 = 0x060a_ff78;
+const SCENE_MESSAGE: u32 = 0x060a_ff28;
+
+/// The spinner scene started (the object `o`): the screens on (0x10016), screen -5's priority 4;
+/// the camera set (place (-0xb0000, -0x70000, 0x380000), no turns but 0x2000 in its first word, scale
+/// 1.0 each way), the spin (+8 0, +12 -0x8000), the view (0xb00000, 0x700000, 0, 0, +16 and +20 1.0),
+/// the plane B frame, the object's +32 0, +36 0x80000, +40 0, the speed 0x8000, the view put along the
+/// path, the spinner made and the message shown.
+pub fn scene_start(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x1_0016));
+    nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 0xffff_fffb, 4));
+    let c = SCENE_CAMERA;
+    cpu.write32(c + 12, 0xff50_0000);
+    cpu.write32(c + 16, 0xff90_0000);
+    cpu.write32(c + 20, 0x38_0000);
+    cpu.write32(c + 32, 0);
+    cpu.write32(c + 28, 0);
+    cpu.write32(c + 24, 0);
+    cpu.write16(c, 0x2000);
+    for at in [10, 8, 6, 4, 2] {
+        cpu.write16(c + at, 0);
+    }
+    cpu.write32(c + 44, 0x1_0000);
+    cpu.write32(c + 40, 0x1_0000);
+    cpu.write32(c + 36, 0x1_0000);
+    cpu.write32(SCENE_SPIN + 8, 0);
+    cpu.write32(SCENE_SPIN + 12, 0xffff_8000);
+    let v = SCENE_VIEW;
+    cpu.write32(v, 0x00b0_0000);
+    cpu.write32(v + 4, 0x0070_0000);
+    cpu.write32(v + 12, 0);
+    cpu.write32(v + 8, 0);
+    cpu.write32(v + 20, 0x1_0000);
+    cpu.write32(v + 16, 0x1_0000);
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    cpu.write32(o + 32, 0);
+    cpu.write32(o + 36, 0x8_0000);
+    cpu.write32(o + 40, 0);
+    cpu.write32(SCENE_SPEED, 0x8000);
+    nested!(cpu, 0x0605_f5b0, bg::view_along(cpu, SCENE_PATH));
+    nested!(cpu, 0x0609_fd44, scene_spinner_set(cpu));
+    nested!(cpu, 0x0606_1620, super::text::message_set(cpu, SCENE_MESSAGE));
+}
+
+/// The scene object's turn and camera values are held to 25 bits.
+const SCENE_WRAP: u32 = 0x01ff_ffff;
+
+/// The scene object's turn (+32) moved on by its speed (+36) and the camera's x (+12) back by the
+/// other (+40), both held to 25 bits. The camera's place and turn then put through the view's
+/// matrix: the screen object's matrix (+112) kept, the camera's place translated by and turned
+/// about x, and (0, o+32, 0) translated by; the matrix inverted and the rotation scroll's
+/// parameters made from it.
+pub fn scene_camera_step(cpu: &mut Cpu, o: u32) {
+    let c = SCENE_CAMERA;
+    let turn = cpu.read32(o + 32).wrapping_add(cpu.read32(o + 36)) & SCENE_WRAP;
+    cpu.write32(o + 32, turn);
+    let x = cpu.read32(c + 12).wrapping_sub(cpu.read32(o + 40)) & SCENE_WRAP;
+    cpu.write32(c + 12, x);
+    scene_view(cpu, o);
+}
+
+/// The camera put through the view: the push, the view matrix, the screen object's matrix kept, the
+/// camera's place translated by and turned about x, (0, o+32, 0) translated by, the matrix
+/// inverted, the rotation scroll's parameters made and the pop.
+fn scene_view(cpu: &mut Cpu, o: u32) {
+    let c = SCENE_CAMERA;
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    let screen = cpu.read32(SCENE_SCREEN);
+    nested!(cpu, SL_GET_MATRIX, sgl::sl_get_matrix(cpu, screen + SCENE_SCREEN_MATRIX));
+    let (x, y, z) = (cpu.read32(c + 12), cpu.read32(c + 16), cpu.read32(c + 20));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, z));
+    let a = cpu.read16(c) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_72ec, sgl::sl_rot_x(cpu, a));
+    let y = cpu.read32(o + 32);
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, 0, y, 0));
+    nested!(cpu, 0x0606_e4dc, sgl::sl_invers_matrix(cpu));
+    nested!(cpu, 0x0606_e50c, sgl::rotation_parameters(cpu));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+}
+
+/// The scene's colours: the blend structs' offsets on the frame (a blend from the view's colours to
+/// the scene's: how far +0 (a word), count +2, from +4, to +8, out +12), the colours' places
+/// (the pointer at 0x060747f8's first word and 0x06074800's offset), the scene colours (0x060afff0)
+/// and the colour table's first index (0x200) and count (16).
+const SCENE_COLOURS_AT: u32 = 0x0607_47f8;
+const SCENE_COLOURS_OFFSET: u32 = 0x0607_4800;
+const SCENE_COLOURS: u32 = 0x060a_fff0;
+const SCENE_COLOUR_INDEX: u32 = 0x200;
+const SCENE_COLOUR_COUNT: u32 = 16;
+const SCENE_FIRST_BLEND: u32 = 32;
+const SCENE_SECOND_BLEND: u32 = 80;
+const SCENE_SECOND_OUT: u32 = 48;
+/// The scene step's speed: up by 0x100 a frame to at most 0x30000 (the whole part, 0 to 3, picks
+/// what the colours do), and the view's y (+4) set to 0x1700000 when it passes 0x20000.
+const SCENE_ACCEL: u32 = 0x100;
+const SCENE_TOP: u32 = 0x3_0000;
+const SCENE_TURN_AT: u32 = 0x2_0000;
+const SCENE_VIEW_Y: u32 = 0x0170_0000;
+
+fn scene_colours_at(cpu: &mut Cpu) -> u32 {
+    let at = cpu.read32(SCENE_COLOURS_AT);
+    let colours = cpu.read32(at);
+    colours.wrapping_add(cpu.read32(SCENE_COLOURS_OFFSET))
+}
+
+/// The scene's step (the object `o`): the camera's step; the speed (0x06074750) up and held; the
+/// view put along the path; then by the speed's whole part: 1, the colours blended from the table's
+/// to the scene's by the fraction (/16) and set; 2, from the scene's to the table's, set, and
+/// while the object's +36 is above 0 it is lowered by 0x800 and +40 raised by 0x200; 3, the
+/// table's colours set and the scroll gone on.
+pub fn scene_step(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    nested!(cpu, 0x0609_fec4, scene_camera_step(cpu, o));
+    let speed = cpu.read32(SCENE_SPEED).wrapping_add(SCENE_ACCEL);
+    cpu.write32(SCENE_SPEED, speed);
+    if (speed as i32) > SCENE_TOP as i32 {
+        cpu.write32(SCENE_SPEED, SCENE_TOP);
+    } else if speed == SCENE_TURN_AT {
+        cpu.write32(SCENE_VIEW + 4, SCENE_VIEW_Y);
+        nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    }
+    nested!(cpu, 0x0605_f648, bg::view_along_eased(cpu, SCENE_PATH));
+    match cpu.read16(SCENE_SPEED) as u32 {
+        1 => {
+            let b = f + SCENE_FIRST_BLEND;
+            let fraction = (cpu.read32(SCENE_SPEED) & 0xffff) >> 4;
+            cpu.write16(b, fraction as u16);
+            cpu.write16(b + 2, SCENE_COLOUR_COUNT as u16);
+            let from = scene_colours_at(cpu);
+            cpu.write32(b + 4, from);
+            cpu.write32(b + 8, SCENE_COLOURS);
+            cpu.write32(b + 12, f);
+            nested!(cpu, 0x0600_5ba4, super::palette::colours_blend(cpu, b));
+            nested!(cpu, 0x0600_5b18, super::palette::set_colours(cpu, f, SCENE_COLOUR_INDEX, SCENE_COLOUR_COUNT));
+        }
+        2 => {
+            let b = f + SCENE_SECOND_BLEND;
+            let out = f + SCENE_SECOND_OUT;
+            let fraction = (cpu.read32(SCENE_SPEED) & 0xffff) >> 4;
+            cpu.write16(b, fraction as u16);
+            cpu.write16(b + 2, SCENE_COLOUR_COUNT as u16);
+            cpu.write32(b + 4, SCENE_COLOURS);
+            let to = scene_colours_at(cpu);
+            cpu.write32(b + 8, to);
+            cpu.write32(b + 12, out);
+            nested!(cpu, 0x0600_5ba4, super::palette::colours_blend(cpu, b));
+            nested!(cpu, 0x0600_5b18, super::palette::set_colours(cpu, out, SCENE_COLOUR_INDEX, SCENE_COLOUR_COUNT));
+            let down = cpu.read32(o + 36);
+            if (down as i32) > 0 {
+                cpu.write32(o + 36, down.wrapping_sub(0x800));
+                let up = cpu.read32(o + 40).wrapping_add(SCENE_COLOUR_INDEX);
+                cpu.write32(o + 40, up);
+            }
+        }
+        3 => {
+            let colours = scene_colours_at(cpu);
+            nested!(cpu, 0x0600_5b18, super::palette::set_colours(cpu, colours, SCENE_COLOUR_INDEX, SCENE_COLOUR_COUNT));
+            nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+        }
+        _ => {}
+    }
+}
+
+/// The scene's map set (0x060b20c0: a map object of type 6 with its tables 0x060afcd0 and
+/// 0x25e76000, 0x2000000 twice, 0x1fff and 0x90 halfwords, and 0x060b025c, cleared by `map_clear`);
+/// the spin struct (0x060747e0) set to (0xb00000, 0x700000, 0, 0, 1.0, 1.0); the screens 23 on.
+pub fn scene_map_set(cpu: &mut Cpu) {
+    let m = 0x060b_20c0;
+    cpu.write8(m, 6);
+    cpu.write8(m + 1, 0);
+    cpu.write32(m + 20, 0x060a_fcd0);
+    cpu.write32(m + 16, 0x25e7_6000);
+    cpu.write32(m + 8, 0x0200_0000);
+    cpu.write32(m + 12, 0x0200_0000);
+    cpu.write16(m + 4, 0);
+    cpu.write16(m + 6, 0x1fff);
+    cpu.write16(m + 2, 0x90);
+    cpu.write32(m + 28, 0x060b_025c);
+    cpu.write32(m + 24, 0);
+    nested!(cpu, 0x0605_f14c, bg::map_clear(cpu, m));
+    cpu.write32(SCENE_SPIN, 0x00b0_0000);
+    cpu.write32(SCENE_SPIN + 4, 0x0070_0000);
+    cpu.write32(SCENE_SPIN + 12, 0);
+    cpu.write32(SCENE_SPIN + 8, 0);
+    cpu.write32(SCENE_SPIN + 20, 0x1_0000);
+    cpu.write32(SCENE_SPIN + 16, 0x1_0000);
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 23));
+}
+
+// ---- the map scenes -----------------------------------------------------------------------------
+
+/// The scene's map object (0x060b20c0: its field +8 is how far it has scrolled), the spin struct's
+/// x (0x060747e0) the map is hit and streamed at, and the speed the planes move at.
+const MAPS_MAP: u32 = 0x060b_20c0;
+const MAPS_SPIN: u32 = 0x0607_47e0;
+const MAPS_HIT_X: u32 = 0xff50_0000;
+const MAPS_FAR: u32 = 0x0a80_0000;
+const MAPS_SLOW_AT: u32 = 0x8000;
+const MAPS_SLOW_BY: u32 = 0x800;
+const MAPS_PLANE_SPEED: u32 = 0xffff_8000;
+
+/// The first map scene's step (the object `o`): the camera's step; the speed (+40) lowered by 0x800
+/// while above 0x8000; plane A's frame and speed (0, -0x8000); the map hit at the spin's x less
+/// 0xb0000 and streamed; the scroll gone on once the map's +8 is past 0xa800000.
+pub fn maps_step(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0609_fec4, scene_camera_step(cpu, o));
+    let speed = cpu.read32(o + 40);
+    if (speed as i32) > MAPS_SLOW_AT as i32 {
+        cpu.write32(o + 40, speed.wrapping_sub(MAPS_SLOW_BY));
+    }
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, 0, MAPS_PLANE_SPEED));
+    let x = cpu.read32(MAPS_SPIN).wrapping_add(MAPS_HIT_X);
+    nested!(cpu, 0x0605_ef58, bg::map_hit_on(cpu, x, MAPS_MAP));
+    nested!(cpu, 0x0605_f170, bg::map_stream(cpu, MAPS_SPIN, MAPS_MAP));
+    if (cpu.read32(MAPS_MAP + 8) as i32) > MAPS_FAR as i32 {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// The first map scene's end: the object's +8 cleared and the function at 0x060ab664 called with
+/// 0x060b0268.
+pub fn maps_end(cpu: &mut Cpu, o: u32) {
+    cpu.write8(o + 8, 0);
+    cpu.call(0x060a_b664, &[0x060b_0268]);
+}
+
+/// The second map scene's mode byte (+8), the speed's ceiling (0x7ffff, +0x800 up to it), the
+/// camera x the rotation map is put in place at (-0x3000000), the map's address (0x25e44000).
+const MAPSB_MODE: u32 = 8;
+const MAPSB_CEILING: u32 = 0x7_ffff;
+const MAPSB_UP_BY: u32 = 0x800;
+const MAPSB_FAR_X: u32 = 0xfd00_0000;
+const MAPSB_MAP: u32 = 0x25e4_4000;
+
+/// The second map scene's step (the object `o`, its mode byte +8): in mode 0 the speed (+40) raised
+/// by 0x800 up to 0x7ffff, plane A's frame and speed (0, -speed), the map hit and streamed, and,
+/// once the camera x (0x06074810+12) is below -0x3000000, the rotation map put at 0x25e44000 and the
+/// mode 1; in mode 1 the camera x held to 25 bits. Then the camera x lowered by the speed and put
+/// through the view.
+pub fn maps_b_step(cpu: &mut Cpu, o: u32) {
+    let mode = cpu.read8(o + MAPSB_MODE) as i8;
+    if mode == 0 {
+        let speed = cpu.read32(o + 40);
+        if (speed as i32) <= MAPSB_CEILING as i32 {
+            cpu.write32(o + 40, speed.wrapping_add(MAPSB_UP_BY));
+        }
+        nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+        let speed = cpu.read32(o + 40);
+        nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, 0, speed.wrapping_neg()));
+        let x = cpu.read32(MAPS_SPIN).wrapping_add(MAPS_HIT_X);
+        nested!(cpu, 0x0605_ef58, bg::map_hit_on(cpu, x, MAPS_MAP));
+        nested!(cpu, 0x0605_f170, bg::map_stream(cpu, MAPS_SPIN, MAPS_MAP));
+        if (cpu.read32(SCENE_CAMERA + 12) as i32) < MAPSB_FAR_X as i32 {
+            nested!(cpu, 0x0607_1c4c, sgl::sl_map_rbg0(cpu, MAPSB_MAP));
+            let v = cpu.read8(o + MAPSB_MODE).wrapping_add(1);
+            cpu.write8(o + MAPSB_MODE, v);
+        }
+    } else if mode == 1 {
+        let x = cpu.read32(SCENE_CAMERA + 12) & SCENE_WRAP;
+        cpu.write32(SCENE_CAMERA + 12, x);
+    }
+    let c = SCENE_CAMERA;
+    let x = cpu.read32(c + 12).wrapping_sub(cpu.read32(o + 40));
+    cpu.write32(c + 12, x);
+    scene_view(cpu, o);
+}
+
+/// The second map scene's map set (0x060b20c0: type 5 with its tables 0x060afce8 and 0x25e76000,
+/// 0xe00000 and 0x2000000, 0x1fff and 0x90 halfwords, cleared by `map_clear`); the spin struct
+/// (0x060747e0) set to (0xb00000, 0x1540000, 0, 0, 0x8000, 0x8000); 128 colours from the scene's
+/// table (+4's first) set from index 0x100; the message at 0x060aff38 shown.
+pub fn maps_b_set(cpu: &mut Cpu) {
+    let m = MAPS_MAP;
+    cpu.write8(m, 5);
+    cpu.write8(m + 1, 0);
+    cpu.write32(m + 20, 0x060a_fce8);
+    cpu.write32(m + 16, 0x25e7_6000);
+    cpu.write32(m + 8, 0x00e0_0000);
+    cpu.write32(m + 12, 0x0200_0000);
+    cpu.write16(m + 4, 0);
+    cpu.write16(m + 6, 0x1fff);
+    cpu.write16(m + 2, 0x90);
+    cpu.write32(m + 28, 0);
+    cpu.write32(m + 24, 0);
+    nested!(cpu, 0x0605_f14c, bg::map_clear(cpu, m));
+    cpu.write32(MAPS_SPIN, 0x00b0_0000);
+    cpu.write32(MAPS_SPIN + 4, 0x0154_0000);
+    cpu.write32(MAPS_SPIN + 12, 0);
+    cpu.write32(MAPS_SPIN + 8, 0);
+    cpu.write32(MAPS_SPIN + 20, 0x8000);
+    cpu.write32(MAPS_SPIN + 16, 0x8000);
+    let at = cpu.read32(SCENE_COLOURS_AT);
+    let colours = cpu.read32(at + 4).wrapping_add(cpu.read32(SCENE_COLOURS_OFFSET));
+    nested!(cpu, 0x0600_5b18, super::palette::set_colours(cpu, colours, 0x100, 0x80));
+    nested!(cpu, 0x0606_1620, super::text::message_set(cpu, 0x060a_ff38));
+}
+
+/// The map scene's plane step: plane A's frame, its speed (0, -0x40000) and the map streamed.
+pub fn maps_plane_step(cpu: &mut Cpu) {
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, 0, 0xfffc_0000));
+    nested!(cpu, 0x0605_f170, bg::map_stream(cpu, MAPS_SPIN, MAPS_MAP));
+}
+
+/// The map scene's far end and the scroll past which the spin's scale (+16, +20) eases back from
+/// 0x12000 to 1.0 (by the map's scroll less 0x2000000, over 512).
+const MAPS_END: u32 = 0x0400_0000;
+const MAPS_EASE_FROM: u32 = 0x0200_0000;
+const MAPS_EASE_A: u32 = 0x1_2000;
+const MAPS_EASE_B: u32 = 0x1_0000;
+
+/// The pair scene's step (the object `o`): the plane step and the second map step; once the map's
+/// +8 is past 0x4000000 the spin's scale is 1.0 and the scroll goes on; past 0x2000000 the scale
+/// eased from 0x12000 to 1.0 by how far past (/512).
+pub fn maps_pair_step(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x060a_0410, maps_plane_step(cpu));
+    nested!(cpu, 0x060a_0218, maps_b_step(cpu, o));
+    let far = cpu.read32(MAPS_MAP + 8);
+    if (far as i32) > MAPS_END as i32 {
+        cpu.write32(MAPS_SPIN + 20, MAPS_EASE_B);
+        cpu.write32(MAPS_SPIN + 16, MAPS_EASE_B);
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    } else if (far as i32) > MAPS_EASE_FROM as i32 {
+        let past = far.wrapping_sub(MAPS_EASE_FROM);
+        nested!(cpu, 0x0600_8162, clib::ashiftrt_r4::<9>(cpu, past));
+        let t = ((past as i32) >> 9) as u32;
+        let scale = nested!(cpu, 0x0606_2ebc, math::ease(cpu, MAPS_EASE_A, MAPS_EASE_B, t));
+        cpu.write32(MAPS_SPIN + 20, scale);
+        cpu.write32(MAPS_SPIN + 16, scale);
+    }
+}
+
+// ---- the dust field --------------------------------------------------------------------------------
+
+/// The dust table (0x060b3100: 224 entries of three longs: where it starts, its screen place and its
+/// size), its count less one, and how the two angles it draws from move on each entry (+0x1b6 and +0x92).
+const DUST_TABLE: u32 = 0x060b_3100;
+const DUST_LAST: u32 = 0xdf;
+const DUST_STEP_A: u32 = 0x1b6;
+const DUST_STEP_B: u32 = 0x92;
+
+/// The dust table made from two angles (a, b; the frame keeps them, moved on each entry): entry k's
+/// size (+8) is sin(b) times 0.03 plus 0xe000, its start (+0) 0xb00000 of what is left of 1.0, less
+/// 0x18000 and plus 3 times a random fraction of it, and its place (+4) k in the top half plus
+/// 0x200000 of sin(a).
+pub fn dust_make(cpu: &mut Cpu, a: u32, b: u32) {
+    let f = cpu.stack();
+    let mut a = a as i16 as i32 as u32;
+    let mut b = b as i16 as i32 as u32;
+    cpu.write32(f, a);
+    cpu.write32(f + 4, b);
+    for k in 0..=DUST_LAST {
+        let entry = DUST_TABLE + 12 * k;
+        let sin_a = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+        let sin_b = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, b));
+        let size = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, sin_b, 0x800)).wrapping_add(0xe000);
+        let base = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x00b0_0000, 0x1_0000u32.wrapping_sub(size)));
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0));
+        let spread = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x3_0000, r & 0xffff));
+        cpu.write32(entry, 0xfffe_8000u32.wrapping_add(base).wrapping_add(spread));
+        let swing = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x20_0000, sin_a));
+        cpu.write32(entry + 4, (k << 16).wrapping_add(swing));
+        cpu.write32(entry + 8, size);
+        a = a.wrapping_add(DUST_STEP_A) as i16 as i32 as u32;
+        cpu.write32(f, a);
+        b = b.wrapping_add(DUST_STEP_B) as i16 as i32 as u32;
+        cpu.write32(f + 4, b);
+    }
+}
+
+/// The dust's draw (the sprite `s`, its entries' list +36: 12 bytes each, the first byte the
+/// polygon number, ended by -1; the place +4 and +8): the window 0 set, the view's matrix moved by
+/// the camera's y (0x06074810+16, 24 bits), each entry translated to, its screen place found
+/// (`sl_convert_pixels` of 0x060b05e4) and, if its y plus 0xc3 is within 0x14a, the polygon of the
+/// kind 63's (+28) table put; the window 1 set.
+pub fn dust_draw(cpu: &mut Cpu, s: u32) {
+    let f = cpu.stack();
+    let list = cpu.read32(s + 36);
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 0));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let y = cpu.read32(SCENE_CAMERA + 16) & 0x00ff_ffff;
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, 0, y, 0));
+    let mut at = 0;
+    if cpu.read8(list) as i8 != -1 {
+        loop {
+            let entry = list + at;
+            nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+            let (x, y) = (cpu.read32(entry + 4), cpu.read32(entry + 8));
+            nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, 0));
+            nested!(cpu, 0x0606_76fc, sgl::sl_convert_pixels(cpu, 0x060b_05e4, f));
+            if cpu.read32(f + 4).wrapping_add(0xc3) <= 0x14a {
+                let k = cpu.read32(KINDS + 63 * K_SIZE);
+                let polygons = cpu.read32(k + 28);
+                let n = cpu.read8(entry) as i8 as i32 as u32;
+                let set = cpu.read32(polygons + 4 * n);
+                let pd = cpu.read32(set);
+                nested!(cpu, 0x0606_745c, sgl::sl_put_polygon(cpu, pd));
+            }
+            nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+            at += 12;
+            if cpu.read8(list + at) as i8 == -1 {
+                break;
+            }
+        }
+    }
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0606_713c, sgl::sl_cur_window(cpu, 1));
+}
+
+/// The kind 63's colours for the dust scene's ten frames: frame 1, 2, 4, 6 and 8 take 0x2000,
+/// the others 0x1000 (or-ed onto the kind's colour).
+const DUST_FRAME_FLAGS: [u32; 10] = [0x1000, 0x2000, 0x2000, 0x1000, 0x2000, 0x1000, 0x2000, 0x1000, 0x2000, 0x1000];
+const DUST_KIND: u32 = 63;
+const DUST_SHADES: u32 = 10;
+/// The dust scene's pieces: the colour table's three places (+8, +12 of the pointer at 0x060747f8
+/// and the scene's own), the VDP2 copy's size and places, the dust table's transfer, the
+/// priority list ((screen, priority) pairs), the list of entries (0x060b02e4) and the screen object's
+/// draw (+88).
+const DUST_LIST: u32 = 0x060b_02e4;
+const DUST_PRIORITIES: [(u32, u32); 5] = [(1, 5), (0, 1), (5, 4), (0xffff_fff8, 3), (0xffff_fffb, 2)];
+
+/// The dust scene set up (the object `o`): the kind 63's frames shaded (10) and coloured (`DUST_FRAME_FLAGS`),
+/// the camera cleared (all turns, places and 0xffff scales), the rotation map put at 0x25e46000,
+/// 0x90 colours set from the table's +8, the speed cleared, the view put along the path
+/// 0x060b0278, plane NBG1's page set and the copy of 0x2000 bytes queued, the view struct set
+/// (0xb00000, 0x700000, 0, 0, 1.0, 1.0), the line scroll control set, the dust table made and
+/// transferred, the colours (0x70 from +12) set, the priorities, the colour calculation 0x140, the
+/// object's mode cleared and its +32 and +36 (0x10000, the list) set, and the dust draw hooked on the
+/// screen object (+88).
+pub fn dust_scene_set(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0606_2f74, super::gouraud::models_hss(cpu, DUST_KIND, DUST_SHADES));
+    for (frame, flag) in DUST_FRAME_FLAGS.into_iter().enumerate() {
+        let colour = cpu.read16(KINDS + 63 * K_SIZE + K_COLOUR) as u32 | flag;
+        nested!(cpu, 0x0604_5b1c, models::model_colour(cpu, DUST_KIND, frame as u32, colour & 0xffff));
+    }
+    let c = SCENE_CAMERA;
+    for at in [20, 16, 12, 32, 28, 24] {
+        cpu.write32(c + at, 0);
+    }
+    for at in [4, 2, 0, 10, 8, 6] {
+        cpu.write16(c + at, 0);
+    }
+    for at in [44, 40, 36] {
+        cpu.write32(c + at, 0xffff);
+    }
+    nested!(cpu, 0x0607_1c4c, sgl::sl_map_rbg0(cpu, 0x25e4_6000));
+    let at = cpu.read32(SCENE_COLOURS_AT);
+    let colours = cpu.read32(at + 8).wrapping_add(cpu.read32(SCENE_COLOURS_OFFSET));
+    nested!(cpu, 0x0600_5b18, super::palette::set_colours(cpu, colours, 0, 0x90));
+    cpu.write32(SCENE_SPEED, 0);
+    nested!(cpu, 0x0605_f5b0, bg::view_along(cpu, 0x060b_0278));
+    nested!(cpu, 0x0606_e2e4, sgl::sl_page_nbg1(cpu, 0x25e6_0000, 0x400, 0xc000));
+    let src = cpu.read32(0x0607_47a0).wrapping_add(0xc000);
+    nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, src, 0x25e7_4000, 0x2000));
+    let v = SCENE_VIEW;
+    cpu.write32(v, 0x00b0_0000);
+    cpu.write32(v + 4, 0x0070_0000);
+    cpu.write32(v + 12, 0);
+    cpu.write32(v + 8, 0);
+    cpu.write32(v + 20, 0x1_0000);
+    cpu.write32(v + 16, 0x1_0000);
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    nested!(cpu, 0x0606_e1bc, sgl::sl_line_scroll_control(cpu, 0, 14));
+    cpu.call(0x060a_b6bc, &[0x25e7_3500]);
+    cpu.write16(o + 18, 0);
+    cpu.write16(o + 16, 0);
+    let b = cpu.read16(o + 18) as i16 as i32 as u32;
+    nested!(cpu, 0x060a_04d4, dust_make(cpu, 0, b));
+    nested!(cpu, 0x0603_4a50, sgl::sl_transfer_entry(cpu, DUST_TABLE, 0x25e7_3500, 0xa80));
+    let at = cpu.read32(SCENE_COLOURS_AT);
+    let colours = cpu.read32(at + 12).wrapping_add(cpu.read32(SCENE_COLOURS_OFFSET));
+    nested!(cpu, 0x0600_5b18, super::palette::set_colours(cpu, colours, 0x200, 0x70));
+    for (screen, pri) in DUST_PRIORITIES {
+        nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, screen, pri));
+    }
+    cpu.call(0x060a_b63c, &[2]);
+    nested!(cpu, 0x0607_0ddc, sgl::sl_color_calc(cpu, 0x140));
+    cpu.write8(o + 8, 0);
+    cpu.write32(o + 32, 0x1_0000);
+    cpu.write32(o + 36, DUST_LIST);
+    let screen = cpu.read32(SCENE_SCREEN);
+    cpu.write32(screen + 88, 0x060a_05b8);
+}
+
+// ---- the dust scenes -------------------------------------------------------------------------------
+
+const DUSTS_SPEED_TABLE: u32 = 0x060b_02d8;
+const DUSTS_LATE_LIST: u32 = 0x060b_03ec;
+const DUSTS_FAR: u32 = 0x0900_0000;
+
+/// The dust scene's step (the object `o`): the dust table made from the object's two angles (+16,
+/// +18) and sent to VDP2's table; the angles moved on (-256, +128); plane B's frame and speed (0,
+/// -0x10000); the camera's rotation matrix made; the camera's y (+16) moved on by the object's +32
+/// (held to 25 bits); and the dust drawn.
+pub fn dusts_step(cpu: &mut Cpu, o: u32) {
+    let a = cpu.read16(o + 16) as i16 as i32 as u32;
+    let b = cpu.read16(o + 18) as i16 as i32 as u32;
+    nested!(cpu, 0x060a_04d4, dust_make(cpu, a, b));
+    nested!(cpu, 0x0603_4a50, sgl::sl_transfer_entry(cpu, DUST_TABLE, 0x25e7_3500, 0xa80));
+    let a = cpu.read16(o + 16).wrapping_add(0xff00);
+    cpu.write16(o + 16, a);
+    let b = cpu.read16(o + 18).wrapping_add(0x80);
+    cpu.write16(o + 18, b);
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, 0, 0xffff_0000));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCENE_CAMERA));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    let y = cpu.read32(SCENE_CAMERA + 16).wrapping_add(cpu.read32(o + 32)) & SCENE_WRAP;
+    cpu.write32(SCENE_CAMERA + 16, y);
+    nested!(cpu, 0x060a_05b8, dust_draw(cpu, o));
+}
+
+/// The dust scene's step with the map scene's: the dust step, the plane step, and the scroll
+/// gone on once the map's +8 is past 0x9000000.
+pub fn dusts_map_step(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x060a_08d8, dusts_step(cpu, o));
+    nested!(cpu, 0x060a_0410, maps_plane_step(cpu));
+    if (cpu.read32(MAPS_MAP + 8) as i32) > DUSTS_FAR as i32 {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+}
+
+/// The dust scene's set-up of the screens: the screens 0x10016 on; 0x8000 bytes from the scene
+/// file's first table copied to 0x25e60000 in pieces of 0x800, 0x1000 bytes of 0x060b05f0 filled
+/// into 0x25e76000, 0x1000 from the 0x060747a0 buffer (+0xf000) queued to 0x25e77000, and 0xb0
+/// colours of the table's +16 set from index 0x100.
+pub fn dusts_screens_set(cpu: &mut Cpu) {
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x1_0016));
+    let at = cpu.read32(0x0607_47fc);
+    let src = cpu.read32(at).wrapping_add(cpu.read32(SCENE_COLOURS_OFFSET));
+    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, src, 0x25e6_0000, 0x8000, 0x800));
+    nested!(cpu, 0x0605_ecb4, screen::queue_fill(cpu, 0x060b_05f0, 0x25e7_6000, 0x1000));
+    let src = cpu.read32(0x0607_47a0).wrapping_add(0xf000);
+    nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, src, 0x25e7_7000, 0x1000));
+    let at = cpu.read32(SCENE_COLOURS_AT);
+    let colours = cpu.read32(at + 16).wrapping_add(cpu.read32(SCENE_COLOURS_OFFSET));
+    nested!(cpu, 0x0600_5b18, super::palette::set_colours(cpu, colours, 0x100, 0xb0));
+}
+
+/// The dust scene's first step (the object `o`, its mode byte +8): in mode 0 the speed (0x06074750)
+/// raised by a table entry (0x060b02d8, picked by its whole part), the object's +32 lowered by 512
+/// while above 0x4000 once the speed is past 0x1c000; past 0x1ffff the speed is held to 0x20000, the
+/// list (+36) changed to 0x060b03ec and the mode raised; the view put along the path 0x060b0278. Then
+/// the dust step.
+pub fn dusts_first_step(cpu: &mut Cpu, o: u32) {
+    if cpu.read8(o + 8) == 0 {
+        let speed = cpu.read32(SCENE_SPEED);
+        let whole = (speed >> 16) as u16 as i16 as i32 as u32;
+        let raised = cpu.read32(DUSTS_SPEED_TABLE + 4 * whole).wrapping_add(speed);
+        cpu.write32(SCENE_SPEED, raised);
+        if (raised as i32) > 0x1_c000 {
+            let down = cpu.read32(o + 32);
+            if (down as i32) > 0x4000 {
+                cpu.write32(o + 32, down.wrapping_sub(512));
+            }
+        }
+        if (cpu.read32(SCENE_SPEED) as i32) > 0x1_ffff {
+            cpu.write32(SCENE_SPEED, 0x2_0000);
+            cpu.write32(o + 36, DUSTS_LATE_LIST);
+            let mode = cpu.read8(o + 8).wrapping_add(1);
+            cpu.write8(o + 8, mode);
+        }
+        nested!(cpu, 0x0605_f648, bg::view_along_eased(cpu, 0x060b_0278));
+    }
+    nested!(cpu, 0x060a_08d8, dusts_step(cpu, o));
+}
+
+/// The fade table (0x060b2090: 12 bytes an entry, the third long a position), the fade's fixed
+/// offset (-0xc0000) and its scale.
+const FADE_TABLE: u32 = 0x060b_2090;
+const FADE_BASE: u32 = 0xfff4_0000;
+
+/// A fade position (`at`) as a scale: (at - 0xc0000) / 256 plus 1.0.
+pub fn fade_scale(cpu: &mut Cpu, at: u32) -> u32 {
+    let v = FADE_BASE.wrapping_add(at);
+    nested!(cpu, 0x0600_8164, clib::ashiftrt_r4::<8>(cpu, v));
+    (((v as i32) >> 8) as u32).wrapping_add(0x1_0000)
+}
+
+/// An object (`o`) put at fade entry `n`: its y (+4) -0x800000 less the entry's second long, its
+/// two scales (+16, +20) the entry's third long as a scale.
+pub fn fade_object_set(cpu: &mut Cpu, o: u32, n: u32) {
+    let e = FADE_TABLE + 12 * n;
+    let y = 0xff80_0000u32.wrapping_sub(cpu.read32(e + 4));
+    cpu.write32(o + 4, y);
+    let at = cpu.read32(e + 8);
+    let scale = nested!(cpu, 0x060a_0b20, fade_scale(cpu, at));
+    cpu.write32(o + 20, scale);
+    cpu.write32(o + 16, scale);
+}
+
+/// The screen's offsets set from fade entry `n`: the entry's third long less 0xc0000, if not
+/// negative doubled after a shift right by 8 (else 0), eased by `lerp` from 0 to -0x300000, the top
+/// halfword of it the red, green and blue offset of the second screens.
+pub fn fade_offsets(cpu: &mut Cpu, n: u32) {
+    let e = FADE_TABLE + 12 * n;
+    let mut v = cpu.read32(e + 8).wrapping_add(FADE_BASE);
+    if (v as i32) >= 0 {
+        nested!(cpu, 0x0600_8164, clib::ashiftrt_r4::<8>(cpu, v));
+        v = ((v as i32) >> 8) as u32;
+        v = v.wrapping_add(v);
+    } else {
+        v = 0;
+    }
+    let r = nested!(cpu, 0x0606_2e7c, math::lerp(cpu, 0, 0xffd0_0000, v));
+    let c = ((r >> 16) as u16 as i16 as i32) as u32;
+    nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, c, c, c));
+}
+
+/// A fade scene's screens set: colour offsets on (82, 1) and the second offsets cleared, plane NBG0's
+/// page (0x25e60000, 0x200, 0xc000), the spin struct's x 0xb00000 with its place cleared and set to
+/// fade entry 0, plane A's frame and the screens 23 on.
+pub fn fades_set(cpu: &mut Cpu) {
+    nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 82, 1));
+    nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, 0, 0, 0));
+    nested!(cpu, 0x0606_e300, sgl::sl_page_nbg0(cpu, 0x25e6_0000, 0x200, 0xc000));
+    cpu.write32(MAPS_SPIN, 0x00b0_0000);
+    cpu.write32(MAPS_SPIN + 12, 0);
+    cpu.write32(MAPS_SPIN + 8, 0);
+    nested!(cpu, 0x060a_0b48, fade_object_set(cpu, MAPS_SPIN, 0));
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 23));
+}
+
+/// 0x1000 bytes of the 0x060747a0 buffer (+0xe000) queued to 0x25e76000.
+pub fn fades_copy_a(cpu: &mut Cpu) {
+    let src = cpu.read32(0x0607_47a0).wrapping_add(0xe000);
+    nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, src, 0x25e7_6000, 0x1000));
+}
+
+/// A fade scene's step (the object `o`): while the object's +32 is above 0 it is lowered by 512 and,
+/// when it reaches 0, the list (+36) changed to 0x060b0578; the dust step; the spin set to fade entry
+/// 0; plane A's frame; the offsets for fade entry 0.
+pub fn fades_step(cpu: &mut Cpu, o: u32) {
+    let down = cpu.read32(o + 32);
+    if (down as i32) > 0 {
+        let down = down.wrapping_sub(512);
+        cpu.write32(o + 32, down);
+        if down == 0 {
+            cpu.write32(o + 36, 0x060b_0578);
+        }
+    }
+    nested!(cpu, 0x060a_08d8, dusts_step(cpu, o));
+    nested!(cpu, 0x060a_0b48, fade_object_set(cpu, MAPS_SPIN, 0));
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    nested!(cpu, 0x060a_0b88, fade_offsets(cpu, 0));
+}
+
+/// The second fade scene's screens set: the view struct (0x060747b0)'s x 0xb00000 and place cleared
+/// and set to fade entry 1, plane B's frame, the screens 0x100007 on, 0x1000 bytes of 0x060b05f0
+/// filled into 0x25e74000 and of the 0x060747a0 buffer (+0x11000) queued to 0x25e75000, the line
+/// scroll control cleared, plane NBG1's page (0x25e60000, 0x400, 0xc000) and size, 0xb0 colours of
+/// the table's +16 from index 0x200, 0x9880 bytes of the scene file (+0x8000) queued to 0x25e68000 in
+/// pieces of 0x800, the priorities (1, 4) and (0, 5), and the screen object's draw (+88) cleared.
+pub fn fades_b_set(cpu: &mut Cpu) {
+    cpu.write32(SCENE_VIEW, 0x00b0_0000);
+    cpu.write32(SCENE_VIEW + 12, 0);
+    cpu.write32(SCENE_VIEW + 8, 0);
+    nested!(cpu, 0x060a_0b48, fade_object_set(cpu, SCENE_VIEW, 1));
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x10_0007));
+    nested!(cpu, 0x0605_ecb4, screen::queue_fill(cpu, 0x060b_05f0, 0x25e7_4000, 0x1000));
+    let src = cpu.read32(0x0607_47a0).wrapping_add(0x1_1000);
+    nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, src, 0x25e7_5000, 0x1000));
+    nested!(cpu, 0x0606_e1bc, sgl::sl_line_scroll_control(cpu, 0, 0));
+    nested!(cpu, 0x0606_e2e4, sgl::sl_page_nbg1(cpu, 0x25e6_0000, 0x400, 0xc000));
+    nested!(cpu, 0x0607_0d0c, sgl::sl_plane_nbg1(cpu, 0));
+    let at = cpu.read32(SCENE_COLOURS_AT);
+    let colours = cpu.read32(at + 16).wrapping_add(cpu.read32(SCENE_COLOURS_OFFSET));
+    nested!(cpu, 0x0600_5b18, super::palette::set_colours(cpu, colours, 0x200, 0xb0));
+    let at = cpu.read32(0x0607_47fc);
+    let src = cpu.read32(at).wrapping_add(cpu.read32(SCENE_COLOURS_OFFSET)).wrapping_add(0x8000);
+    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, src, 0x25e6_8000, 0x9880, 0x800));
+    nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 1, 4));
+    nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 0, 5));
+    let screen = cpu.read32(SCENE_SCREEN);
+    cpu.write32(screen + 88, 0);
+}
+
+/// 0x1000 bytes of the 0x060747a0 buffer (+0x10000) queued to 0x25e74000.
+pub fn fades_copy_b(cpu: &mut Cpu) {
+    let src = cpu.read32(0x0607_47a0).wrapping_add(0x1_0000);
+    nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, src, 0x25e7_4000, 0x1000));
+}
+
+/// The fade views (the spin struct at 0x060747e0 and the view struct at 0x060747b0 put at fade
+/// entries `a` and `b`, plane A's and B's frames made, the second offsets for entry `a`). The
+/// first views' step: entries 0 and 1.
+pub fn fades_view_a(cpu: &mut Cpu) {
+    fades_view(cpu, 0, 1);
+}
+
+/// The second views' step: entries 1 and 2.
+pub fn fades_view_b(cpu: &mut Cpu) {
+    fades_view(cpu, 1, 2);
+}
+
+fn fades_view(cpu: &mut Cpu, a: u32, b: u32) {
+    nested!(cpu, 0x060a_0b48, fade_object_set(cpu, MAPS_SPIN, a));
+    nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+    nested!(cpu, 0x060a_0b88, fade_offsets(cpu, a));
+    nested!(cpu, 0x060a_0b48, fade_object_set(cpu, SCENE_VIEW, b));
+    nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+}
+
+/// 0x1000 bytes of 0x060b05f0 filled into 0x25e76000 and of the 0x060747a0 buffer (+0x17000) queued
+/// to 0x25e77000.
+pub fn fades_fill(cpu: &mut Cpu) {
+    nested!(cpu, 0x0605_ecb4, screen::queue_fill(cpu, 0x060b_05f0, 0x25e7_6000, 0x1000));
+    let src = cpu.read32(0x0607_47a0).wrapping_add(0x1_7000);
+    nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, src, 0x25e7_7000, 0x1000));
+}
+
+/// The NBG0 and NBG1 maps put at 0x25e74000 and 0x25e76000.
+pub fn fades_maps_set(cpu: &mut Cpu) {
+    nested!(cpu, 0x0607_0c4c, sgl::sl_map_nbg0(cpu, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000, 0x25e7_4000));
+    nested!(cpu, 0x0607_0d1c, sgl::sl_map_nbg1(cpu, 0x25e7_6000, 0x25e7_6000, 0x25e7_6000, 0x25e7_6000));
+}
+
+/// The fade scene's end: the second views and the scroll gone on.
+pub fn fades_end(cpu: &mut Cpu) {
+    nested!(cpu, 0x060a_0f10, fades_view_b(cpu));
+    nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+}
+
+/// The third map scene's map set (0x060b20e0: type 22 with its tables 0x060afcfc and 0x25e76000,
+/// 0xd00000 and 0x1000000, 0x1000, 0x1fff and 0x90 halfwords); screen 5's priority 3; the view
+/// struct's place cleared and scales 1.0; the message at 0x060aff48 shown; the object's +32 cleared.
+pub fn fades_map_set(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 5, 3));
+    let m = 0x060b_20e0;
+    cpu.write8(m, 22);
+    cpu.write8(m + 1, 0);
+    cpu.write32(m + 20, 0x060a_fcfc);
+    cpu.write32(m + 16, 0x25e7_6000);
+    cpu.write32(m + 8, 0x00d0_0000);
+    cpu.write32(m + 12, 0x0100_0000);
+    cpu.write16(m + 4, 0x1000);
+    cpu.write16(m + 6, 0x1fff);
+    cpu.write16(m + 2, 0x90);
+    cpu.write32(m + 28, 0);
+    cpu.write32(m + 24, 0);
+    let v = SCENE_VIEW;
+    cpu.write32(v + 12, 0);
+    cpu.write32(v + 8, 0);
+    cpu.write32(v + 20, 0x1_0000);
+    cpu.write32(v + 16, 0x1_0000);
+    cpu.write32(o + 32, 0);
+    nested!(cpu, 0x0606_1620, super::text::message_set(cpu, 0x060a_ff48));
 }
 
 // ==== from 0x060a1000 on ===========================================================================
