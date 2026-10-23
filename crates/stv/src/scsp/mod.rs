@@ -34,19 +34,19 @@ const MCIRE: usize = 0x42E;
 pub struct Scsp {
     pub ram: Vec<u8>,
     pub regs: Vec<u8>,
-    slots: [Slot; 32],
+    pub slots: [Slot; 32],
     /// Samples made since the reset (the envelope clock counts every second one).
-    samples: u64,
+    pub samples: u64,
     /// KYONEX written: the slots key on and off after the next envelope clock.
     key_pending: bool,
     /// The sound stack: each slot's last two outputs, for frequency modulation.
-    stack: [i16; 64],
-    stack_pos: usize,
-    dsp: Dsp,
+    pub stack: [i16; 64],
+    pub stack_pos: usize,
+    pub dsp: Dsp,
     /// The slots' sends this sample, for the DSP's next.
     mixs_next: [i32; 16],
     /// The noise generator (a 17-bit LFSR).
-    noise: u32,
+    pub noise: u32,
     /// Samples counted towards each timer's next step (timers A, B, C).
     prescale: [u32; 3],
     /// The main CPU's sound request went from clear to pending (the SCU raises its interrupt).

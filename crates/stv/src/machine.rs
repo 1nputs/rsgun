@@ -207,6 +207,11 @@ impl Sys {
         if self.clock352 { 28_636_363 } else { 26_846_590 }
     }
 
+    /// Where the sound clock is: see [`Sys::set_sound_phase`].
+    pub fn sound_phase(&self) -> (u64, u32) {
+        (self.sound_owed, self.sound_in_sample)
+    }
+
     /// Sets where the sound clock is: the fraction of a sound cycle owed to the main clock (in units
     /// of 1/`sh2_hz` cycle) and the 68000 cycles already into the SCSP's current sample. A client
     /// that sets a machine up without running the boot gives the phase the run it stands for had.
@@ -784,7 +789,7 @@ pub struct Machine {
     pub cpu: [Sh2; 2],
     pub sys: Box<Sys>,
     /// Cycles each CPU has run into the current line.
-    time: [u32; 2],
+    pub time: [u32; 2],
     pub steps: [u64; 2],
     /// The last frame's picture: width, height, RGB.
     pub picture: (usize, usize, Vec<u8>),
