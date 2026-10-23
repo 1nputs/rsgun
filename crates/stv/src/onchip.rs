@@ -26,7 +26,7 @@ pub struct Frt {
     /// The byte a read of FRC's or ICR's high half latches for the low half.
     temp: u8,
     /// Cycles counted towards the next FRC tick.
-    sub: u32,
+    pub sub: u32,
 }
 
 saved!(Frt { tier, ftcsr, frc, ocra, ocrb, tcr, tocr, icr, temp, sub });

@@ -186,6 +186,14 @@ impl Sys {
 }
 
 impl Sys {
+    /// Starts the sound CPU from its reset vectors (sound RAM 0 and 4), as SMPC's SNDON does once the
+    /// sound RAM holds a program: for a client that sets a machine up without running the boot.
+    pub fn start_sound_cpu(&mut self) {
+        self.sound_on = true;
+        let mut bus = SoundBus { scsp: &mut self.scsp };
+        self.m68k.reset(&mut bus);
+    }
+
     fn cycles_per_line(&self) -> u32 {
         if self.clock352 { 1820 } else { 1708 }
     }
