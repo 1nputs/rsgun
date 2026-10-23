@@ -1886,7 +1886,9 @@ fn ring_targets(cpu: &mut Cpu, s: u32) {
             || cpu.read8(t + OBJ_MODE) as i8 >= ENDING as i8
             || cpu.read32(t + FLAGS) & UNHOMED != 0
             || cpu.read32(t + LIFE) as i32 <= 0
-            || nested!(cpu, 0x0604_5ee4, super::aim::distance(cpu, s, t)) as i32 > radius
+            // distance pushes the target (r8), the cooling count (r9) and its return address, left
+            // in the stack for later code to read
+            || cpu.holding(&[(8, t), (9, cooling)], |cpu| nested!(cpu, 0x0604_5ee4, returning 0x0604_bbd4, super::aim::distance(cpu, s, t))) as i32 > radius
         {
             continue;
         }
