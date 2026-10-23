@@ -4,8 +4,10 @@ Read this first. `PLAN.md` beside it has the owner's decisions and the phases, `
 game asks of the hardware; the method is md-recomp's playbook (`md-recomp/playbook/PLAYBOOK.md`, a
 sibling project: not needed to carry on). Paths are from the repository's root.
 
-**The native boot (23 October):** its first part is built and checkable, see "The native boot,
-first part" (section before 6). Next: the sound commands, the BIOS-menu path, wiring it in.
+**The native boot (23 October):** built, checkable and wired in as `--native-boot` (opt-in, the
+default unchanged); see "The native boot, built" (section before 6). Next: make it the default
+(under boot.rs's place, once the owner agrees), the BIOS's repair path for an EEPROM it does not
+accept, the BIOS-menu path.
 
 **Now (22 October 2026, afternoon).** Everything the game runs is readable Rust now but its stage
 overlays (and, on purpose, the .control interrupt layer and the BIOS's own services). The work is
@@ -72,13 +74,9 @@ the service table at 0x06000200-0x06000800 points into it: interrupts, SCU mask,
 coins, credits, continue, backup I/O) is 41 functions called, 40 of them mechanical translations.
 Next: rewrite those in bios.rs (compare mode, as the overlays), then the native boot (the handover
 state is mapped in "The native boot: the handover state", before section 6; native_boot.rs builds
-work RAM, the CPUs and the devices' registers equal to it, `--native-boot-check`). Left for the
-boot: the sound driver's state (the BIOS's commands to it), the stack residue and boot variables
-written as literals (never read: make the check ignore those ranges instead), other EEPROMs (the
-BIOS's repair path; the checksum word 0x9015), wiring it in under boot.rs (and boot.rs's state is
-the end of frame 1159, before the game is copied: the handover is mid-frame 1160), and eeprom.rs's
-write decoding (it takes a write's opcode from the data bits: the BIOS's repair path then leaves
-the EEPROM zeros; a valid EEPROM never takes that path).
+work RAM, the CPUs, the devices and the sound side equal to it, `--native-boot-check`; `--native-boot`
+starts a run from it). Left for the boot: see "The native boot, built" (what is not equal, other
+EEPROMs, making it the default).
 Left besides the overlays: the BIOS's services (the machine's code, not the game's), and a
 readable pass over the routines asm2sm.py generated (the slave's polygon pipeline, the VDP
 set-up). When the overlays are done, run the whole-game check again on main.
@@ -702,28 +700,38 @@ bits, the stack residue, the registers r0-r5, `line` (228) and `frame` (1159). N
 (nothing but the counters above changes between runs of the same inputs). A native boot picks fixed values; boot.rs
 already shows that two bytes of the operating-time count are all play1 sees of it.
 
-### The native boot, first part (built 23 October)
+### The native boot, built (23 October)
 
 `crates/rsgun/src/native_boot.rs` builds this state from the images (`build(&Inputs)`: the BIOS,
-the cart, the EEPROM and backup RAM files): work RAM-H and -L, the backup RAM's boot changes, the
-master's registers and on-chip registers, the SCU, SMPC, VDP1/VDP2 registers, VDP2's colour RAM
-and sound RAM with the sound CPU running. Nothing uses it yet (boot.rs is as it was).
+the cart, the EEPROM and backup RAM files): work RAM-H and -L, the backup RAM's boot changes, both
+CPUs' registers and the master's on-chip registers, the SCU, SMPC, VDP1/VDP2 registers, VDP2's
+colour RAM, sound RAM with the sound CPU and the SCSP where the BIOS's boot leaves them, the
+machine's line time. **`rsgun --native-boot`** (windowed or headless, with `--script`, `--compare`,
+`--load-state` not) starts from it: no BIOS run, no boot.rs state (the saves' backup RAM and EEPROM
+are read as usual). The default is unchanged (boot.rs's state, or the BIOS with `--cold`).
 
-**Check it:** `tools/boot/reach/build.sh WORK` once, then
+**Check it:** `tools/boot/reach/build.sh WORK` once (its patch to a private copy of crates/stv also
+logs EEPROM reads and writes with env EELOG), then
 `WORK/target/release/driver . out/port/boot-ref/default 0x06004000` (17 s; env EEPROM, BACKUP for
 the inputs), then `target/release/rsgun --native-boot-check out/port/boot-ref/default
 [--boot-eeprom FILE] [--boot-backup FILE]` (the same files the driver had; the default is the
 images' EEPROM and a blank backup RAM). It builds the native state, loads `entry.state` into a second
 machine, and prints each part: memories by extents (native / reference), the CPUs, on-chip
-registers, SCU, SMPC by field. The exit code is nonzero while any part differs.
+registers, SCU, SMPC by field, the SCSP's engine, the 68000, the line time. The exit code is nonzero
+while any part differs.
 
-**Equal now (default EEPROM, blank backup RAM; also the backup RAM left by a boot and a player's
-own, with the stack residue below as the only differences):** work RAM-H and RAM-L byte for byte
-(the 898 residue bytes included), the backup RAM after the boot (a boot counter that grows by
-0x0483, and in a blank one the settings block: two copies), both CPUs (the master's registers as
-the loader leaves them, pr 0x4516), both CPUs' on-chip registers (FRC, FTCSR and the sub-tick
-count are the instant's, run dependent), the SCU, the SMPC (the RTC's seconds are the instant's),
-VDP1's registers and framebuffers, VDP2's registers and colour RAM, `line` 228, `frame` 1159.
+**Equal now (default EEPROM, blank backup RAM):** work RAM-H and RAM-L byte for byte but for two
+ranges listed as *ignored* (below), the backup RAM after the boot, both CPUs and on-chip registers,
+the SCU, the SMPC, VDP1's registers and framebuffers, VDP2's registers and colour RAM, **sound RAM,
+the SCSP's registers and engine (slots, DSP, counters) and the 68000, byte for byte**, `line` 228,
+`frame` 1159, the cycles each CPU has run into line 228 (75 and 64). Not equal: VDP1 VRAM (0xc5be
+bytes: the BIOS's pictures over the RAM test pattern) and VDP2 VRAM (0x6f5 bytes: the BIOS screens'
+leftovers), both computed by its drawing code and never used by the game (a zeroed copy plays
+identically, section above), and `sound_steps` (a statistic of 68000 steps, not compared).
+*Ignored* by the check, listed with their number of differing bytes: the boot program's variables
+(0x06041aa0-0x06041b28, inside the game's .bss, cleared by its `main`) and the stack residue below
+the master's r15 (0x060fff34-0x06100000): never read (play1 from a state with them changed gave the
+same pictures and sound, section above); the native boot no longer builds them.
 
 **How work RAM is made** (each function names its ROM routine): the fills and copies come from the
 tables the reset code reads (ROM 0x494-0x4e0 and the pointer table 0x530/0x564), read from the BIOS
@@ -733,49 +741,71 @@ is ported for the case the EEPROM byte at 0x06000795 has bit 2 clear; the per-de
 backup RAM is not); the title string from the cart header's title for the region in the settings
 word; the pointers into the BIOS's own routines and small variables are literals of its code;
 the slot scan's results (0x0600064c, 0x06000658), the area byte 0x06000656 (1) and a few counters
-are the values found at the handover. **The stack residue (0x060fff34-0x06100000) and the boot
-program's variables (0x06041aa0-0x06041b28) are a literal list** (`leftovers`): the interrupt
-frame and loader calls of the interpreted boot, never read; they differ in a few bytes when the
-backup RAM differs (the run's pointers), nothing else.
+are the values found at the handover.
 
-**Not equal, and what each needs** (the list the check prints; none of it changes a play):
-- VDP1 VRAM (0xc5be bytes): the BIOS's pictures and command lists over the RAM test pattern;
-  VDP2 VRAM (0x6f5 bytes): the BIOS screens' leftovers. Both are computed by its drawing code
-  and never used by the game (a zeroed copy plays identically, section above).
-- Sound: sound RAM is the LZ-decompressed driver (ROM 0x32000 into 0, the decoder at ROM 0x1760
-  ported: `lz_decode`), the copies from ROM (0xa000, 0x10000, 0x40000, 0x50000), the 0x6000 fill
-  of 0x20000-0x3ffff, and the sound CPU started from its vectors (`Sys::start_sound_cpu`) and
-  run 50,000 steps, by which the driver has built its own tables: 170 bytes of sound RAM (the
-  driver's command queue at 0x500, a few words at 0x781a-0x7900, 0x9804, 0x9fa0: what the
-  BIOS's commands to the driver left), three SCSP register bytes (0x419-0x41e, timer
-  settings), the 68000's registers and the SCSP's slot/timer state differ. To close them the
-  BIOS's commands to the driver (its main CPU's writes to the SCSP's
-  mailbox) are to be found and ported, or the driver's idle state accepted (the sound was equal in the
-  zeroed-RAM test above). `sound_steps` is a statistic.
-- Other EEPROMs: only the default was checked. A changed setting makes the BIOS take its repair
-  path (the checksum word 4 / 36 = 0x9015 is not a plain sum, xor or byte sum of the words: tried),
-  which rewrites the EEPROM and its RAM image; the native boot copies the image it is given.
-  The EEPROM-derived bytes ported (0x06000248, the device bytes, 0x06000750, 0x06002cc8,
-  0x060006b4-0x060006c0, the backup block's word) follow the code, but are checked only with the
-  one EEPROM. The reach driver with a changed byte confirms the repair (EELOG=1 prints its writes).
+**How the sound is made** (`sound_ram`, `sound_driver_start`): sound RAM is the LZ-decompressed
+driver (ROM 0x32000 into 0, the decoder at ROM 0x1760 ported: `lz_decode`), the copies from ROM
+(0xa000, 0x10000, 0x40000, 0x50000) and the 0x6000 fill of 0x20000-0x3ffff. The BIOS loads the
+driver three times in its boot (frames 5, 1149 and 1156; the last one is what is left); a
+write trace of the main CPU to sound RAM below 0x1000 and the SCSP registers (the reach driver
+with a patch printing them) shows what it says to the driver after the 68000 is released (SNDON,
+frame 1157 line 173): the mailbox at sound RAM 0x700 (ROM 0x149a, 0x1502, 0x12f2-0x1330,
+0x141c-0x142a: command words 0x0c00, 0x0d00, 0x0800 twice, 0x8700 with two argument bytes) and
+three entries of the command queue (0x504, 0x514, 0x51c = 0x8001, ROM 0x3ffc-0x400c), at lines 0,
+101, 199, 218 and 239 after the release. The native boot does the same: the 68000 is reset, the
+SCSP's sample clock is set to the phase it had then (`Sys::set_sound_phase`), and the machine's
+own sound step (`Sys::run_sound`, one line of cycles) runs 581 lines, the main CPU's writes made
+between lines at the lines the BIOS made them; that gives the 68000's registers and the whole
+sound RAM equal. The SCSP's counters (samples since its reset 851,200, the noise register, the sound
+stack position and the DSP's down-counter) are the BIOS boot's at the handover, set as constants:
+the envelope clock's parity and the noise decide how the first sound the game starts sounds
+(without them the wav differed from the first sound effect on). The sound output made on the way
+is thrown away.
+
+**Checked (play1 to frame 4000, `tools/oracle/play1.txt`, own save dirs; out/port/boot-3):** from
+the reference entry state (`--load-state` of OUT/entry.state) and from `--native-boot`: **the same
+picture (`--shot`), the same sound (`--wav`, byte for byte) and the same end state** but for VDP1
+VRAM (unused bytes) and `sound_steps`; also the same picture as the default run from power on.
+`--native-boot --compare out/port/boot-3/play1.txt` (headless, `--script play1.txt --frames
+4000`, 3.5 minutes): **658 functions, 151120432 calls, 151120417 equal, 0 diverged**, 15 too long to
+check (the same 15 as the default run). Note the frame numbering: a native run starts at frame 1159,
+line 228, as the reference does, so a script's frames and the reports' frame numbers agree with a
+run that loaded `entry.state` (a run from boot.rs's state or the BIOS also has 1159 at the handover).
+A run with a used save directory starts with its backup RAM (the previous run's scores): use a
+fresh `--save` dir for comparisons.
+
+**Other EEPROMs.** The BIOS accepts an EEPROM when it starts with "SEGA" and each of the two copies
+(checksum word at bytes 8 and 68, the 56 bytes after its 4 bytes) has a matching checksum: a CRC-16
+(polynomial 0x1021, in a 32-bit register starting at 0xdebdeb00, the BIOS's RAM code 0x060013bc,
+called from ROM 0x49c4; `native_boot::settings_checksum`). The default's 0x9015 is that, so the
+earlier "not a sum" puzzle is solved. Checked with 28 single-byte variants (valid checksums,
+out/port/boot-4/sweep, made with the reach driver; the references are deleted, the EEPROM files kept): 23 give a native state equal in work RAM, backup
+RAM, devices and sound (the FRT's sub-tick count is one or two ticks off in 10 of them: run dependent, the
+boot's cycle count differs with the settings); **b28 and b29 (EEPROM word 14) and b38, b39 (word 19)
+take the BIOS's repair path** (the value is out of range: it resets the settings block to its
+defaults, 0x5c80 as the checksum, and rewrites the EEPROM and its RAM image and the backup RAM's
+copy of a setting), which the native boot does not make (`build` says so when the checksum is wrong;
+out-of-range values are not detected); **b26 never reaches the handover** (the BIOS's menu/error
+path). To match these: port the range checks (ROM 0x4996 onwards and the settings routines at
+0x4dc0, 0x372c) and the default block. eeprom.rs's write decoding is fixed (crates/stv, a unit
+test): the repair now writes what the BIOS meant.
+
+**Not done:** the BIOS-menu/error path (b26-like), the repair path, windowed `--native-boot` (the
+code is the same as the headless one; only the headless run was tried), VDP1/VDP2 VRAM (never used),
+and making it the default.
 
 ### Open questions
 
-- The EEPROM's validity check (word 4 = 0x9015 is not a plain sum or xor of the words; any change
-  to the settings sent the BIOS down its repair path), so the settings-to-RAM mapping is known only
-  for the default EEPROM. Worth finding the check in the boot program (ROM 0x8000-0xb400) and testing
-  a few valid settings. **Also a bug found on the way**: `eeprom.rs` decodes a write's opcode from
-  `shift >> 6` at 25 bits (the data bits), so the BIOS's repair writes (ERASE/WRITE) land as
-  WRAL fills (the EEPROM ends all zeros); a valid-EEPROM boot never reaches it.
+- The EEPROM's range checks and the repair path (see "Other EEPROMs" above); the checksum is known.
+  (The eeprom.rs bug noted here before is fixed.)
 - What in the 898 residue bytes reads the EEPROM (0x06000248 settings word, 0x06000650-0x0600065b,
   0x060006b4-0x060006c0): needs the code at ROM 0x339a, 0x3798, 0x4d54 and the boot program read.
-- The 68000 driver in sound RAM: solved (first part above): ROM 0x32000, LZ-decompressed into
-  sound RAM 0 by the routine at ROM 0x1760 (the load is ROM 0x1126-0x11d2).
+- The 68000 driver in sound RAM and the BIOS's commands to it: solved ("How the sound is made").
 - The VDP2 registers/CRAM computed bytes, and VDP1's: whether the game depends on any (nothing seen
   by frame 4000).
-- Timing: the handover instant is mid-line; a native boot starts the machine at line 0 of a frame
-  or at the instant's line 228, and compare/golden runs against the interpreted boot will differ
-  in the run-dependent items above whichever is chosen.
+- Timing: the native boot starts at the instant's frame 1159, line 228, with the cycles into the line
+  of the instant, so a run from it matches a run that loaded `entry.state`; the run-dependent items
+  above (FRC, the FRT sub-tick count, the operating-time count) are the instant's values.
 
 ## 6. Next steps, in order
 
