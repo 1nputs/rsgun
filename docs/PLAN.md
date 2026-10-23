@@ -24,6 +24,15 @@ against the oracle (Mednafen) frame by frame, the way `md-recomp` did NHL '94 an
 - **One agent** at a time beside the lead. (21 October: two, each on its own overlay in its own
   worktree; CLAUDE.md has the rules.)
 - **Names**: the repository and game are `rsgun`; the runtime crate is `stv` for now.
+- **The BIOS** (23 October). Its services the game calls after the handover (its code in RAM at
+  0x06000c00-0x06003000 and the few ROM routines: the operating-time count, the empty hook, the
+  backup-RAM helpers) are rewritten as readable Rust in `crates/rsgun` (bios.rs: this BIOS's code
+  as the game sees it), checked in compare mode like the game. A release starts with a **native
+  boot**: the handover state (the game loaded from the cart, the BIOS's RAM area and service table
+  from the BIOS ROM, the settings from the EEPROM, the machine's registers as the BIOS leaves them)
+  built in Rust and checked byte for byte against the interpreted boot's state; the BIOS's intro
+  is skipped. The BIOS ROM stays required (read at run time, never committed). The BIOS's
+  test/service menu: decided later (kept interpreted meanwhile).
 
 ## The architecture
 

@@ -61,6 +61,13 @@ SGL's code (section 6, step 4). The last whole-game check before the overlay wor
 (`check_marathon.sh 7`, reports in out/port/marathon-898fd01, the reference the overlay work
 reads) had every call equal in all 21 segments. The native check runs play1 and the attract mode
 at `--cpu-speed 16` against the interpreter's pictures. `check.sh` is the quick gate on main.
+The BIOS (23 October; PLAN.md has the decision): after the handover a native run interprets only
+the BIOS ROM's 0x0efc (each frame: the operating-time count at 0x06000758), 0x44fc (an empty hook,
+three times a frame, also through the RAM stubs 0x0600143e/0x06001464) and, rarely, 0x372c (area),
+0x4dc0 (settings), 0x3842 (players), 0x3a9c (backup clear); its RAM code (0x06000c00-0x06003000,
+the service table at 0x06000200-0x06000800 points into it: interrupts, SCU mask, vblank hook,
+coins, credits, continue, backup I/O) is 41 functions called, 40 of them mechanical translations.
+Next: rewrite those in bios.rs (compare mode, as the overlays), then the native boot.
 Left besides the overlays: the BIOS's services (the machine's code, not the game's), and a
 readable pass over the routines asm2sm.py generated (the slave's polygon pipeline, the VDP
 set-up). When the overlays are done, run the whole-game check again on main.
