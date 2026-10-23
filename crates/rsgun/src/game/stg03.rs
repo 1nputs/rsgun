@@ -13300,3 +13300,1042 @@ pub fn parts_wrap(cpu: &mut Cpu, o: u32) {
         nested!(cpu, 0x0609_9490, parts_shift_y(cpu, o, 0x0800_0000));
     }
 }
+
+// ---- the second boss: its view, shots and phases --------------------------------------------------
+
+/// The boss object's view: where the parts are looked at from (+0x9e8, +0x9ec, +0x9f0), the place the
+/// view is at (+0x9f4, +0x9f8, +0x9fc) and its speeds (+0xa00, +0xa04, +0xa08).
+const VIEW_AT: u32 = 0x9f4;
+const VIEW_TARGET: u32 = 0x9e8;
+const VIEW_SPEED: u32 = 0xa00;
+const VIEW_PULL_DIVISOR: u32 = 0xc0;
+const VIEW_PULL_RATE: u32 = 16;
+/// The nine parts' places (longs from +0x668) averaged with the boss's y (+24) for the view's y (+0x9ec).
+const VIEW_PARTS: u32 = 0x668;
+const VIEW_Y: u32 = 0x9ec;
+
+/// The view pulled toward its target: each of the three places (+0x9f4...) differs from its target
+/// (+0x9e8...) by `d`; its speed (+0xa00...) eases toward -d / 16 by |d / 192|; then the speeds move
+/// the places. (The SH-2 code keeps two offsets in its frame.)
+pub fn view_pull(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    cpu.write32(d, VIEW_AT);
+    cpu.write32(d + 4, VIEW_SPEED);
+    for i in 0..3u32 {
+        let diff = cpu.read32(o + VIEW_AT + 4 * i).wrapping_sub(cpu.read32(o + VIEW_TARGET + 4 * i));
+        let mut a = nested!(cpu, 0x0600_6a78, math::quotient(cpu, diff, VIEW_PULL_DIVISOR));
+        if (a as i32) < 0 {
+            a = a.wrapping_neg();
+        }
+        let to = nested!(cpu, 0x0600_6a78, math::quotient(cpu, diff.wrapping_neg(), VIEW_PULL_RATE));
+        let speed = cpu.read32(o + VIEW_SPEED + 4 * i);
+        let speed = nested!(cpu, 0x0604_6168, actors::approach(cpu, speed, to, a));
+        cpu.write32(o + VIEW_SPEED + 4 * i, speed);
+    }
+    for i in 0..3u32 {
+        let v = cpu.read32(o + VIEW_AT + 4 * i).wrapping_add(cpu.read32(o + VIEW_SPEED + 4 * i));
+        cpu.write32(o + VIEW_AT + 4 * i, v);
+    }
+}
+
+/// The view's y (+0x9ec) set to `y` less the mean of the boss's y and its nine parts' places (each
+/// in whole units, the long's high halfword rounded toward zero), in 16.16.
+pub fn view_follow(cpu: &mut Cpu, o: u32, y: u32) {
+    let high = |v: u32| -> i32 {
+        let v = v as i32;
+        (v.wrapping_add(if v < 0 { 0xffff } else { 0 }) >> 16) as i16 as i32
+    };
+    let mut sum = high(cpu.read32(o + 24));
+    for i in 0..9u32 {
+        sum = sum.wrapping_add(high(cpu.read32(o + VIEW_PARTS + 4 * i)));
+    }
+    let mean = nested!(cpu, 0x0600_6a78, math::quotient(cpu, sum as u32, 10)) << 16;
+    cpu.write32(o + VIEW_Y, y.wrapping_sub(mean));
+}
+
+/// The ten shots' slots (the head's, as `parts_shift_y` has them): in use (halfword from +0xa18),
+/// x (longs from +0xa2c), y (from +0xa54), the fall (from +0xa7c), three longs cleared (from +0xaa4,
+/// +0xacc, +0xaf4), two halfwords cleared (from +0xb1c, +0xb30), the wait (from +0xb44), and four
+/// longs of 0xfe000000 (+0xb90, +0xb88, +0xb94, +0xba0, 36 bytes apart).
+const SLOT_USED: u32 = 0xa18;
+const SLOT_X: u32 = 0xa2c;
+const SLOT_Y: u32 = 0xa54;
+const SLOT_FALL: u32 = 0xa7c;
+const SLOT_CLEAR_LONGS: [u32; 3] = [0xaa4, 0xacc, 0xaf4];
+const SLOT_CLEAR_HALVES: [u32; 2] = [0xb1c, 0xb30];
+const SLOT_WAIT: u32 = 0xb44;
+const SLOT_FAR: [u32; 4] = [0xb90, 0xb88, 0xb94, 0xba0];
+const SLOT_FAR_STRIDE: u32 = 36;
+const SLOT_ABOVE: u32 = 0xfe00_0000;
+
+/// The ten slots set from a table of ten (x, y) halfword pairs at `table`: each in use, its x and y
+/// (offset by the boss's y and 0xfe000000 above) and the rest as the constants above say, the wait 16.
+pub fn shots_set(cpu: &mut Cpu, o: u32, table: u32) {
+    for i in 0..10u32 {
+        cpu.write16(o + SLOT_USED + 2 * i, 1);
+        let x = (cpu.read16(table + 4 * i) as i16 as i32 as u32) << 16;
+        cpu.write32(o + SLOT_X + 4 * i, x);
+        let y = (cpu.read16(table + 4 * i + 2) as i16 as i32 as u32) << 16;
+        let y = y.wrapping_add(cpu.read32(o + 24)).wrapping_add(SLOT_ABOVE);
+        cpu.write32(o + SLOT_Y + 4 * i, y);
+        cpu.write32(o + SLOT_FALL + 4 * i, 0xfff8_0000);
+        for at in SLOT_CLEAR_LONGS {
+            cpu.write32(o + at + 4 * i, 0);
+        }
+        for at in SLOT_CLEAR_HALVES {
+            cpu.write16(o + at + 2 * i, 0);
+        }
+        cpu.write16(o + SLOT_WAIT + 2 * i, 16);
+        for at in SLOT_FAR {
+            cpu.write32(o + at + SLOT_FAR_STRIDE * i, SLOT_ABOVE);
+        }
+    }
+}
+
+/// The first free slot (halfword from +0xa18 zero) taken, its x `x`: in use, y the boss's y less
+/// (the long at +0xa0c and 0x600000), the fall 0x20000, the three longs and two halfwords cleared,
+/// the wait 20 and the four far longs set.
+pub fn shot_add(cpu: &mut Cpu, o: u32, x: u32) {
+    for i in 0..10u32 {
+        if cpu.read16(o + SLOT_USED + 2 * i) != 0 {
+            continue;
+        }
+        cpu.write16(o + SLOT_USED + 2 * i, 1);
+        cpu.write32(o + SLOT_X + 4 * i, x);
+        let y = cpu.read32(o + MOTHER_REACH).wrapping_add(0x60_0000);
+        let y = cpu.read32(o + 24).wrapping_sub(y);
+        cpu.write32(o + SLOT_Y + 4 * i, y);
+        cpu.write32(o + SLOT_FALL + 4 * i, 0x2_0000);
+        for at in SLOT_CLEAR_LONGS {
+            cpu.write32(o + at + 4 * i, 0);
+        }
+        for at in SLOT_CLEAR_HALVES {
+            cpu.write16(o + at + 2 * i, 0);
+        }
+        cpu.write16(o + SLOT_WAIT + 2 * i, 20);
+        for at in SLOT_FAR {
+            cpu.write32(o + at + SLOT_FAR_STRIDE * i, SLOT_ABOVE);
+        }
+        break;
+    }
+}
+
+/// The boss object's phase: its step (+0x124, a byte), its time in it (+0x128), a side byte (+0x9e0),
+/// the reach (+0xa0c) and its speed (+0xa10), the scale (+0xa14), turns (+0x9e2, +0x9e4, +0x9e6, the
+/// halfword at +0x30 the heading), the fire count (+0xde8), a run byte (+0xdec) and the fade (+0xdee),
+/// the script's place (+0x6c) and the pointer (+0x8c) its flags (+0x94, +0x132) go with.
+const MOTHER_STEP: u32 = 0x124;
+const MOTHER_TIME: u32 = 0x128;
+const MOTHER_SIDE: u32 = 0x9e0;
+const MOTHER_REACH: u32 = 0xa0c;
+const MOTHER_REACH_SPEED: u32 = 0xa10;
+const MOTHER_SCALE: u32 = 0xa14;
+const MOTHER_COUNT: u32 = 0xde8;
+const MOTHER_RUN: u32 = 0xdec;
+const MOTHER_FADE: u32 = 0xdee;
+const MOTHER_LATE: u32 = 0x130;
+const MOTHER_FLAGS: u32 = 0x132;
+const MOTHER_POINTER: u32 = 0x8c;
+const MOTHER_TURN_A: u32 = 0x9e2;
+const MOTHER_TURN_B: u32 = 0x9e4;
+const MOTHER_TURN_C: u32 = 0x9e6;
+const MOTHER_HEADING: u32 = 0x30;
+const MOTHER_SCRIPT_A: u32 = 0x060a_d44c;
+const MOTHER_SCRIPT_B: u32 = 0x060a_d468;
+const MOTHER_SCRIPT_C: u32 = 0x060a_d484;
+const MOTHER_SHOTS_TABLE: u32 = 0x060a_d546;
+const MOTHER_STAGE_BYTE: u32 = 0x0600_ed84;
+const MOTHER_SE: u32 = 96;
+const MOTHER_AIM_Y: u32 = 0xff80_0000;
+
+/// Phase 0 entered: step 0, script A, the side byte 119, the reach 0x1800000 and its speed 0x28000,
+/// the turns +0x9e4 and +0x9e6 set to 0xe000 and 0x4000, the heading to 0xc000, the fire count 0.
+pub fn mother_enter_0(cpu: &mut Cpu, o: u32) {
+    cpu.write8(o + MOTHER_STEP, 0);
+    nested!(cpu, 0x0605_6628, actors::script_start(cpu, o + 0x6c, MOTHER_SCRIPT_A));
+    cpu.write8(o + MOTHER_SIDE, 119);
+    cpu.write32(o + MOTHER_REACH, 0x0180_0000);
+    cpu.write16(o + MOTHER_TURN_B, 0xe000);
+    cpu.write16(o + MOTHER_TURN_C, 0x4000);
+    cpu.write16(o + MOTHER_HEADING, 0xc000);
+    cpu.write32(o + MOTHER_REACH_SPEED, 0x2_8000);
+    cpu.write16(o + MOTHER_COUNT, 0);
+}
+
+/// Phase 2 entered: step 2, script A, the side byte 0, the reach -0x1400000 and its speed 0x28000,
+/// the fire count and the flags (+0x132) cleared and the nine parts' flags (+0x6e6) cleared.
+pub fn mother_enter_2(cpu: &mut Cpu, o: u32) {
+    cpu.write8(o + MOTHER_STEP, 2);
+    nested!(cpu, 0x0605_6628, actors::script_start(cpu, o + 0x6c, MOTHER_SCRIPT_A));
+    cpu.write8(o + MOTHER_SIDE, 0);
+    cpu.write32(o + MOTHER_REACH, 0xfec0_0000);
+    cpu.write32(o + MOTHER_REACH_SPEED, 0x2_8000);
+    cpu.write16(o + MOTHER_COUNT, 0);
+    cpu.write16(o + MOTHER_FLAGS, 0);
+    for i in 0..9u32 {
+        cpu.write16(o + 0x6e6 + 2 * i, 0);
+    }
+}
+
+/// Phase 4 entered: step 4, script B, the sound 96, the side byte 1, the time 0, the reach speed 0x1c000.
+pub fn mother_enter_4(cpu: &mut Cpu, o: u32) {
+    cpu.write8(o + MOTHER_STEP, 4);
+    nested!(cpu, 0x0605_6628, actors::script_start(cpu, o + 0x6c, MOTHER_SCRIPT_B));
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, MOTHER_SE));
+    cpu.write8(o + MOTHER_SIDE, 1);
+    cpu.write32(o + MOTHER_TIME, 0);
+    cpu.write32(o + MOTHER_REACH_SPEED, 0x1_c000);
+}
+
+/// Phase 5 entered: step 5, script A, the sound 96, the side byte 2, the reach speed 0x28000, the
+/// fire count, the time and the run byte cleared.
+pub fn mother_enter_5(cpu: &mut Cpu, o: u32) {
+    cpu.write8(o + MOTHER_STEP, 5);
+    nested!(cpu, 0x0605_6628, actors::script_start(cpu, o + 0x6c, MOTHER_SCRIPT_A));
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, MOTHER_SE));
+    cpu.write8(o + MOTHER_SIDE, 2);
+    cpu.write32(o + MOTHER_REACH_SPEED, 0x2_8000);
+    cpu.write16(o + MOTHER_COUNT, 0);
+    cpu.write32(o + MOTHER_TIME, 0);
+    cpu.write8(o + MOTHER_RUN, 0);
+}
+
+/// Two phases that do nothing.
+pub fn mother_idle_a(_cpu: &mut Cpu) {}
+
+pub fn mother_idle_b(_cpu: &mut Cpu) {}
+
+/// The reach eased to -0x200000 (by 0x20000); there the step goes on, the time is cleared and the
+/// flags' bit 7 cleared; the fade (+0xdee), when not 0, goes up by 2, and is the screen's offset in
+/// all three colours.
+pub fn mother_move_a(cpu: &mut Cpu, o: u32) {
+    let reach = cpu.read32(o + MOTHER_REACH);
+    let reach = nested!(cpu, 0x0604_6168, actors::approach(cpu, reach, 0xffe0_0000, 0x2_0000));
+    cpu.write32(o + MOTHER_REACH, reach);
+    if reach == 0xffe0_0000 {
+        let step = (cpu.read8(o + MOTHER_STEP) as i8).wrapping_add(1);
+        cpu.write8(o + MOTHER_STEP, step as u8);
+        cpu.write32(o + MOTHER_TIME, 0);
+        let flags = cpu.read16(o + MOTHER_FLAGS) & 0xff7f;
+        cpu.write16(o + MOTHER_FLAGS, flags);
+    }
+    let fade = cpu.read16(o + MOTHER_FADE) as i16;
+    if fade != 0 {
+        cpu.write16(o + MOTHER_FADE, (fade as u16).wrapping_add(2));
+    }
+    let c = cpu.read16(o + MOTHER_FADE) as i16 as i32 as u32;
+    nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, c, c, c));
+}
+
+/// `x / 96` as the SH-2 code does it (a multiply by 0x2aaaaaab, the high half shifted right 4 and
+/// a one added for a negative `x`).
+fn quotient_96(x: i32) -> i32 {
+    let high = ((x as i64 * 0x2aaa_aaab) >> 32) as i32;
+    (high >> 4) + (x < 0) as i32
+}
+
+/// The turn halfword at `at` eased toward 0 by a 96th of its angle.
+fn turn_96(cpu: &mut Cpu, o: u32, at: u32) {
+    let from = cpu.read16(o + at) as u32;
+    let d = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, from, 0)) as i32;
+    let cur = cpu.read16(o + at);
+    cpu.write16(o + at, cur.wrapping_add(quotient_96(d) as u16));
+}
+
+/// The boss's heading (+0x30) turned toward `to`: by a 32nd (`shift` 5, run inline) or a 64th
+/// (6: the library's shift) of the shorter way round.
+fn heading_toward(cpu: &mut Cpu, o: u32, to: u32, shift: u32) {
+    let from = cpu.read16(o + MOTHER_HEADING) as i16 as i32 as u32;
+    let d = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, from, to)) as i32;
+    let d = if d < 0 { d + (1 << shift) - 1 } else { d };
+    let step = if shift == 6 {
+        shift_6(cpu, d as u32);
+        d >> 6
+    } else {
+        d >> 5
+    };
+    let cur = cpu.read16(o + MOTHER_HEADING);
+    cpu.write16(o + MOTHER_HEADING, cur.wrapping_add(step as u16));
+}
+
+/// The angle to a spot (x, y = `MOTHER_AIM_Y` unless given) as the SH-2 code turns it: the arctangent's
+/// low halfword, sign-extended, a quarter turn on.
+fn aim_angle(cpu: &mut Cpu, x: u32, y: u32) -> u32 {
+    let a = nested!(cpu, 0x0606_780c, sgl::sl_atan(cpu, x, y));
+    (a as i16 as i32 as u32).wrapping_add(0x4000)
+}
+
+
+/// Phase 0's step: the turn +0x9e6 eased to 0 by 96ths and the heading by a 64th, the long at
+/// +0xdf0 down by 0x10000; at time 0xb4 the heading is cleared and phase 2 begins.
+pub fn mother_move_b(cpu: &mut Cpu, o: u32) {
+    turn_96(cpu, o, MOTHER_TURN_C);
+    heading_toward(cpu, o, 0, 6);
+    let v = cpu.read32(o + 0xdf0).wrapping_add(0xffff_0000);
+    cpu.write32(o + 0xdf0, v);
+    if cpu.read32(o + MOTHER_TIME) == 0xb4 {
+        cpu.write16(o + MOTHER_HEADING, 0);
+        nested!(cpu, 0x0609_990c, mother_enter_2(cpu, o));
+    }
+}
+
+/// The fire's reach bands (the reach +0xa0c plus the first, at or below the second, unsigned).
+fn in_band(reach: u32, add: u32, width: u32) -> bool {
+    reach.wrapping_add(add) <= width
+}
+
+/// Two shots added at 0x7c0000 and 0xff840000 every 45th frame (by the fire count).
+fn shots_pair(cpu: &mut Cpu, o: u32) {
+    let count = cpu.read16(o + MOTHER_COUNT) as i16 as i32 as u32;
+    if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, count, 45)) == 0 {
+        nested!(cpu, 0x0609_97cc, shot_add(cpu, o, 0x007c_0000));
+        nested!(cpu, 0x0609_97cc, shot_add(cpu, o, 0xff84_0000));
+    }
+}
+
+/// Phase 2's step: the turns eased to 0 (+0x9e4 by 128ths, +0x9e6 by 96ths), the reach
+/// to 0x600000 and the scale to 0x10000; the head fires when the reach is in one of four bands, the
+/// homing fire above -0x200000; two shots every 45 frames above -0x1200000; the heading turns toward
+/// the nearer of the middle and a random place at the top; at the reach 0x600000 on to the next step.
+pub fn mother_move_c(cpu: &mut Cpu, o: u32) {
+    let from = cpu.read16(o + MOTHER_TURN_B) as u32;
+    let d = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, from, 0)) as i32;
+    let d = if d < 0 { d + 127 } else { d };
+    nested!(cpu, 0x0600_8166, clib::ashiftrt_r4::<7>(cpu, d as u32));
+    let cur = cpu.read16(o + MOTHER_TURN_B);
+    cpu.write16(o + MOTHER_TURN_B, cur.wrapping_add((d >> 7) as u16));
+    turn_96(cpu, o, MOTHER_TURN_C);
+    let reach = cpu.read32(o + MOTHER_REACH);
+    let reach = nested!(cpu, 0x0604_6168, actors::approach(cpu, reach, 0x60_0000, 0x2000));
+    cpu.write32(o + MOTHER_REACH, reach);
+    let scale = cpu.read32(o + MOTHER_SCALE);
+    let scale = nested!(cpu, 0x0604_6168, actors::approach(cpu, scale, 0x1_0000, 0x1000));
+    cpu.write32(o + MOTHER_SCALE, scale);
+    let reach = cpu.read32(o + MOTHER_REACH);
+    if in_band(reach, 0x00ff_ffff, 0x003f_fffe) {
+        nested!(cpu, 0x0609_775c, head_fire(cpu, o));
+    }
+    let reach = cpu.read32(o + MOTHER_REACH);
+    if in_band(reach, 0x009f_ffff, 0x001f_fffe)
+        || in_band(reach, 0x005f_ffff, 0x001f_fffe)
+        || in_band(reach, 0x001f_ffff, 0x001f_fffe)
+    {
+        nested!(cpu, 0x0609_775c, head_fire(cpu, o));
+    }
+    let mut reach = cpu.read32(o + MOTHER_REACH) as i32;
+    if reach > 0xffe0_0000u32 as i32 {
+        nested!(cpu, 0x0609_7bf0, homing_fire(cpu, o));
+        reach = cpu.read32(o + MOTHER_REACH) as i32;
+    }
+    if reach > 0xfee0_0000u32 as i32 {
+        shots_pair(cpu, o);
+    }
+    let reach = cpu.read32(o + MOTHER_REACH) as i32;
+    let angle = if reach > 0x4f_ffff {
+        let x = cpu.read32(o + 20).wrapping_neg();
+        aim_angle(cpu, x, MOTHER_AIM_Y)
+    } else {
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x60_0000));
+        let x = r.wrapping_sub(cpu.read32(o + 20));
+        aim_angle(cpu, x, MOTHER_AIM_Y)
+    };
+    heading_toward(cpu, o, angle, 5);
+    if cpu.read32(o + MOTHER_REACH) == 0x60_0000 {
+        let step = (cpu.read8(o + MOTHER_STEP) as i8).wrapping_add(1);
+        cpu.write8(o + MOTHER_STEP, step as u8);
+        cpu.write32(o + MOTHER_TIME, 0);
+    }
+    let n = cpu.read16(o + MOTHER_COUNT).wrapping_add(1);
+    cpu.write16(o + MOTHER_COUNT, n);
+    nested!(cpu, 0x0609_9a38, mother_idle_a(cpu));
+}
+
+/// Phase 3's step: the heading toward the middle (by a 32nd), the pair of shots every 45 frames
+/// in the first 0x3c0, the sound 70 on every 160th frame from 62 to 0x31f, the spacing (+0xde4)
+/// eased to 0x10000 in that time except in the 60 to 100 of each 160, the head's fire (with the
+/// stage byte over 1) to 0x31f, two worms every 160 frames to 0x3c0 (the bigger kind each 320th),
+/// and past 0x460, once the flags' (+0x94) bit 0 is set, phase 4.
+pub fn mother_move_d(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0609_9a38, mother_idle_a(cpu));
+    let x = cpu.read32(o + 20).wrapping_neg();
+    let angle = aim_angle(cpu, x, MOTHER_AIM_Y);
+    heading_toward(cpu, o, angle, 5);
+    if cpu.read32(o + MOTHER_TIME) <= 0x3bf {
+        shots_pair(cpu, o);
+    }
+    if cpu.read32(o + MOTHER_TIME) > 0x460 && cpu.read16(o + 0x94) & 1 != 0 {
+        nested!(cpu, 0x0609_9980, mother_enter_4(cpu, o));
+        return;
+    }
+    let time = cpu.read32(o + MOTHER_TIME);
+    if time.wrapping_sub(62) <= 0x2e1 && nested!(cpu, 0x0600_6a6e, math::remainder(cpu, time, 0xa0)) == 100 {
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 70));
+    }
+    let time = cpu.read32(o + MOTHER_TIME);
+    if time.wrapping_sub(62) <= 0x2e1 {
+        let mut run = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, time, 0xa0)) as i32 > 100;
+        if !run {
+            let time = cpu.read32(o + MOTHER_TIME);
+            run = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, time, 0xa0)) as i32 <= 59;
+        }
+        if run {
+            let v = cpu.read32(o + 0xde4);
+            let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0x1_0000, 0x1800));
+            cpu.write32(o + 0xde4, v);
+        }
+    }
+    if cpu.read8(MOTHER_STAGE_BYTE) as i8 > 1 && cpu.read32(o + MOTHER_TIME) <= 0x31f {
+        nested!(cpu, 0x0609_775c, head_fire(cpu, o));
+    }
+    let time = cpu.read32(o + MOTHER_TIME);
+    if time <= 0x3bf && nested!(cpu, 0x0600_6a6e, math::remainder(cpu, time, 0xa0)) == 0 {
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 100));
+        let time = cpu.read32(o + MOTHER_TIME);
+        let kind = if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, time, 0x140)) == 0 { 0x260 } else { 0x150 };
+        nested!(cpu, 0x0609_810c, worm_make(cpu, o, 1, kind));
+        nested!(cpu, 0x0609_810c, worm_make(cpu, o, 0xffff_ffff, kind));
+    }
+    let n = cpu.read16(o + MOTHER_COUNT).wrapping_add(1);
+    cpu.write16(o + MOTHER_COUNT, n);
+}
+
+/// The turn at +0x9e2 eased to 0 by 224ths the way the SH-2 code does it (the divide's high half
+/// and the number added, shifted right 7, a one added for a negative number).
+fn turn_a_224(cpu: &mut Cpu, o: u32) {
+    let from = cpu.read16(o + MOTHER_TURN_A) as u32;
+    let x = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, from, 0)) as i32;
+    let high = ((x as i64 * 0x9249_2493u32 as i32 as i64) >> 32) as i32;
+    let sum = high.wrapping_add(x);
+    nested!(cpu, 0x0600_8166, clib::ashiftrt_r4::<7>(cpu, sum as u32));
+    let q = (sum >> 7) + (x < 0) as i32;
+    let cur = cpu.read16(o + MOTHER_TURN_A);
+    cpu.write16(o + MOTHER_TURN_A, cur.wrapping_add(q as u16));
+}
+
+/// Phase 4's step: the reach eased to -0x200000 (by 0x4000) and the scale to 0x28000. Until the
+/// reach is there (or past time 0xce4) the boss turns toward the middle (script B), the first 120
+/// frames the turn +0x9e2 toward 0xe000, later to 0 by 224ths; at 30 the ten slots are set (the
+/// table at 0x060ad546); past 0xe10, with the flags' bit 0, phase 5. Once there it turns toward
+/// the nearer player by a 64th, fans come every 240th frame to 0xc2f (the way a random bit
+/// says), the scatter's fire every 300th, and the scatter's centre by the stage byte's rate.
+pub fn mother_move_e(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    nested!(cpu, 0x0609_9a44, mother_idle_b(cpu));
+    let reach = cpu.read32(o + MOTHER_REACH);
+    let reach = nested!(cpu, 0x0604_6168, actors::approach(cpu, reach, 0xffe0_0000, 0x4000));
+    cpu.write32(o + MOTHER_REACH, reach);
+    let scale = cpu.read32(o + MOTHER_SCALE);
+    let scale = nested!(cpu, 0x0604_6168, actors::approach(cpu, scale, 0x2_8000, 0x1000));
+    cpu.write32(o + MOTHER_SCALE, scale);
+    let reach = cpu.read32(o + MOTHER_REACH);
+    if reach != 0xffe0_0000 || cpu.read32(o + MOTHER_TIME) > 0xce4 {
+        cpu.write32(o + MOTHER_POINTER, MOTHER_SCRIPT_B);
+        let x = cpu.read32(o + 20).wrapping_neg();
+        let angle = aim_angle(cpu, x, MOTHER_AIM_Y);
+        heading_toward(cpu, o, angle, 5);
+        if cpu.read32(o + MOTHER_TIME) <= 120 {
+            let from = cpu.read16(o + MOTHER_TURN_A) as u32;
+            let x = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, from, 0xe000)) as i32;
+            let x = if x < 0 { x + 63 } else { x };
+            shift_6(cpu, x as u32);
+            let cur = cpu.read16(o + MOTHER_TURN_A);
+            cpu.write16(o + MOTHER_TURN_A, cur.wrapping_add((x >> 6) as u16));
+        } else {
+            turn_a_224(cpu, o);
+        }
+        if cpu.read32(o + MOTHER_TIME) == 30 {
+            nested!(cpu, 0x0609_9704, shots_set(cpu, o, MOTHER_SHOTS_TABLE));
+        }
+        if cpu.read32(o + MOTHER_TIME) > 0xe10 && cpu.read16(o + 0x94) & 1 != 0 {
+            nested!(cpu, 0x0609_99d4, mother_enter_5(cpu, o));
+        }
+        return;
+    }
+    turn_a_224(cpu, o);
+    if cpu.read32(o + MOTHER_TIME) & 0x100 == 0 {
+        cpu.write32(o + MOTHER_POINTER, MOTHER_SCRIPT_C);
+        let b = cpu.read8(MOTHER_STAGE_BYTE) as i8 as i32 as u32;
+        let rate = cpu.read32(0x060a_d570 + (b << 2));
+        let time = cpu.read32(o + MOTHER_TIME);
+        if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, time, rate)) == 0 {
+            nested!(cpu, 0x0609_8540, scatter_centre(cpu, o));
+        }
+    } else {
+        cpu.write32(o + MOTHER_POINTER, MOTHER_SCRIPT_B);
+    }
+    nested!(cpu, 0x0609_731c, head_centre(cpu, o, d + 20));
+    let player = nested!(cpu, 0x0605_6a58, aim::nearer_player(cpu, d + 16));
+    let px = cpu.read32(player + 20);
+    let x = px.wrapping_sub(cpu.read32(o + 20));
+    let angle = aim_angle(cpu, x, MOTHER_AIM_Y);
+    heading_toward(cpu, o, angle, 6);
+    let time = cpu.read32(o + MOTHER_TIME);
+    if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, time, 0xf0)) == 0 && cpu.read32(o + MOTHER_TIME) <= 0xc2f {
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+        let spin = if r & 1 == 0 { 0xffff_ffff } else { 1 };
+        nested!(cpu, 0x0609_8c74, fan_make(cpu, o, spin));
+    }
+    let time = cpu.read32(o + MOTHER_TIME);
+    if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, time, 0x12c)) == 0 {
+        nested!(cpu, 0x0609_8268, scatter_fire(cpu, o));
+    }
+}
+
+/// Phase 5's step: the scale eased to 0x10000; in the first 0xf0 frames the heading toward the
+/// middle and the reach to -0x600000 (by 0x2000); then the heading toward the nearer player and
+/// the reach out to 0x400000 (by 0x8000) while the time's bit 10 is set, in to -0x700000 (by
+/// 0x18000) while not; the head fires from a reach of -0x480000 on, a rock burst every 240th
+/// frame below it and the scatter's boss, as the run byte and the stage byte's rate say; after
+/// 0x1c20 the word at +0x130 counts.
+pub fn mother_move_f(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    nested!(cpu, 0x0609_9a38, mother_idle_a(cpu));
+    let scale = cpu.read32(o + MOTHER_SCALE);
+    let scale = nested!(cpu, 0x0604_6168, actors::approach(cpu, scale, 0x1_0000, 0x1000));
+    cpu.write32(o + MOTHER_SCALE, scale);
+    if cpu.read32(o + MOTHER_TIME) <= 0xef {
+        let x = cpu.read32(o + 20).wrapping_neg();
+        let angle = aim_angle(cpu, x, 0x80_0000);
+        heading_toward(cpu, o, angle, 5);
+        let reach = cpu.read32(o + MOTHER_REACH);
+        let reach = nested!(cpu, 0x0604_6168, actors::approach(cpu, reach, 0xffa0_0000, 0x2000));
+        cpu.write32(o + MOTHER_REACH, reach);
+    } else {
+        nested!(cpu, 0x0609_731c, head_centre(cpu, o, d + 20));
+        let player = nested!(cpu, 0x0605_6a58, aim::nearer_player(cpu, d + 16));
+        let target;
+        let (to, step, x);
+        if cpu.read32(o + MOTHER_TIME) & 0x400 != 0 {
+            let px = cpu.read32(player + 20);
+            target = cpu.read32(o + MOTHER_REACH);
+            (to, step) = (0x40_0000, 0x8000);
+            x = px.wrapping_neg();
+        } else {
+            x = cpu.read32(player + 20);
+            target = cpu.read32(o + MOTHER_REACH);
+            (to, step) = (0xff90_0000, 0x1_8000);
+        }
+        let reach = nested!(cpu, 0x0604_6168, actors::approach(cpu, target, to, step));
+        cpu.write32(o + MOTHER_REACH, reach);
+        let x = x.wrapping_sub(cpu.read32(o + 20));
+        let angle = aim_angle(cpu, x, 0x80_0000);
+        heading_toward(cpu, o, angle, 6);
+        let reach = cpu.read32(o + MOTHER_REACH) as i32;
+        if reach >= 0xffb8_0000u32 as i32 {
+            if reach > 0 {
+                nested!(cpu, 0x0609_775c, head_fire(cpu, o));
+            }
+        } else {
+            let time = cpu.read32(o + MOTHER_TIME);
+            if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, time, 0xf0)) == 0 {
+                nested!(cpu, 0x0609_933c, rock_burst(cpu, o));
+                let b = cpu.read8(MOTHER_STAGE_BYTE) as i8 as i32 as u32;
+                let v = cpu.read8(0x060a_d584 + b);
+                cpu.write8(o + MOTHER_RUN, v);
+            }
+            if (cpu.read32(o + MOTHER_REACH) as i32) < 0xffa0_0000u32 as i32 {
+                let b = cpu.read8(MOTHER_STAGE_BYTE) as i8 as i32 as u32;
+                let rate = cpu.read8(0x060a_d58c + b) as u32;
+                let time = cpu.read32(o + MOTHER_TIME);
+                if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, time, rate)) == 0 {
+                    let run = cpu.read8(o + MOTHER_RUN);
+                    if run == 0 {
+                        nested!(cpu, 0x0609_861c, scatter_boss(cpu, o));
+                    } else {
+                        cpu.write8(o + MOTHER_RUN, run.wrapping_sub(1));
+                    }
+                }
+            }
+        }
+    }
+    if cpu.read32(o + MOTHER_TIME) > 0x1c20 {
+        let n = cpu.read16(o + MOTHER_LATE).wrapping_add(1);
+        cpu.write16(o + MOTHER_LATE, n);
+    }
+}
+
+/// When the effect last made its sound (a game frame number, in the overlay's data).
+const MOTHER_EFFECT_LAST: u32 = 0x060a_d594;
+/// The four sounds the effect picks from (halfwords, 4 bytes apart).
+const MOTHER_EFFECT_SOUNDS: u32 = 0x0607_31fe;
+
+/// A blast at the place `p` (three longs), 0xb00000 less in z: a sound from a table of four (a random one)
+/// when 50 frames have passed since the last; on an odd frame a twin set (when the frame's bits 1 and
+/// 2 are clear), on an even frame a smoke puff (its size 0xc000 less a random 0 to 7 of 0x600).
+pub fn mother_effect(cpu: &mut Cpu, p: u32) {
+    let d = cpu.stack();
+    let now = cpu.read32(GAME_FRAMES);
+    let last = cpu.read32(MOTHER_EFFECT_LAST);
+    if now.wrapping_sub(last) > 50 {
+        cpu.write32(MOTHER_EFFECT_LAST, now);
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+        let se = cpu.read16(MOTHER_EFFECT_SOUNDS + ((r & 3) << 2)) as i16 as i32 as u32;
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, se));
+    }
+    let v = cpu.read32(p);
+    cpu.write32(d, v);
+    let v = cpu.read32(p + 4);
+    cpu.write32(d + 4, v);
+    let v = cpu.read32(p + 8).wrapping_add(0xff50_0000);
+    cpu.write32(d + 8, v);
+    let frames = cpu.read32(GAME_FRAMES);
+    if frames & 1 != 0 {
+        if frames & 6 == 0 {
+            nested!(cpu, 0x0605_8278, explosions::twin_set(cpu, d));
+        }
+    } else {
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+        cpu.write32(d + 12, 0xc000u32.wrapping_sub((r & 7).wrapping_mul(0x600)));
+        nested!(cpu, 0x0605_77d0, explosions::smoke_puff(cpu, d));
+    }
+}
+
+/// The boss's last phase's step (the one that ends in a fade): the turn +0x9e2 eased to 0 by 32nds,
+/// the reach to -0x200000 (by 0x10000), the heading's turn (+46) running on by the count and the
+/// count up by 2, the heading toward the middle, the scale to 0; a place near the head's middle
+/// (the longs at +0x13c, +0x140, +0x144 plus a random up to 0x100000 each, 0x200000 less in z)
+/// for the effect; after time 0x12c the byte at +3 is 112, the fades are stopped, set to 0x80 and
+/// faded to 0 and the sound 19 made; before it, on odd frames past 120, a twin set at the place
+/// (z less 0x400000), and the effect.
+pub fn mother_move_g(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    let from = cpu.read16(o + MOTHER_TURN_A) as u32;
+    let x = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, from, 0)) as i32;
+    let x = if x < 0 { x + 31 } else { x };
+    let cur = cpu.read16(o + MOTHER_TURN_A);
+    cpu.write16(o + MOTHER_TURN_A, cur.wrapping_add((x >> 5) as u16));
+    let reach = cpu.read32(o + MOTHER_REACH);
+    let reach = nested!(cpu, 0x0604_6168, actors::approach(cpu, reach, 0xffe0_0000, 0x1_0000));
+    cpu.write32(o + MOTHER_REACH, reach);
+    let turn = (cpu.read16(o + 46) as i16 as i32).wrapping_add(cpu.read16(o + MOTHER_COUNT) as i16 as i32);
+    cpu.write16(o + 46, turn as u16);
+    let n = cpu.read16(o + MOTHER_COUNT).wrapping_add(2);
+    cpu.write16(o + MOTHER_COUNT, n);
+    let x = cpu.read32(o + 20).wrapping_neg();
+    let angle = aim_angle(cpu, x, MOTHER_AIM_Y);
+    heading_toward(cpu, o, angle, 5);
+    let scale = cpu.read32(o + MOTHER_SCALE);
+    let scale = nested!(cpu, 0x0604_6168, actors::approach(cpu, scale, 0, 0x1000));
+    cpu.write32(o + MOTHER_SCALE, scale);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x10_0000));
+    let x = cpu.read32(o + 0x13c).wrapping_add(r);
+    cpu.write32(d, x);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x10_0000));
+    let y = cpu.read32(o + 0x140).wrapping_add(r);
+    cpu.write32(d + 4, y);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x10_0000));
+    let z = cpu.read32(o + 0x144).wrapping_add(r).wrapping_add(0xffe0_0000);
+    cpu.write32(d + 8, z);
+    let time = cpu.read32(o + MOTHER_TIME);
+    if time > 0x12c {
+        cpu.write8(o + 3, 112);
+        nested!(cpu, 0x0605_e9d8, screen::stop_fades(cpu));
+        nested!(cpu, 0x0605_e6dc, screen::set_fade_offset(cpu, 0x80, 0x80, 0x80));
+        nested!(cpu, 0x0605_e93c, screen::fade_to(cpu, 0, 0, 0, 0x12c));
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 19));
+        return;
+    }
+    if cpu.read32(GAME_FRAMES) & 1 != 0 && time > 120 {
+        let v = cpu.read32(d);
+        cpu.write32(d + 12, v);
+        let v = cpu.read32(d + 4);
+        cpu.write32(d + 16, v);
+        cpu.write32(d + 20, 0xffc0_0000);
+        nested!(cpu, 0x0605_8278, explosions::twin_set(cpu, d + 12));
+    }
+    nested!(cpu, 0x0609_a42c, mother_effect(cpu, d));
+}
+
+/// The matrices of the shot slot `i`: its place (+0xa2c, +0xa54, +0xa7c, each by 4 i) and turn
+/// (halfword +0xb1c + 2 i) put in the matrix 48 bytes on from 0x060b1e70.
+pub fn slot_matrix(cpu: &mut Cpu, o: u32, i: u32) {
+    let i = i & 0xff;
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let z = cpu.read32(o + SLOT_FALL + 4 * i);
+    let y = cpu.read32(o + SLOT_Y + 4 * i);
+    let x = cpu.read32(o + SLOT_X + 4 * i);
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, z));
+    let turn = cpu.read16(o + SLOT_CLEAR_HALVES[0] + 2 * i) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_72ec, sgl::sl_rot_x(cpu, turn));
+    nested!(cpu, 0x0606_db9c, sgl::sl_get_matrix(cpu, 0x060b_1e70 + 48 * i));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+}
+
+/// The shot slot `i`'s step (the SH-2 code's, with its frame of one long): while its counter
+/// (halfword +0xa18 + 2 i) runs up the slot moves by its speeds (x +0xaa4, y +0xacc, fall +0xaf4,
+/// that one up by 0x3800 each time, the turn +0xb1c by its speed +0xb30, down 32); at 0x2d0, or
+/// at the fall's place over -0x100000 with a positive speed, or the y past 0xa00000, the slot is
+/// freed and its wait (+0xb44) set to 48; while its wait lacks bit 2 it is compared with the nine
+/// parts' places (24 bytes apart, from +0x728): within 0x2fffff in all three it is taken (counter
+/// 0xffff, speeds 0x10000 and 0xfff90000, turn speed 0x1000) with the sound 99.
+pub fn slot_step(cpu: &mut Cpu, o: u32, i: u32) {
+    let i = i & 0xff;
+    let d = cpu.stack();
+    let far = cpu.read32(o + SLOT_FAR[0] + SLOT_FAR_STRIDE * i) as i32;
+    if far > 0xa0_0000 {
+        cpu.write16(o + SLOT_USED + 2 * i, 0);
+        cpu.write16(o + SLOT_WAIT + 2 * i, 48);
+        return;
+    }
+    let used = cpu.read16(o + SLOT_USED + 2 * i);
+    if used == 0xffff {
+        let v = (cpu.read16(o + 0xb30 + 2 * i) as i16 as i32).wrapping_sub(32);
+        cpu.write16(o + 0xb30 + 2 * i, v as u16);
+        let v = v.wrapping_add(cpu.read16(o + 0xb1c + 2 * i) as i16 as i32);
+        cpu.write16(o + 0xb1c + 2 * i, v as u16);
+        let v = cpu.read32(o + SLOT_X + 4 * i).wrapping_add(cpu.read32(o + SLOT_CLEAR_LONGS[0] + 4 * i));
+        cpu.write32(o + SLOT_X + 4 * i, v);
+        let v = cpu.read32(o + SLOT_Y + 4 * i).wrapping_add(cpu.read32(o + SLOT_CLEAR_LONGS[1] + 4 * i));
+        cpu.write32(o + SLOT_Y + 4 * i, v);
+        let fall = cpu.read32(o + SLOT_FALL + 4 * i).wrapping_add(cpu.read32(o + SLOT_CLEAR_LONGS[2] + 4 * i));
+        cpu.write32(o + SLOT_FALL + 4 * i, fall);
+        let speed = cpu.read32(o + SLOT_CLEAR_LONGS[2] + 4 * i).wrapping_add(0x3800);
+        cpu.write32(o + SLOT_CLEAR_LONGS[2] + 4 * i, speed);
+        let fall = cpu.read32(o + SLOT_FALL + 4 * i) as i32;
+        if fall > 0xfff0_0000u32 as i32 && (speed as i32) > 0 {
+            cpu.write16(o + SLOT_USED + 2 * i, 0);
+            cpu.write16(o + SLOT_WAIT + 2 * i, 48);
+        }
+        return;
+    }
+    let count = used.wrapping_add(1);
+    cpu.write16(o + SLOT_USED + 2 * i, count);
+    if count > 0x2cf {
+        cpu.write16(o + SLOT_USED + 2 * i, 0);
+        cpu.write16(o + SLOT_WAIT + 2 * i, 48);
+        return;
+    }
+    if cpu.read16(o + SLOT_WAIT + 2 * i) & 4 != 0 {
+        return;
+    }
+    cpu.write32(d, 0xb8c);
+    for j in 0..9u32 {
+        let near = |cpu: &mut Cpu, mine: u32, theirs: u32| -> bool {
+            let a = cpu.read32(o + mine + SLOT_FAR_STRIDE * i);
+            let b = cpu.read32(o + theirs + 24 * j);
+            let diff = a.wrapping_sub(b) as i32;
+            (if diff < 0 { diff.wrapping_neg() } else { diff }) <= 0x2f_ffff
+        };
+        if !near(cpu, 0xb8c, 0x728) || !near(cpu, 0xb90, 0x72c) || !near(cpu, 0xb94, 0x730) {
+            continue;
+        }
+        cpu.write16(o + SLOT_USED + 2 * i, 0xffff);
+        cpu.write32(o + SLOT_CLEAR_LONGS[1] + 4 * i, 0x1_0000);
+        cpu.write32(o + SLOT_CLEAR_LONGS[2] + 4 * i, 0xfff9_0000);
+        cpu.write16(o + 0xb30 + 2 * i, 0x1000);
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 99));
+    }
+}
+
+/// A part's turn byte, as the model's table has it: the signed byte at `at` of the model's data, 256 times.
+fn part_turn(cpu: &mut Cpu, base: u32, at: u32) -> u32 {
+    (cpu.read8(base + at) as i8 as i32 as u32) << 8
+}
+
+/// The frame flags' halfword at `at` (bit 1 cleared, and set again where bit 0 is: the draw's
+/// frame-skipping), as the craft's draw does.
+fn flags_cycle(cpu: &mut Cpu, at: u32) {
+    let mut flags = cpu.read16(at) as i16 as i32 as u32;
+    if flags & 2 != 0 {
+        cpu.write16(at, (flags & 0xffff_fffc) as u16);
+        flags = cpu.read16(at) as i16 as i32 as u32;
+    }
+    if flags & 1 != 0 {
+        cpu.write16(at, (flags | 2) as u16);
+    }
+}
+
+/// The matrices of the part `i` (of nine): its flags (+0x6e6 + 2 i: bit 1 cleared, set again from
+/// bit 0; bit 0 cleared when its life +0x6f8 is not above 0); then its place (+0x644, +0x668, +0x68c
+/// by 4 i) turned (+0x6d4 half a turn on, +0x6c2, +0x6b0 by 2 i) with a corner point (+0x944 + 12 i)
+/// and the matrix saved at 0x060b18a0 + 48 i; then the two guns, each by the part's model
+/// (the halfword +0x626 + 2 i, an offset into the object) turned by its bytes (256 times) and saved
+/// at 0x060b1a80 and 0x060b1c60 + 48 i.
+pub fn part_matrices(cpu: &mut Cpu, o: u32, i: u32) {
+    let i = i & 0xff;
+    let d = cpu.stack();
+    flags_cycle(cpu, o + 0x6e6 + 2 * i);
+    if (cpu.read32(o + 0x6f8 + 4 * i) as i32) <= 0 {
+        let v = cpu.read16(o + 0x6e6 + 2 * i) & 0xfffe;
+        cpu.write16(o + 0x6e6 + 2 * i, v);
+    }
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let z = cpu.read32(o + 0x68c + 4 * i);
+    let y = cpu.read32(o + 0x668 + 4 * i);
+    let x = cpu.read32(o + 0x644 + 4 * i);
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, z));
+    let a = (cpu.read16(o + 0x6d4 + 2 * i) as i16 as i32 as u32).wrapping_add(0xffff_8000) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_726c, sgl::sl_rot_z(cpu, a));
+    let a = cpu.read16(o + 0x6c2 + 2 * i) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_736c, sgl::sl_rot_y(cpu, a));
+    let a = cpu.read16(o + 0x6b0 + 2 * i) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_72ec, sgl::sl_rot_x(cpu, a));
+    nested!(cpu, 0x0606_db2c, sgl::sl_calc_point(cpu, 0, 0, 0, o + 0x944 + 12 * i));
+    cpu.write32(d, 48 * i);
+    nested!(cpu, 0x0606_db9c, sgl::sl_get_matrix(cpu, 0x060b_18a0 + 48 * i));
+    // the first gun
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, 0xffeb_0000, 0, 0xfffa_0000));
+    let base = o + cpu.read16(o + 0x626 + 2 * i) as u32;
+    let a = part_turn(cpu, base, 0x3d3);
+    nested!(cpu, 0x0606_72ec, sgl::sl_rot_x(cpu, a));
+    let base = o + cpu.read16(o + 0x626 + 2 * i) as u32;
+    let a = part_turn(cpu, base, 0x436);
+    nested!(cpu, 0x0606_736c, sgl::sl_rot_y(cpu, a));
+    let base = o + cpu.read16(o + 0x626 + 2 * i) as u32;
+    let a = part_turn(cpu, base, 0x499);
+    nested!(cpu, 0x0606_726c, sgl::sl_rot_z(cpu, a));
+    let at = cpu.read32(d);
+    nested!(cpu, 0x0606_db9c, sgl::sl_get_matrix(cpu, 0x060b_1a80u32.wrapping_add(at)));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    // the second gun
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, 0x15_0000, 0, 0xfffa_0000));
+    let base = o + cpu.read16(o + 0x626 + 2 * i) as u32;
+    let a = part_turn(cpu, base, 0x4fc);
+    nested!(cpu, 0x0606_72ec, sgl::sl_rot_x(cpu, a));
+    let base = o + cpu.read16(o + 0x626 + 2 * i) as u32;
+    let b = (cpu.read8(base + 0x55f) as i8 as i32).wrapping_neg();
+    nested!(cpu, 0x0606_736c, sgl::sl_rot_y(cpu, (b << 8) as i16 as i32 as u32));
+    let base = o + cpu.read16(o + 0x626 + 2 * i) as u32;
+    let b = (cpu.read8(base + 0x5c2) as i8 as i32).wrapping_neg();
+    nested!(cpu, 0x0606_726c, sgl::sl_rot_z(cpu, (b << 8) as i16 as i32 as u32));
+    let at = cpu.read32(d).wrapping_add(0x060b_1c60);
+    cpu.write32(d, at);
+    nested!(cpu, 0x0606_db9c, sgl::sl_get_matrix(cpu, at));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+}
+
+/// The boss's draw (on the object): the flags' halfword (+0x132) cycled as the parts' are; the
+/// object's place and turns (+0xe4, +0xde, +0xd8, each plus the heading +0x30, +46, +44) with two
+/// points (0, +0xa10, 0 at the frame's and 0, 0, 0 at +0x9b8) and the matrix saved at 0x060b1a50;
+/// two arms (turns +0xea, +0xf0, +0xf6 from -0x150000 and +0xfc, -(+0x102), -(+0x108) from
+/// 0x150000, both 0x60000 up) saved at 0x060b1c30 and 0x060b1e10; where the frame's point is
+/// from the place (+0x10c to +0x114, 0xb00000 less in z); the nine parts' matrices; one at
+/// (-0x800000, 0, 0x100000) saved at 0x060b1e40; and the shots in use.
+pub fn mother_draw(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    flags_cycle(cpu, o + MOTHER_FLAGS);
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let (x, y, z) = (cpu.read32(o + 20), cpu.read32(o + 24), cpu.read32(o + 28));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, z));
+    let a = (cpu.read16(o + 0xe4) as i16 as i32)
+        .wrapping_add(cpu.read16(o + MOTHER_HEADING) as i16 as i32)
+        .wrapping_add(0xffff_8000u32 as i32) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_726c, sgl::sl_rot_z(cpu, a));
+    let a = (cpu.read16(o + 0xde) as i16 as i32).wrapping_add(cpu.read16(o + 46) as i16 as i32) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_736c, sgl::sl_rot_y(cpu, a));
+    let a = (cpu.read16(o + 0xd8) as i16 as i32).wrapping_add(cpu.read16(o + 44) as i16 as i32) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_72ec, sgl::sl_rot_x(cpu, a));
+    let y = cpu.read32(o + MOTHER_REACH_SPEED);
+    nested!(cpu, 0x0606_db2c, sgl::sl_calc_point(cpu, 0, y, 0, d));
+    nested!(cpu, 0x0606_db2c, sgl::sl_calc_point(cpu, 0, 0, 0, o + 0x9b8));
+    nested!(cpu, 0x0606_db9c, sgl::sl_get_matrix(cpu, 0x060b_1a50));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, 0xffeb_0000, 0, 0xfffa_0000));
+    let a = cpu.read16(o + 0xea) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_72ec, sgl::sl_rot_x(cpu, a));
+    let a = cpu.read16(o + 0xf0) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_736c, sgl::sl_rot_y(cpu, a));
+    let a = cpu.read16(o + 0xf6) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_726c, sgl::sl_rot_z(cpu, a));
+    nested!(cpu, 0x0606_db9c, sgl::sl_get_matrix(cpu, 0x060b_1c30));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, 0x15_0000, 0, 0xfffa_0000));
+    let a = cpu.read16(o + 0xfc) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_72ec, sgl::sl_rot_x(cpu, a));
+    let a = (cpu.read16(o + 0x102) as i16 as i32).wrapping_neg() as i16 as i32 as u32;
+    nested!(cpu, 0x0606_736c, sgl::sl_rot_y(cpu, a));
+    let a = (cpu.read16(o + 0x108) as i16 as i32).wrapping_neg() as i16 as i32 as u32;
+    nested!(cpu, 0x0606_726c, sgl::sl_rot_z(cpu, a));
+    nested!(cpu, 0x0606_db9c, sgl::sl_get_matrix(cpu, 0x060b_1e10));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    let v = cpu.read32(d).wrapping_sub(cpu.read32(o + 20));
+    cpu.write32(o + 0x10c, v);
+    let v = cpu.read32(d + 4).wrapping_sub(cpu.read32(o + 24));
+    cpu.write32(o + 0x110, v);
+    let v = cpu.read32(d + 8).wrapping_sub(cpu.read32(o + 28)).wrapping_add(0xff50_0000);
+    cpu.write32(o + 0x114, v);
+    for i in 0..9u32 {
+        nested!(cpu, 0x0609_a714, part_matrices(cpu, o, i));
+    }
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, 0xff80_0000, 0, 0x10_0000));
+    nested!(cpu, 0x0606_db9c, sgl::sl_get_matrix(cpu, 0x060b_1e40));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    for i in 0..10u32 {
+        if cpu.read16(o + SLOT_USED + 2 * i) != 0 {
+            nested!(cpu, 0x0609_a690, slot_matrix(cpu, o, i));
+        }
+    }
+}
+
+/// The data's matrix function (a function the overlay's loaded data keeps at 0x060ab22c, not in its
+/// image: run as the game's code) and the two tables of three corner points (halfword x, y, z and a
+/// pad, 8 bytes each) the shot slot's drawing picks from by the step (4: the second).
+const SLOT_DRAW_MATRIX: u32 = 0x060a_b22c;
+const SLOT_DRAW_POINTS: [u32; 2] = [0x060a_d314, 0x060a_d32c];
+const SLOT_DRAW_SMALL: u32 = 0x8000;
+const SLOT_DRAW_LARGE: u32 = 0xc000;
+const SLOT_DRAW_CORNERS: u32 = 0xb80;
+const SLOT_DRAW_MODELS: u32 = 0x440;
+
+/// The shot slot `i`'s draw: the matrix 0x060b1e70 + 48 i handed to the data's function, three
+/// corner points (from the table the step picks, shifted up 16) kept in the object at 0xb80 + 36 i,
+/// the model scaled 2, 2 and 0.75 or 0.5 (the step 4: 0.75) and its first polygon put.
+pub fn slot_draw(cpu: &mut Cpu, o: u32, i: u32) {
+    let i = i & 0xff;
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    cpu.call(SLOT_DRAW_MATRIX, &[0x060b_1e70 + 48 * i]);
+    let step = cpu.read8(o + MOTHER_STEP);
+    let table = SLOT_DRAW_POINTS[(step == 4) as usize];
+    for k in 0..3u32 {
+        let at = table + 8 * k;
+        let x = (cpu.read16(at) as i16 as i32 as u32) << 16;
+        let y = (cpu.read16(at + 2) as i16 as i32 as u32) << 16;
+        let z = (cpu.read16(at + 4) as i16 as i32 as u32) << 16;
+        let out = o + SLOT_DRAW_CORNERS + 36 * i + 12 * k;
+        nested!(cpu, 0x0606_db2c, sgl::sl_calc_point(cpu, x, y, z, out));
+    }
+    let step = cpu.read8(o + MOTHER_STEP);
+    let z = if step == 4 { SLOT_DRAW_LARGE } else { SLOT_DRAW_SMALL };
+    nested!(cpu, 0x0606_73ec, sgl::sl_scale(cpu, 0x2_0000, 0x2_0000, z));
+    let data = cpu.read32(0x0607_41f0 + SLOT_DRAW_MODELS);
+    let table = cpu.read32(data + 28);
+    let table = cpu.read32(table + 28);
+    let pd = cpu.read32(table);
+    nested!(cpu, 0x0606_745c, sgl::sl_put_polygon(cpu, pd));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+}
+
+/// The beat byte (a stage counter the flashing parts go by: its bit 0 against the part's byte at +0x638).
+const MPART_BEAT: u32 = 0x0600_ed8b;
+const MPART_KIND: u32 = 0x638;
+const MPART_HIDE: u32 = 0x80;
+const MPART_MODELS: u32 = 0x440;
+const MPART_POINTS: [u32; 2] = [0x060a_d2ec, 0x060a_d2fc];
+const MPART_BOX: u32 = 0xce8;
+const MPART_CORNERS: u32 = 0x728;
+const MPART_MIRROR: u32 = 0x800;
+
+/// Three corner points from `table` (halfword x, y, z, pad), 16.16, kept at `out` and on in 12s.
+fn part_corners(cpu: &mut Cpu, table: u32, out: u32) {
+    for k in 0..3u32 {
+        let at = table + 8 * k;
+        let x = (cpu.read16(at) as i16 as i32 as u32) << 16;
+        let y = (cpu.read16(at + 2) as i16 as i32 as u32) << 16;
+        let z = (cpu.read16(at + 4) as i16 as i32 as u32) << 16;
+        nested!(cpu, 0x0606_db2c, sgl::sl_calc_point(cpu, x, y, z, out + 12 * k));
+    }
+}
+
+/// The part `i`'s draw: the model rows it uses (3 or 4, one and two, five and six: a part whose
+/// life is not above 0 has 7 more in each, and bit 0 of its flags cleared), the part drawn at its
+/// place a long way back when the beat's bit 0 matches the part's own, then its three matrices
+/// (0x060b18a0, 0x060b1a80, 0x060b1c60 + 48 i, the data's function), each with its polygon (the
+/// flags' bit 0 picking the one of the pair) unless hidden, and the corner points: one at 0x728
+/// plus 24 i and two of the box (0xce8 plus 24 i) from the first matrix, three at 0x800 plus 36 i
+/// from the second set on even frames; on odd frames the model is mirrored in x and the three
+/// kept after the third matrix.
+pub fn part_draw(cpu: &mut Cpu, o: u32, i: u32) {
+    let i = i & 0xff;
+    let d = cpu.stack();
+    cpu.write32(d, i);
+    let kind = cpu.read8(o + i + MPART_KIND) as u32 & 1;
+    let (mut row, row_a, row_b) = if kind != 0 { (3, 1, 2) } else { (4, 5, 6) };
+    cpu.write32(d + 4, row_a);
+    cpu.write32(d + 8, row_b);
+    if cpu.read32(o + 0x6f8 + 4 * i) as i32 <= 0 {
+        row = (row + 7) & 0xff;
+        let v = (cpu.read32(d + 4) + 7) & 0xff;
+        cpu.write32(d + 4, v);
+        let v = (cpu.read32(d + 8) + 7) & 0xff;
+        cpu.write32(d + 8, v);
+        let v = cpu.read16(o + 0x6e6 + 2 * i) & 0xfffe;
+        cpu.write16(o + 0x6e6 + 2 * i, v);
+    }
+    let beat = cpu.read8(MPART_BEAT) as i8 as u32 & 1;
+    if beat == cpu.read8(o + i + MPART_KIND) as u32 & 1 {
+        nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+        let y = cpu.read32(o + 0x668 + 4 * i);
+        let x = cpu.read32(o + 0x644 + 4 * i);
+        nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, 0x00c0_0000));
+        if cpu.read16(o + MOTHER_FLAGS) as u32 & MPART_HIDE == 0 {
+            let data = cpu.read32(KINDS + MPART_MODELS);
+            let table = cpu.read32(data + 28);
+            let pair = cpu.read32(table + 56);
+            let pd = cpu.read32(pair);
+            nested!(cpu, 0x0606_745c, sgl::sl_put_polygon(cpu, pd));
+        }
+        nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    }
+    // the first matrix and polygon
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let at = i;
+    cpu.call(SLOT_DRAW_MATRIX, &[0x060b_18a0 + 48 * at]);
+    if cpu.read16(o + MOTHER_FLAGS) as u32 & MPART_HIDE == 0 {
+        let data = cpu.read32(KINDS + MPART_MODELS);
+        let table = cpu.read32(data + 28);
+        let bit = cpu.read16(o + 0x6e6 + 2 * i) as u32 & 1;
+        let pair = cpu.read32(table + (row << 2));
+        let pd = cpu.read32(pair + (bit << 2));
+        nested!(cpu, 0x0606_745c, sgl::sl_put_polygon(cpu, pd));
+    }
+    let first = MPART_POINTS[0];
+    let x = (cpu.read16(first) as i16 as i32 as u32) << 16;
+    let y = (cpu.read16(first + 2) as i16 as i32 as u32) << 16;
+    let z = (cpu.read16(first + 4) as i16 as i32 as u32) << 16;
+    let at = 24 * i;
+    nested!(cpu, 0x0606_db2c, sgl::sl_calc_point(cpu, x, y, z, o + MPART_CORNERS + at));
+    if cpu.read8(o + i + MPART_KIND) & 1 != 0 {
+        nested!(cpu, 0x0606_db2c, sgl::sl_calc_point(cpu, 0xfff8_0000, 0, 0xfff0_0000, o + MPART_BOX + at));
+        nested!(cpu, 0x0606_db2c, sgl::sl_calc_point(cpu, 0x8_0000, 0, 0xfff0_0000, o + MPART_BOX + at + 12));
+    } else {
+        nested!(cpu, 0x0606_db2c, sgl::sl_calc_point(cpu, 0xfff2_0000, 0, 0xfff3_0000, o + MPART_BOX + at));
+        nested!(cpu, 0x0606_db2c, sgl::sl_calc_point(cpu, 0xe_0000, 0, 0xfff3_0000, o + MPART_BOX + at + 12));
+    }
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    // the second matrix and polygon
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let at = i;
+    cpu.call(SLOT_DRAW_MATRIX, &[0x060b_1a80 + 48 * at]);
+    if cpu.read16(o + MOTHER_FLAGS) as u32 & MPART_HIDE == 0 {
+        let data = cpu.read32(KINDS + MPART_MODELS);
+        let table = cpu.read32(data + 28);
+        let shifted = cpu.read32(d + 4) << 2;
+        cpu.write32(d + 4, shifted);
+        let bit = cpu.read16(o + 0x6e6 + 2 * i) as u32 & 1;
+        let pair = cpu.read32(table + shifted);
+        let pd = cpu.read32(pair + (bit << 2));
+        nested!(cpu, 0x0606_745c, sgl::sl_put_polygon(cpu, pd));
+    }
+    let even = cpu.read32(GAME_FRAMES) & 1 == 0;
+    if even {
+        let out = o + MPART_MIRROR + 36 * i;
+        part_corners(cpu, MPART_POINTS[1], out);
+    }
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    // the third
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let at = i;
+    cpu.call(SLOT_DRAW_MATRIX, &[0x060b_1c60 + 48 * at]);
+    if cpu.read16(o + MOTHER_FLAGS) as u32 & MPART_HIDE == 0 {
+        let data = cpu.read32(KINDS + MPART_MODELS);
+        let table = cpu.read32(data + 28);
+        let shifted = cpu.read32(d + 8) << 2;
+        cpu.write32(d + 8, shifted);
+        let bit = cpu.read16(o + 0x6e6 + 2 * i) as u32 & 1;
+        let pair = cpu.read32(table + shifted);
+        let pd = cpu.read32(pair + (bit << 2));
+        nested!(cpu, 0x0606_745c, sgl::sl_put_polygon(cpu, pd));
+    }
+    if cpu.read32(GAME_FRAMES) & 1 != 0 {
+        nested!(cpu, 0x0606_73ec, sgl::sl_scale(cpu, 0xffff_0000, 0x1_0000, 0x1_0000));
+        let out = o + MPART_MIRROR + 36 * i;
+        part_corners(cpu, MPART_POINTS[1], out);
+    }
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+}
