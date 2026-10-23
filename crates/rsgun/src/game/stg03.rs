@@ -4,7 +4,7 @@
 
 use super::globals::{bios_setting_is_1, GAME_FRAMES, GAME_MODE};
 use super::bullets::{self, AS_FLAGS, AS_POSITION, AS_SHOOTER, AS_SPEED};
-use super::{clib, actors, aim, bg, camera, ground, hud, parts, sgl, sprites, dma, effects, explosions, files, hits, kinds, math, models, nested, objects, screen, sound, states, stg02, timeline, Cpu};
+use super::{clib, actors, aim, bg, camera, ground, hud, palette, parts, results, sgl, sprites, dma, effects, explosions, files, hits, kinds, math, models, nested, objects, screen, sound, states, stg02, timeline, Cpu};
 
 // ---- the stage's mode ----------------------------------------------------------------------------
 
@@ -2362,6 +2362,706 @@ pub fn gauge_step(cpu: &mut Cpu, o: u32) {
     cpu.write16(o + O_STEP, POD_DESTROY as u16);
 }
 
+// ---- the stage boss's event ----------------------------------------------------------------------
+
+/// The stage boss's event object (gauge_make's, behaviour 0x06083b28): its state (+0x6d; the step
+/// +0x6c before it), its place (+0x14, +0x18, +0x1c) moved each frame by its speed (+0x78, +0x7c,
+/// +0x80) and its angle (+0x30) by the turn speed (+0x84, a word); the tilt (+0x2c, +0x2e, words);
+/// the heading (+0x8a, a word) and the speed along it (+0x8c); the point it makes for (+0x90,
+/// +0x94); which pod gets which side (+0x98, a byte); the results object (+0x9c); a count or
+/// speed (+0x134); its four pods (+0xb8, a pointer each 8 on) and four bodies (+0xd8, +0xdc, +0xe0,
+/// +0xe4: the boss_step objects, given their states).
+const SB_VELOCITY: u32 = 0x78;
+const SB_SPIN: u32 = 0x84;
+const SB_TILT: u32 = 0x2c;
+const SB_TILT_Y: u32 = 0x2e;
+const SB_HEADING: u32 = 0x8a;
+const SB_SPEED: u32 = 0x8c;
+const SB_TARGET: u32 = 0x90;
+const SB_WAVE: u32 = 0x98;
+const SB_RESULTS: u32 = 0x9c;
+const SB_WAIT: u32 = 0x134;
+const SB_FADE: u32 = O_74;
+const SB_PODS: u32 = 0xb8;
+const SB_BODIES: [u32; 4] = [0xd8, 0xdc, 0xe0, 0xe4];
+/// The states: 0 starts it (its models, its place high above), 2 brings it in (steps 0 to 6: a
+/// colour fade, sparks, the bodies' moves, the place settled; 10 ends them), 10 waits for the
+/// byte at 0x0600ed90 to clear, 15 sets the fight up, 16 and 17 are its two phases (the pods made
+/// parts, shot at; steps 1 to 11 in the first, 0 to 12 in the second) and 100 its destruction.
+const SB_ENTER: i8 = 2;
+const SB_READY: i8 = 10;
+const SB_BEGIN: i8 = 15;
+const SB_FIRST: i8 = 16;
+const SB_SECOND: i8 = 17;
+const SB_DESTROYED: i8 = 100;
+const SB_MODELS: u32 = 0x060a_b860;
+const SB_FLAG: u32 = 0x0600_ed90;
+const SB_PLACE: [u32; 3] = [0, 0xfc80_0000, 0x0400_0000];
+const SB_COUNT: u32 = 0x2a30;
+const SB_SPARK_FLAGS: u32 = 0x8_0400;
+const SB_SPARK_BEHAVIOUR: u32 = 0x0608_38d4;
+const SB_DRAW: u32 = 0x0608_3a44;
+const SB_GAUGE: u32 = 100_000;
+const SB_CHANGED: u32 = 2;
+const COLOURS_TO: u32 = 0x0602_ee30;
+const COLOURS_OUT: u32 = 0x0603_1e40;
+
+fn signed_word(cpu: &mut Cpu, at: u32) -> u32 {
+    cpu.read16(at) as i16 as i32 as u32
+}
+
+/// `x` divided by 2^n toward zero (the SH-2 code adds 2^n - 1 to a negative one and shifts it).
+fn quotient(x: u32, n: u32) -> u32 {
+    let x = x as i32;
+    (x.wrapping_add(if x < 0 { (1 << n) - 1 } else { 0 }) >> n) as u32
+}
+
+fn absolute(x: u32) -> i32 {
+    (x as i32).wrapping_abs()
+}
+
+/// Sets the state of the boss's four bodies (the word at their +0x6c, so their step 0).
+fn bodies_state(cpu: &mut Cpu, o: u32, state: i8) {
+    let bodies = SB_BODIES.map(|at| cpu.read32(o + at));
+    for body in bodies.into_iter().rev() {
+        cpu.write16(body + O_STEP, state as u16);
+    }
+}
+
+fn pod(cpu: &mut Cpu, o: u32, k: u32) -> u32 {
+    cpu.read32(o + SB_PODS + 8 * k)
+}
+
+/// The boss kind's 16 colours (at its first colour) blended from the colours at `from` toward the
+/// stage's by `how_far` (the blend struct at `at`).
+fn boss_blend(cpu: &mut Cpu, from: u32, at: u32, how_far: u32) {
+    cpu.write16(at, how_far as u16);
+    cpu.write16(at + 2, 16);
+    cpu.write32(at + 4, from);
+    let first = cpu.read16(kind(PART_KIND) + K_COLOUR) as u32;
+    cpu.write32(at + 8, COLOURS_TO + 2 * first);
+    cpu.write32(at + 12, COLOURS_OUT + 2 * first);
+    nested!(cpu, 0x0600_5ba4, palette::colours_blend(cpu, at));
+}
+
+/// The parts made on the four pods, each with its side (the wave less its number, in 0 to 3).
+fn pods_make_parts(cpu: &mut Cpu, o: u32) {
+    for k in 0..4 {
+        let wave = cpu.read8(o + SB_WAVE) as i8 as i32;
+        let pod = pod(cpu, o, k);
+        nested!(cpu, 0x0608_1e64, part_make(cpu, pod, (wave - k as i32) as u32 & 3));
+    }
+    let wave = cpu.read8(o + SB_WAVE).wrapping_add(1);
+    cpu.write8(o + SB_WAVE, wave);
+}
+
+/// The pods' parts signalled (part_signal) one by one.
+fn pods_signal(cpu: &mut Cpu, o: u32) {
+    for k in 0..4 {
+        let pod = pod(cpu, o, k);
+        nested!(cpu, 0x0608_1dfc, part_signal(cpu, pod));
+    }
+}
+
+/// Whether no pod has a part left (part_none of every one).
+fn pods_bare(cpu: &mut Cpu, o: u32) -> bool {
+    for k in 0..4 {
+        let pod = pod(cpu, o, k);
+        if nested!(cpu, 0x0608_1e48, part_none(cpu, pod)) == 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// The stage boss's event (see the fields above): the state's work, then the place and angle
+/// moved by the speeds.
+pub fn stage_boss_event(cpu: &mut Cpu, o: u32) {
+    match cpu.read8(o + O_STATE) as i8 {
+        0 => sb_start(cpu, o),
+        SB_ENTER => sb_enter(cpu, o),
+        SB_READY => sb_ready(cpu, o),
+        SB_BEGIN => sb_begin(cpu, o),
+        SB_FIRST => sb_first(cpu, o),
+        SB_SECOND => sb_second(cpu, o),
+        SB_DESTROYED => sb_destroyed(cpu, o),
+        _ => {}
+    }
+    for k in 0..3 {
+        let place = cpu.read32(o + O_POSITION + 4 * k).wrapping_add(cpu.read32(o + SB_VELOCITY + 4 * k));
+        cpu.write32(o + O_POSITION + 4 * k, place);
+    }
+    let angle = cpu.read16(o + O_ANGLE).wrapping_add(cpu.read16(o + SB_SPIN));
+    cpu.write16(o + O_ANGLE, angle);
+}
+
+/// State 0: the models set (hidden meanwhile; nothing more if that fails), the draw, the scores
+/// cleared, the place, the speeds and fields cleared, the count 0x2a30 (the gauge's), state 2.
+fn sb_start(cpu: &mut Cpu, o: u32) {
+    let flags = cpu.read32(o + O_FLAGS) | 0x8000_0000;
+    cpu.write32(o + O_FLAGS, flags);
+    if nested!(cpu, 0x0605_2ff0, models::model_group_set(cpu, o, SB_MODELS)) == 0 {
+        return;
+    }
+    let flags = cpu.read32(o + O_FLAGS) & 0x7fff_ffff;
+    cpu.write32(o + O_FLAGS, flags);
+    cpu.write32(o + O_DRAW, SB_DRAW);
+    cpu.write32(TOTAL_SCORE, 0);
+    cpu.write32(TOTAL_SCORE + 4, 0);
+    for (k, p) in SB_PLACE.into_iter().enumerate() {
+        cpu.write32(o + O_POSITION + 4 * k as u32, p);
+    }
+    cpu.write16(o + O_ANGLE, 0);
+    cpu.write32(o + SB_VELOCITY + 8, 0);
+    cpu.write32(o + SB_VELOCITY + 4, 0);
+    cpu.write32(o + SB_VELOCITY, 0);
+    cpu.write32(o + SB_SPIN, 0);
+    cpu.write32(o + SB_WAVE, 0);
+    cpu.write32(o + O_70, SB_COUNT);
+    cpu.write16(o + O_STEP, SB_ENTER as u16);
+}
+
+/// State 2, the entrance. Step 0 sets the colours to fade (16 colours from black), the speed
+/// down, the wait 30; 1 makes a spark every 20 frames until it is low enough; 2 slows its fall and
+/// turns it, then sends the bodies to state 16; 3 and 4 slow it to a stop, tilting, and send them
+/// to 17; 5 settles it, the colours fading with its depth, until it is in place; 6 turns it
+/// round, then sends the bodies to 15 and the event on to 10.
+fn sb_enter(cpu: &mut Cpu, o: u32) {
+    match cpu.read8(o + O_STEP) {
+        0 => {
+            let f = cpu.stack();
+            for i in 0..16 {
+                cpu.write16(f + 2 * i, 0x8000);
+            }
+            cpu.write16(f, 0);
+            boss_blend(cpu, f, f + 0x20, 0x500);
+            cpu.write32(o + SB_VELOCITY + 4, 0x6_0000);
+            cpu.write32(o + SB_WAIT, 30);
+            cpu.write8(o + O_STEP, 1);
+        }
+        1 => {
+            let wait = cpu.read32(o + SB_WAIT).wrapping_sub(1);
+            cpu.write32(o + SB_WAIT, wait);
+            if wait as i32 <= 0 {
+                let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, SHOT_SIZE)) as i8 as i32 as u32;
+                let spark = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, SHOT_EXEC));
+                if spark != 0 {
+                    nested!(cpu, 0x0604_62ac, actors::actor_setup(cpu, spark));
+                    let flags = cpu.read32(spark + O_FLAGS) | SB_SPARK_FLAGS;
+                    cpu.write32(spark + O_FLAGS, flags);
+                    cpu.write32(spark + O_BEHAVIOUR, SB_SPARK_BEHAVIOUR);
+                    let b = cpu.read8(o + O_NUMBER);
+                    cpu.write8(spark + O_NUMBER, b);
+                    let b = cpu.read8(o + O_54);
+                    cpu.write8(spark + O_54, b);
+                    cpu.write32(spark + SPARK_BOSS, o);
+                }
+                cpu.write32(o + SB_WAIT, 20);
+            }
+            if cpu.read32(o + O_POSITION + 4) as i32 > 0xff_ffff {
+                cpu.write32(o + SB_WAIT, 0);
+                cpu.write8(o + O_STEP, 2);
+            }
+        }
+        2 => {
+            let fall = cpu.read32(o + SB_VELOCITY + 4);
+            let fall = nested!(cpu, 0x0604_6168, actors::approach(cpu, fall, 0, 0x1000));
+            cpu.write32(o + SB_VELOCITY + 4, fall);
+            sb_tilt_toward(cpu, o, 0xffff_c400, 0x200);
+            if fall != 0 {
+                return;
+            }
+            let wait = cpu.read32(o + SB_WAIT).wrapping_add(1);
+            cpu.write32(o + SB_WAIT, wait);
+            if wait as i32 > 29 {
+                bodies_state(cpu, o, BS_LEAN);
+                cpu.write8(o + O_STEP, 3);
+            }
+        }
+        3 => {
+            let fall = cpu.read32(o + SB_VELOCITY + 4);
+            let fall = nested!(cpu, 0x0604_6168, actors::approach(cpu, fall, 0xfff8_0000, 0x800));
+            cpu.write32(o + SB_VELOCITY + 4, fall);
+            let spin = signed_word(cpu, o + SB_SPIN);
+            let spin = nested!(cpu, 0x0604_6168, actors::approach(cpu, spin, 0x800, 8));
+            cpu.write16(o + SB_SPIN, spin as u16);
+            if cpu.read32(o + O_POSITION + 4) as i32 <= 0xc0_0000 {
+                cpu.write32(o + SB_WAIT, 0);
+                cpu.write8(o + O_STEP, 4);
+            }
+        }
+        4 => {
+            let fall = cpu.read32(o + SB_VELOCITY + 4);
+            let fall = nested!(cpu, 0x0604_6168, actors::approach(cpu, fall, 0, 0x1000));
+            cpu.write32(o + SB_VELOCITY + 4, fall);
+            sb_tilt_toward(cpu, o, 0xffff_f000, 0x200);
+            let wait = cpu.read32(o + SB_WAIT).wrapping_add(1);
+            cpu.write32(o + SB_WAIT, wait);
+            if wait as i32 > 89 {
+                cpu.write32(o + SB_VELOCITY + 4, 0);
+                bodies_state(cpu, o, BS_LEAN_LONG);
+                cpu.write32(o + SB_WAIT, 0);
+                cpu.write8(o + O_STEP, 5);
+            }
+        }
+        5 => sb_settle(cpu, o),
+        6 => sb_turn_round(cpu, o),
+        10 => cpu.write16(o + O_STEP, SB_READY as u16),
+        _ => {}
+    }
+}
+
+/// The tilt (+0x2c) moved toward the angle `to` by a 32nd of the gap, held to `limit`.
+fn sb_tilt_toward(cpu: &mut Cpu, o: u32, to: u32, limit: u32) {
+    let tilt = signed_word(cpu, o + SB_TILT);
+    let gap = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, tilt, to));
+    let step = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, quotient(gap, 5), limit));
+    let tilt = cpu.read16(o + SB_TILT).wrapping_add(step as u16);
+    cpu.write16(o + SB_TILT, tilt);
+}
+
+/// Step 5: y moved toward -8.0 (a 64th of the way, held to 2.0) and z toward -0x40.0 (a 16th, held
+/// to a speed kept in the wait, going up to 16.0 by 0x4000); the turn speed to 0x400 by 2. While z
+/// is further than 0xffff from it the colours fade by its depth (a second 16 from black); once
+/// near, the kind's colours are the stage's, z is set, the changed flags raised and step 6 begins.
+fn sb_settle(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let y = cpu.read32(o + O_POSITION + 4);
+    let gap = 0xff80_0000u32.wrapping_sub(y) as i32;
+    let share = share_of(cpu, gap, Share::Helper6) as u32;
+    let by = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, share, 0x2_0000));
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_add(by);
+    cpu.write32(o + O_POSITION + 4, y);
+    let speed = cpu.read32(o + SB_WAIT);
+    let speed = nested!(cpu, 0x0604_6168, actors::approach(cpu, speed, 0x10_0000, 0x4000));
+    cpu.write32(o + SB_WAIT, speed);
+    let gap = 0xffc0_0000u32.wrapping_sub(cpu.read32(o + O_POSITION + 8));
+    let by = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, quotient(gap, 4), speed));
+    let z = cpu.read32(o + O_POSITION + 8).wrapping_add(by);
+    cpu.write32(o + O_POSITION + 8, z);
+    let spin = signed_word(cpu, o + SB_SPIN);
+    let spin = nested!(cpu, 0x0604_6168, actors::approach(cpu, spin, 0x400, 2));
+    cpu.write16(o + SB_SPIN, spin as u16);
+    let z = cpu.read32(o + O_POSITION + 8);
+    if absolute(0xffc0_0000u32.wrapping_sub(z)) > 0xffff {
+        for i in 0..16 {
+            cpu.write16(f + 0x30 + 2 * i, 0x8000);
+        }
+        cpu.write16(f + 0x30, 0);
+        let depth = nested!(cpu, 0x0600_6a8e, math::fixed_div(cpu, z, 0x0400_0000));
+        let fade = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, 0x800, depth));
+        boss_blend(cpu, f + 0x30, f + 0x50, 0x1000u32.wrapping_sub(fade));
+        return;
+    }
+    for i in 0..10 {
+        let first = cpu.read16(kind(PART_KIND) + K_COLOUR) as u32;
+        let at = 2 * (first + i);
+        let c = cpu.read16(COLOURS_TO + at);
+        cpu.write16(COLOURS_OUT + at, c);
+    }
+    cpu.write32(o + O_POSITION + 8, 0xffc0_0000);
+    let changed = cpu.read32(palette::CHANGED) | SB_CHANGED;
+    cpu.write32(palette::CHANGED, changed);
+    cpu.write32(o + SB_WAIT, 0);
+    cpu.write8(o + O_STEP, 6);
+}
+
+/// Step 6: the turn speed taken to 0 by 8 while it is over 0x200, else toward the way round
+/// (angle 0x8000: a 16th of the way ahead, held to 0x200); the tilt back to 0 (by at most 0x180),
+/// y and z drawn to 0 by a 32nd, held to the speed (going to 1.0 by 0x200). Once it has stopped
+/// turning, level and near 0 it sets the angle 0x8000, sends the bodies to 15 and goes to state 10.
+fn sb_turn_round(cpu: &mut Cpu, o: u32) {
+    let spin = signed_word(cpu, o + SB_SPIN);
+    let spin = if absolute(spin) > 0x200 {
+        nested!(cpu, 0x0604_6168, actors::approach(cpu, spin, 0, 8))
+    } else {
+        let angle = signed_word(cpu, o + O_ANGLE);
+        let ahead = nested!(cpu, 0x0604_61cc, camera::angle_ahead(cpu, angle, 0xffff_8000));
+        let spin = signed_word(cpu, o + SB_SPIN);
+        let gap = ahead.wrapping_sub(spin);
+        nested!(cpu, 0x0606_4f3c, math::clamp(cpu, quotient(gap, 4), 0x200))
+    };
+    cpu.write16(o + SB_SPIN, spin as u16);
+    let tilt = signed_word(cpu, o + SB_TILT);
+    let gap = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, tilt, 0));
+    let by = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, gap, 0x180));
+    let tilt = cpu.read16(o + SB_TILT).wrapping_add(by as u16);
+    cpu.write16(o + SB_TILT, tilt);
+    let speed = cpu.read32(o + SB_WAIT);
+    let speed = nested!(cpu, 0x0604_6168, actors::approach(cpu, speed, 0x1_0000, 0x200));
+    cpu.write32(o + SB_WAIT, speed);
+    let y = cpu.read32(o + O_POSITION + 4);
+    let by = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, quotient(y.wrapping_neg(), 5), speed));
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_add(by);
+    cpu.write32(o + O_POSITION + 4, y);
+    let speed = cpu.read32(o + SB_WAIT);
+    let z = cpu.read32(o + O_POSITION + 8);
+    let by = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, quotient(z.wrapping_neg(), 5), speed));
+    let z = cpu.read32(o + O_POSITION + 8).wrapping_add(by);
+    cpu.write32(o + O_POSITION + 8, z);
+    if signed_word(cpu, o + SB_SPIN) != 0 || cpu.read16(o + SB_TILT) != 0 {
+        return;
+    }
+    let y = cpu.read32(o + O_POSITION + 4);
+    if absolute(y) > 0xffff || absolute(z) > 0xffff {
+        return;
+    }
+    cpu.write32(o + O_POSITION + 4, 0);
+    cpu.write32(o + O_POSITION + 8, 0);
+    cpu.write16(o + O_ANGLE, 0x8000);
+    bodies_state(cpu, o, BS_SWAY);
+    cpu.write8(o + O_STEP, 10);
+}
+
+/// State 10: once the byte at 0x0600ed90 is clear the boss's gauge is set (to 100000), the wave
+/// cleared and the state is 15.
+fn sb_ready(cpu: &mut Cpu, o: u32) {
+    if cpu.read8(SB_FLAG) != 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_64d8, hud::boss_gauge_set(cpu, SB_GAUGE));
+    cpu.write32(o + SB_WAVE, 0);
+    cpu.write16(o + O_STEP, SB_BEGIN as u16);
+}
+
+/// State 15: the gauge object's step run on it, the point it makes for set to (0, 0x400000), the
+/// heading 0x8000 and speed 0, and state 16.
+fn sb_begin(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0608_3aac, gauge_step(cpu, o));
+    cpu.write32(o + SB_TARGET, 0);
+    cpu.write32(o + SB_TARGET + 4, 0x40_0000);
+    cpu.write16(o + SB_HEADING, 0x8000);
+    cpu.write32(o + SB_SPEED, 0);
+    cpu.write16(o + O_STEP, SB_FIRST as u16);
+}
+
+/// The heading (+0x8a) turned toward the direction of the point it makes for, at most `limit`;
+/// that direction (the angle of the way to it plus 0x4000) is left as a word at `direction`.
+fn sb_head_for_target(cpu: &mut Cpu, o: u32, direction: u32, limit: u32) {
+    let dy = cpu.read32(o + SB_TARGET + 4).wrapping_sub(cpu.read32(o + O_POSITION + 4));
+    let dx = cpu.read32(o + SB_TARGET).wrapping_sub(cpu.read32(o + O_POSITION));
+    let way = nested!(cpu, 0x0606_780c, sgl::sl_atan(cpu, dx, dy));
+    cpu.write16(direction, 0x4000u32.wrapping_add(way) as u16);
+    let to = signed_word(cpu, direction);
+    let heading = signed_word(cpu, o + SB_HEADING);
+    let gap = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, heading, to));
+    let by = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, gap, limit));
+    let heading = cpu.read16(o + SB_HEADING).wrapping_add(by as u16);
+    cpu.write16(o + SB_HEADING, heading);
+}
+
+/// The speed along the heading turned into a speed (+0x78, +0x7c) by turn_point on the vector at
+/// `t` (x 0, y minus the speed or what `y` gives, scales 1.0, the heading as its angle at +0x18).
+fn sb_set_velocity(cpu: &mut Cpu, o: u32, t: u32, y: u32) {
+    cpu.write32(t, 0);
+    cpu.write32(t + 4, y);
+    cpu.write32(t + 0x10, 0x1_0000);
+    cpu.write32(t + 0xc, 0x1_0000);
+    let heading = cpu.read16(o + SB_HEADING);
+    cpu.write16(t + 0x18, heading);
+    cpu.write32(t + 0x14, 0);
+    nested!(cpu, 0x0606_4eac, math::turn_point(cpu, t));
+    let x = cpu.read32(t);
+    cpu.write32(o + SB_VELOCITY, x);
+    let y = cpu.read32(t + 4);
+    cpu.write32(o + SB_VELOCITY + 4, y);
+}
+
+/// Whether the boss is within 0xfffff of the point it makes for.
+fn sb_at_target(cpu: &mut Cpu, o: u32) -> bool {
+    let dy = cpu.read32(o + SB_TARGET + 4).wrapping_sub(cpu.read32(o + O_POSITION + 4));
+    let dx = cpu.read32(o + SB_TARGET).wrapping_sub(cpu.read32(o + O_POSITION));
+    nested!(cpu, 0x0604_5e60, aim::length(cpu, dx, dy)) as i32 <= 0xf_ffff
+}
+
+/// State 16, the first phase. Step 0 sends the bodies to 18 (two of them at their step 10), step
+/// 1 makes the parts on the pods (the wait 0x258 less 200 by the difficulty) and 2 waits it out,
+/// 10 signals the parts and 11 waits 60 frames, then, with every pod bare, goes back to step 1 or
+/// (the fade at +0x74 gone) to state 17. Meanwhile the boss heads for its point, at a speed that
+/// is higher the nearer its heading is, taking a new random point (x 0 to 79, y 0 to 63 whole)
+/// when it is near; and the gauge object's step runs on it.
+fn sb_first(cpu: &mut Cpu, o: u32) {
+    match cpu.read8(o + O_STEP) {
+        0 => {
+            bodies_state(cpu, o, BS_NOD);
+            for at in [SB_BODIES[2], SB_BODIES[0]] {
+                let body = cpu.read32(o + at);
+                cpu.write8(body + O_STEP, 10);
+            }
+            cpu.write32(o + SB_FADE, 5);
+            cpu.write8(o + O_STEP, 1);
+        }
+        1 => {
+            pods_make_parts(cpu, o);
+            let wait = nested!(cpu, 0x0604_5dcc, math::by_difficulty(cpu, 0xc8));
+            cpu.write32(o + SB_WAIT, 0x258u32.wrapping_sub(wait));
+            cpu.write8(o + O_STEP, 2);
+        }
+        2 => {
+            let wait = cpu.read32(o + SB_WAIT).wrapping_sub(1);
+            cpu.write32(o + SB_WAIT, wait);
+            if wait as i32 <= 0 {
+                cpu.write8(o + O_STEP, 10);
+            }
+        }
+        10 => {
+            pods_signal(cpu, o);
+            cpu.write32(o + SB_WAIT, 0);
+            let fade = cpu.read32(o + SB_FADE).wrapping_sub(1);
+            cpu.write32(o + SB_FADE, fade);
+            cpu.write8(o + O_STEP, 11);
+        }
+        11 => {
+            let wait = cpu.read32(o + SB_WAIT).wrapping_add(1);
+            cpu.write32(o + SB_WAIT, wait);
+            if wait as i32 > 59 && pods_bare(cpu, o) {
+                if cpu.read32(o + SB_FADE) == 0 {
+                    cpu.write16(o + O_STEP, SB_SECOND as u16);
+                } else {
+                    cpu.write8(o + O_STEP, 1);
+                }
+            }
+        }
+        _ => {}
+    }
+    let f = cpu.stack();
+    sb_head_for_target(cpu, o, f + 0x78, 0x80);
+    let to = signed_word(cpu, f + 0x78);
+    let heading = signed_word(cpu, o + SB_HEADING);
+    let gap = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, heading, to));
+    let (base, more) = if absolute(gap) > 0x1000 {
+        (nested!(cpu, 0x0604_5dcc, math::by_difficulty(cpu, 0x800)), 0x2000)
+    } else {
+        (nested!(cpu, 0x0604_5dcc, math::by_difficulty(cpu, 0x1000)), 0x4000)
+    };
+    let speed = cpu.read32(o + SB_SPEED);
+    let speed = nested!(cpu, 0x0604_6168, actors::approach(cpu, speed, base.wrapping_add(more), 0x100));
+    cpu.write32(o + SB_SPEED, speed);
+    let speed = cpu.read32(o + SB_SPEED);
+    sb_set_velocity(cpu, o, f + 0x60, speed.wrapping_neg());
+    if sb_at_target(cpu, o) {
+        let x = nested!(cpu, 0x0604_5d90, math::random(cpu, 80)) << 16;
+        cpu.write32(o + SB_TARGET, x);
+        let y = nested!(cpu, 0x0604_5d90, math::random(cpu, 64)) << 16;
+        cpu.write32(o + SB_TARGET + 4, y);
+    }
+    nested!(cpu, 0x0608_3aac, gauge_step(cpu, o));
+}
+
+/// State 17, the second phase. Its turn speed goes to 0x400 by 2 until step 10; step 0 sends the
+/// bodies to 19 and begins; 1 makes the parts (wait 0x4b0 less 400 by the difficulty); 2 waits;
+/// 3 signals the parts or, with every pod gone (past 99), goes to step 5; 4 waits 60 frames for
+/// the parts to be gone, then step 10; 5 takes the fade up to 2.0 by 0x400; 10 waits for the
+/// angle to come round to 0x8000 (ahead) and sends the bodies to 15; 11 turns it the rest of the
+/// way, 12 settles it there and goes back to state 16. It heads for its point as in the first
+/// phase (faster: heading limit 0x100, speeds 0x4000 and 0x1000 over), stopped from step 6 on.
+fn sb_second(cpu: &mut Cpu, o: u32) {
+    if cpu.read8(o + O_STEP) as i8 <= 9 {
+        let spin = signed_word(cpu, o + SB_SPIN);
+        let spin = nested!(cpu, 0x0604_6168, actors::approach(cpu, spin, 0x400, 2));
+        cpu.write16(o + SB_SPIN, spin as u16);
+    }
+    match cpu.read8(o + O_STEP) {
+        0 => {
+            cpu.write16(o + SB_HEADING, 0x8000);
+            cpu.write32(o + SB_TARGET, 0);
+            cpu.write32(o + SB_TARGET + 4, 0x40_0000);
+            cpu.write32(o + SB_SPEED, 0);
+            bodies_state(cpu, o, BS_NOD_ONCE);
+            cpu.write32(o + SB_FADE, 0x1_0000);
+            cpu.write8(o + O_STEP, 1);
+        }
+        1 => {
+            pods_make_parts(cpu, o);
+            let wait = nested!(cpu, 0x0604_5dcc, math::by_difficulty(cpu, 0x190));
+            cpu.write32(o + SB_WAIT, 0x4b0u32.wrapping_sub(wait));
+            cpu.write8(o + O_STEP, 2);
+        }
+        2 => {
+            let wait = cpu.read32(o + SB_WAIT).wrapping_sub(1);
+            cpu.write32(o + SB_WAIT, wait);
+            if wait as i32 <= 0 {
+                cpu.write8(o + O_STEP, 3);
+            }
+        }
+        3 => {
+            let mut gone = 0;
+            for k in 0..4 {
+                let pod = pod(cpu, o, k);
+                if cpu.read8(pod + O_STATE) as i8 > GONE {
+                    gone += 1;
+                }
+            }
+            if gone > 3 {
+                cpu.write8(o + O_STEP, 5);
+            } else {
+                pods_signal(cpu, o);
+                cpu.write32(o + SB_WAIT, 0);
+                cpu.write8(o + O_STEP, 4);
+            }
+        }
+        4 => {
+            let wait = cpu.read32(o + SB_WAIT).wrapping_add(1);
+            cpu.write32(o + SB_WAIT, wait);
+            if wait as i32 > 59 && pods_bare(cpu, o) {
+                cpu.write8(o + O_STEP, 10);
+            }
+        }
+        5 => {
+            let fade = cpu.read32(o + SB_FADE);
+            let fade = nested!(cpu, 0x0604_6168, actors::approach(cpu, fade, 0x2_0000, 0x400));
+            cpu.write32(o + SB_FADE, fade);
+        }
+        10 => {
+            let angle = signed_word(cpu, o + O_ANGLE);
+            let ahead = nested!(cpu, 0x0604_61cc, camera::angle_ahead(cpu, angle, 0x8000)) as i32;
+            if ahead > 0x7fff {
+                bodies_state(cpu, o, BS_SWAY);
+                cpu.write8(o + O_STEP, 11);
+            }
+        }
+        11 => {
+            let angle = signed_word(cpu, o + O_ANGLE);
+            let ahead = nested!(cpu, 0x0604_61cc, camera::angle_ahead(cpu, angle, 0x8000));
+            let spin = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, quotient(ahead, 5), 0x400));
+            cpu.write16(o + SB_SPIN, spin as u16);
+            if spin as i16 as i32 > 32 {
+                return sb_second_aim(cpu, o);
+            }
+            cpu.write16(o + SB_SPIN, 0);
+            cpu.write8(o + O_STEP, 12);
+            sb_settle_round(cpu, o);
+        }
+        12 => sb_settle_round(cpu, o),
+        _ => {}
+    }
+    sb_second_aim(cpu, o);
+}
+
+/// Step 12: the angle taken to 0x8000 by at most 32 a frame; there, state 16.
+fn sb_settle_round(cpu: &mut Cpu, o: u32) {
+    let angle = signed_word(cpu, o + O_ANGLE);
+    let ahead = nested!(cpu, 0x0604_61cc, camera::angle_ahead(cpu, angle, 0x8000));
+    let by = nested!(cpu, 0x0606_4f3c, math::clamp(cpu, ahead, 32));
+    let angle = signed_word(cpu, o + O_ANGLE).wrapping_add(by);
+    cpu.write16(o + O_ANGLE, angle as u16);
+    if angle as i16 == 0x8000u16 as i16 {
+        cpu.write16(o + O_ANGLE, 0x8000);
+        cpu.write16(o + O_STEP, SB_FIRST as u16);
+    }
+}
+
+/// The second phase's heading, speed and velocity (see sb_second) and, up to step 9, a new point
+/// when it is near; the gauge object's step run on it.
+fn sb_second_aim(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    sb_head_for_target(cpu, o, f + 0xb8, 0x100);
+    let step = cpu.read8(o + O_STEP) as i8;
+    let speed = if step > 5 {
+        let speed = cpu.read32(o + SB_SPEED);
+        nested!(cpu, 0x0604_6168, actors::approach(cpu, speed, 0, 0x400))
+    } else {
+        let to = signed_word(cpu, f + 0xb8);
+        let heading = signed_word(cpu, o + SB_HEADING);
+        let gap = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, heading, to));
+        let (base, more) = if absolute(gap) > 0x1000 {
+            (nested!(cpu, 0x0604_5dcc, math::by_difficulty(cpu, 0x1000)), 0x4000)
+        } else {
+            (nested!(cpu, 0x0604_5dcc, math::by_difficulty(cpu, 0x4000)), 0x1_0000)
+        };
+        let speed = cpu.read32(o + SB_SPEED);
+        nested!(cpu, 0x0604_6168, actors::approach(cpu, speed, base.wrapping_add(more), 0x200))
+    };
+    cpu.write32(o + SB_SPEED, speed);
+    let t = f + 0xa0;
+    cpu.write32(t, 0);
+    let mut y = cpu.read32(o + SB_SPEED).wrapping_neg();
+    if cpu.read8(o + O_STEP) as i8 == 5 {
+        let fade = cpu.read32(o + SB_FADE);
+        y = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, y, fade));
+    }
+    sb_set_velocity(cpu, o, t, y);
+    if cpu.read8(o + O_STEP) as i8 <= 9 && sb_at_target(cpu, o) {
+        let out = o + SB_TARGET;
+        nested!(cpu, 0x0604_0ccc, aim::target(cpu, o, 0, out));
+    }
+    nested!(cpu, 0x0608_3aac, gauge_step(cpu, o));
+}
+
+/// State 100, the destruction. Step 0 hides it, sends the bodies to 21, stops it and clears the
+/// bullets; 1 sinks it (z toward 0x1000000 by 0x8000) for 60 frames and makes the results object
+/// (its pointer at +0x9c), step 2; 2 waits for the results' byte (+3) to pass 111, then sets a
+/// scroll and an explosion at its place and turns it; 3 waits 130 frames and ends it (its mode
+/// 0x70, step 101). From step 0 on x and y are drawn to 0 by 0x4000 a frame, and from step 2 z
+/// sinks and the tilt rises.
+fn sb_destroyed(cpu: &mut Cpu, o: u32) {
+    match cpu.read8(o + O_STEP) {
+        0 => {
+            let flags = cpu.read32(o + O_FLAGS) | F_HIDDEN;
+            cpu.write32(o + O_FLAGS, flags);
+            bodies_state(cpu, o, BS_RAISE);
+            cpu.write32(o + SB_VELOCITY + 8, 0);
+            cpu.write32(o + SB_VELOCITY + 4, 0);
+            cpu.write32(o + SB_VELOCITY, 0);
+            nested!(cpu, 0x0605_61e0, screen::bullets_cleared(cpu));
+            cpu.write32(o + SB_FADE, 0);
+            cpu.write8(o + O_STEP, 1);
+        }
+        1 => {
+            let z = cpu.read32(o + O_POSITION + 8);
+            let z = nested!(cpu, 0x0604_6168, actors::approach(cpu, z, 0x0100_0000, 0x8000));
+            cpu.write32(o + O_POSITION + 8, z);
+            let wait = cpu.read32(o + SB_FADE).wrapping_add(1);
+            cpu.write32(o + SB_FADE, wait);
+            if wait as i32 > 59 {
+                let results = nested!(cpu, 0x0605_284c, results::results_set(cpu, 0));
+                cpu.write32(o + SB_RESULTS, results);
+                if results != 0 {
+                    cpu.write8(o + O_STEP, 2);
+                }
+            }
+        }
+        2 => {
+            let results = cpu.read32(o + SB_RESULTS);
+            if cpu.read8(results + 3) as i8 > 111 {
+                nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+                let p = cpu.stack() + 0xe0;
+                for k in 0..3 {
+                    let place = cpu.read32(o + O_POSITION + 4 * k);
+                    cpu.write32(p + 4 * k, place);
+                }
+                cpu.write32(p + 0x3c, o);
+                nested!(cpu, 0x0605_8ba4, explosions::explosion_set(cpu, p));
+                cpu.write32(o + SB_FADE, 0);
+                let spin = cpu.read16(o + SB_SPIN).wrapping_add(0x100);
+                cpu.write16(o + SB_SPIN, spin);
+                cpu.write8(o + O_STEP, 3);
+            }
+        }
+        3 => {
+            let wait = cpu.read32(o + SB_FADE).wrapping_add(1);
+            cpu.write32(o + SB_FADE, wait);
+            if wait as i32 > 0x81 {
+                cpu.write8(o + O_MODE, MODE_DONE);
+                cpu.write8(o + O_STEP, 101);
+            }
+        }
+        _ => {}
+    }
+    for k in 0..2 {
+        let v = cpu.read32(o + O_POSITION + 4 * k);
+        let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0, 0x4000));
+        cpu.write32(o + O_POSITION + 4 * k, v);
+    }
+    if cpu.read8(o + O_STEP) as i8 > 1 {
+        let z = cpu.read32(o + O_POSITION + 8);
+        let z = nested!(cpu, 0x0604_6168, actors::approach(cpu, z, 0x0100_0000, 0x8000));
+        cpu.write32(o + O_POSITION + 8, z);
+        let tilt = cpu.read16(o + SB_TILT_Y).wrapping_add(0x100);
+        cpu.write16(o + SB_TILT_Y, tilt);
+    }
+}
+
 // ---- the stage's gauge object, ground scenery and map tiles --------------------------------------
 
 /// The boss's gauge object made (list 2, 0x138 bytes): a free number from 2 (made unless it is
@@ -2654,7 +3354,7 @@ fn row_make(cpu: &mut Cpu, event: u32, d: u32) {
 /// takes the behaviour 0x06089b58, its x (-0x340000 or 0x340000), a side (-1 or 1), `r` (+0x6c)
 /// and has the bit 0x80000 of its flags cleared.
 fn platform_pair(cpu: &mut Cpu, event: u32, d: u32) {
-    let r = cpu.call(PAIR_MAKER, &[d]);
+    let r = nested!(cpu, PAIR_MAKER, slider_part_make(cpu, d));
     if r == 0 {
         return;
     }
@@ -4780,6 +5480,1231 @@ const CYCLE_FRAME: u32 = 0x8a;
 const CYCLE_COUNT: u32 = 0x8c;
 const CYCLE_LAST: i16 = 9;
 const CYCLE_BACK: u16 = 3;
+
+// ---- the orbiters and the route fliers -----------------------------------------------------------
+
+/// An orbiter's fields: its parent (+0x6c, a pointer), its phase (+0x7c: 0 held to the parent, 1
+/// loose), the side it is on (+0x88: a quarter turn each), its speed (+0x80, +0x84), the sprite
+/// frame (+0x8a) and the frame count in cycle_frame (+0x8a, +0x8c).
+const OR_PARENT: u32 = 0x6c;
+const OR_PHASE: u32 = 0x7c;
+const OR_SPEED: u32 = 0x80;
+const OR_SIDE: u32 = 0x88;
+const OR_FLAGS: u32 = 0x7e;
+const OR_HIT_BITS: u32 = O_ARMS;
+const OR_RADIUS: i32 = 24;
+const OR_SPEED_STEP: u32 = 0xb00;
+/// The area an orbiter lives in (top, bottom, left, right).
+const OR_AREA: [u32; 4] = [0xff30_0000, 0x00d0_0000, 0xfef0_0000, 0x0110_0000];
+
+/// An orbiter's step (behaviour 0x0608857c; the parent at +0x6c): done (blown up) when its power
+/// (+0x50) is gone. Hit bit 0x200 raises its flag 1. In phase 0 it sits on the parent's circle
+/// (radius 24, its side a quarter turn each from the parent's angle) turning with it, until the
+/// parent's mode passes 111 or its flag 0x10 is up: then phase 1, its speed that of the way
+/// round (the angle plus half a turn, less a eighth of a turn a side). In phase 1 it is done off the
+/// area, and its speed eases toward four times the sine and cosine of its angle; its frame
+/// cycles. Then its place moves by its speed and its draw-hide flag (0x80000) is the parent's.
+pub fn orbiter_step(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    if cpu.read32(o + P_POWER) as i32 <= 0 {
+        nested!(cpu, 0x0605_9e9c, ground::blown_up_1(cpu, o));
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    if cpu.read16(o + OR_HIT_BITS) & 0x200 != 0 {
+        let flags = cpu.read16(o + OR_FLAGS) | 1;
+        cpu.write16(o + OR_FLAGS, flags);
+    }
+    let parent = cpu.read32(o + OR_PARENT);
+    match cpu.read8(o + OR_PHASE) {
+        0 => {
+            cpu.write32(f, o + O_ANGLE);
+            let angle = cpu.read16(parent + O_ANGLE);
+            cpu.write16(o + O_ANGLE, angle);
+            let side = cpu.read8(o + OR_SIDE) as i8 as i32;
+            let a = (angle as i16 as i32).wrapping_add(side.wrapping_mul(0x4000)) as i16 as i32 as u32;
+            let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a)) as i32;
+            let x = cpu.read32(parent + O_POSITION).wrapping_add(sin.wrapping_mul(OR_RADIUS) as u32);
+            cpu.write32(o + O_POSITION, x);
+            let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a)) as i32;
+            let y = cpu.read32(parent + O_POSITION + 4).wrapping_sub(cos.wrapping_mul(OR_RADIUS) as u32);
+            cpu.write32(o + O_POSITION + 4, y);
+            let z = cpu.read32(parent + O_POSITION + 8);
+            cpu.write32(o + O_POSITION + 8, z);
+            if cpu.read8(parent + O_MODE) as i8 > 111 || cpu.read16(parent + OR_FLAGS) & 0x10 != 0 {
+                let phase = cpu.read8(o + OR_PHASE).wrapping_add(1);
+                cpu.write8(o + OR_PHASE, phase);
+                let p = cpu.read32(f);
+                let side = cpu.read8(o + OR_SIDE) as i8 as i32;
+                let a = (cpu.read16(p) as i16 as i32).wrapping_add(0xffff_8000u32 as i32).wrapping_sub(side.wrapping_mul(0x2000)) as i16 as i32 as u32;
+                let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+                cpu.write32(o + OR_SPEED, sin);
+                let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+                cpu.write32(o + OR_SPEED + 4, cos.wrapping_neg());
+            }
+        }
+        1 => {
+            let [top, bottom, left, right] = OR_AREA;
+            let out = cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + O_FLAGS, top, bottom, left, right)) as u8;
+            if out != 0 {
+                cpu.write8(o + O_MODE, MODE_DONE);
+                return;
+            }
+            let a = cpu.read16(o + O_ANGLE) as i16 as i32 as u32;
+            let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+            let v = cpu.read32(o + OR_SPEED);
+            let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, sin << 2, OR_SPEED_STEP));
+            cpu.write32(o + OR_SPEED, v);
+            let a = cpu.read16(o + O_ANGLE) as i16 as i32 as u32;
+            let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+            let v = cpu.read32(o + OR_SPEED + 4);
+            let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, (cos << 2).wrapping_neg(), OR_SPEED_STEP));
+            cpu.write32(o + OR_SPEED + 4, v);
+            nested!(cpu, 0x0608_8548, cycle_frame(cpu, o));
+        }
+        _ => {}
+    }
+    for k in 0..2 {
+        let v = cpu.read32(o + O_POSITION + 4 * k).wrapping_add(cpu.read32(o + OR_SPEED + 4 * k));
+        cpu.write32(o + O_POSITION + 4 * k, v);
+    }
+    let flags = cpu.read32(o + O_FLAGS) & !F_HIDDEN;
+    cpu.write32(o + O_FLAGS, flags);
+    let hidden = cpu.read32(parent + O_FLAGS) & F_HIDDEN;
+    cpu.write32(o + O_FLAGS, flags | hidden);
+}
+
+/// An orbiter's draw (sprite `s`; behaviour 0x06088764): its flag (+0x7e) 2 cleared when up, 2 raised
+/// when 1 is; hidden with its flag 0x80000000. A sprite at its place from the model's (kind,
+/// frame, lift, turn); the colour 16 flag when its side is a positive one; the colour on the
+/// base (+0xe0 when flag 1 is up); and, while it is loose (phase), a second one in front of it
+/// flickering (random 16 and, past frame 6, 256 flags) at 40 units about the angle.
+pub fn orbiter_draw(cpu: &mut Cpu, s: u32) {
+    let o = s.wrapping_sub(0x10);
+    let at = s + 0x6e;
+    let mut flags = cpu.read16(at) as i16 as i32 as u32;
+    if flags & 2 != 0 {
+        flags &= 0xffff_fffc;
+        cpu.write16(at, flags as u16);
+    }
+    let flags = cpu.read16(at) as i16 as i32 as u32;
+    if flags & 1 != 0 {
+        cpu.write16(at, (flags | 2) as u16);
+    }
+    if cpu.read32(o + O_FLAGS) & F_FLAGGED != 0 {
+        return;
+    }
+    let d = cpu.stack();
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, d));
+    let x = cpu.read32(o + O_POSITION);
+    cpu.write32(d + S_POSITION, x);
+    let z = cpu.read32(o + O_POSITION + 8);
+    cpu.write32(d + S_POSITION + 8, z);
+    let b = cpu.read8(s + S_LIFT);
+    cpu.write8(d + S_LIFT, b);
+    let turn = cpu.read16(s + S_TURN);
+    cpu.write16(d + S_TURN, turn);
+    if cpu.read8(s + OR_SIDE - 0x10) as i8 > 0 {
+        cpu.write32(d + S_FLAGS, 16);
+    }
+    let kind = cpu.read8(s + S_KIND);
+    cpu.write8(d + S_KIND, kind);
+    let frame = cpu.read8(s + S_FRAME);
+    cpu.write8(d + S_FRAME, frame);
+    let y = cpu.read32(o + O_POSITION + 4);
+    cpu.write32(d + S_POSITION + 4, y);
+    let colour = if cpu.read16(at) & 1 != 0 {
+        (cpu.read16(CHAR_BASE) as i16 as i32 as u32).wrapping_add(0xe0)
+    } else {
+        cpu.read16(s + S_COLOUR) as u32
+    };
+    cpu.write16(d + S_COLOUR, colour as u16);
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+    if cpu.read8(o + OR_PHASE) == 0 {
+        return;
+    }
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000)) & 16;
+    cpu.write32(d + S_FLAGS, r);
+    if cpu.read16(o + 0x8a) as i16 > 6 {
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000)) & 0x100;
+        let flags = cpu.read32(d + S_FLAGS) | r;
+        cpu.write32(d + S_FLAGS, flags);
+    }
+    cpu.write8(d + S_KIND, 23);
+    let frame = cpu.read8(o + 0x8b);
+    cpu.write8(d + S_FRAME, frame);
+    let a = cpu.read16(o + O_ANGLE) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a)) as i32;
+    let x = cpu.read32(o + O_POSITION).wrapping_add(sin.wrapping_mul(-40) as u32);
+    cpu.write32(d + S_POSITION, x);
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a)) as i32;
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_sub(cos.wrapping_mul(-40) as u32);
+    cpu.write32(d + S_POSITION + 4, y);
+    let base = cpu.read16(CHAR_BASE);
+    let colour = if cpu.read32(LOOPS) & 1 != 0 { base.wrapping_add(16) } else { base };
+    cpu.write16(d + S_COLOUR, colour);
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+}
+
+const OR_SIZE: u32 = 0xbc;
+const OR_BEHAVIOUR: u32 = 0x0608_857c;
+const OR_DRAW: u32 = 0x0608_8764;
+const OR_SCRIPT: u32 = 0x060a_c594;
+const OR_FLAGS_SET: u32 = 0x00f8_0020;
+const OR_POWER: u32 = 8000;
+
+/// An orbiter made on `parent`'s circle at `side` (0x0608_888f4: an object of list 2, 0xbc bytes):
+/// its behaviour and draw, flags 0xf80020, kind 23 frame 1, the parent's colour and number
+/// bytes, power 8000, its hit bytes 1 and 18, its parent, its side and frame 2; its step run once.
+pub fn orbiter_make(cpu: &mut Cpu, parent: u32, side: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, OR_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, SHOT_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + 0x3c));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + O_BEHAVIOUR, OR_BEHAVIOUR);
+    cpu.write32(o + O_FLAGS, OR_FLAGS_SET);
+    cpu.write32(o + O_DRAW, OR_DRAW);
+    cpu.write8(o + O_KIND, 23);
+    cpu.write8(o + O_FRAME, 1);
+    let colour = cpu.read16(parent + O_COLOUR_A);
+    cpu.write16(o + O_COLOUR_A, colour);
+    cpu.write8(o + 0x33, 0xf8);
+    let b = cpu.read8(parent + O_NUMBER);
+    cpu.write8(o + O_NUMBER, b);
+    cpu.write32(o + O_SCRIPT, OR_SCRIPT);
+    cpu.write32(o + P_POWER, OR_POWER);
+    cpu.write8(o + O_54, 1);
+    cpu.write8(o + O_55, 18);
+    cpu.write32(o + OR_PARENT, parent);
+    cpu.write8(o + OR_SIDE, side as u8);
+    cpu.write16(o + 0x8a, 2);
+    nested!(cpu, 0x0608_857c, orbiter_step(cpu, o));
+}
+
+/// A route flier's fields: its route (+0x6c, as the diver's), the side times its x speed (+0x88,
+/// +0x80), its y speed (+0x84), its height (+0xb0), the flags (+0x7e: 0x1000 asks for the area
+/// check).
+const RF_AREA: [u32; 4] = [0xff70_0000, 0x0090_0000, 0xff30_0000, 0x00d0_0000];
+const RF_SCORE: u32 = 100;
+const RF_ROUTE: u32 = 0x6c;
+const RF_AREA_ASK: u16 = 0x1000;
+const RF_LIFT: u32 = 0xb0;
+const RF_FAR: i32 = 0x4_0000;
+const RF_SHOT: u32 = 0x0607_30b0;
+const RF_FIRE: u8 = 7;
+const RF_BURST: u8 = 15;
+const RF_FIRE_RADIUS: i32 = 18;
+const RF_BURST_RADIUS: i32 = 12;
+const RF_BURST_TURNS: [u16; 4] = [0x1800, 0xc00, 0xf400, 0xe800];
+
+/// A route flier's step (behaviour 0x060889dc): done when it asks (+0x7e flag 0x1000) and is off
+/// its area, or scored and blown up when its power (+0x50) is gone. Its hit bit 0x200 raises
+/// the flag 1. It takes its route's steps (ground::route_step): on the route's 7 it raises the
+/// flag 0x10 and shoots a pair of effects from two points a quarter turn either side of its
+/// angle (radius 18, the shot at 0x060730b0); on 15 it plays a sound and puts the flame effect
+/// (0x06054e08) out at its point (12 out) and four turns round it. Then its place moves by its
+/// speed (x times the side), its z is its height and it is hidden (0x80000) when that is over 0x40000.
+pub fn route_flier_step(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    if cpu.read16(o + OR_FLAGS) & RF_AREA_ASK != 0 {
+        let [top, bottom, left, right] = RF_AREA;
+        let out = cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + O_FLAGS, top, bottom, left, right)) as u8;
+        if out != 0 {
+            cpu.write8(o + O_MODE, MODE_DONE);
+            return;
+        }
+    }
+    if cpu.read32(o + P_POWER) as i32 <= 0 {
+        nested!(cpu, 0x0605_61ac, hits::score_hit_by(cpu, o, RF_SCORE));
+        nested!(cpu, 0x0605_9e9c, ground::blown_up_1(cpu, o));
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    if cpu.read16(o + OR_HIT_BITS) & 0x200 != 0 {
+        let flags = cpu.read16(o + OR_FLAGS) | 1;
+        cpu.write16(o + OR_FLAGS, flags);
+    }
+    let route = cpu.read32(o + RF_ROUTE);
+    let r = nested!(cpu, 0x0605_a000, ground::route_step(cpu, o, route)) as u8;
+    if r == RF_FIRE {
+        let flags = cpu.read16(o + OR_FLAGS) | 0x10;
+        cpu.write16(o + OR_FLAGS, flags);
+        cpu.write32(f + 0x3c, RF_SHOT);
+        let z = cpu.read32(o + O_POSITION + 8).wrapping_add(0xfffc_0000);
+        cpu.write32(f + 8, z);
+        cpu.write16(f + 0x20, 16);
+        let angle = cpu.read16(o + O_ANGLE);
+        cpu.write16(f + 0x18, angle);
+        cpu.write32(f + 0x14, 0xffff_4000);
+        cpu.write32(f + 0xc, 0xc000);
+        cpu.write32(f + 0x10, 0xc000);
+        for turn in [0x4000u32, 0xffff_c000] {
+            let a = (cpu.read16(o + O_ANGLE) as u32).wrapping_add(turn) as i16 as i32 as u32;
+            let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a)) as i32;
+            let x = cpu.read32(o + O_POSITION).wrapping_add(sin.wrapping_mul(RF_FIRE_RADIUS) as u32);
+            cpu.write32(f, x);
+            let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a)) as i32;
+            let y = cpu.read32(o + O_POSITION + 4).wrapping_sub(cos.wrapping_mul(RF_FIRE_RADIUS) as u32);
+            cpu.write32(f + 4, y);
+            nested!(cpu, 0x0605_7454, actors::drift_effect(cpu, f));
+        }
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 61));
+    } else if r == RF_BURST {
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 24));
+        let b = cpu.read8(o + O_NUMBER);
+        cpu.write8(f + 0x1e, b);
+        let angle = cpu.read16(o + O_ANGLE);
+        cpu.write16(f + 0x2c, angle);
+        let a = cpu.read16(f + 0x2c) as i16 as i32 as u32;
+        let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a)) as i32;
+        let x = cpu.read32(o + O_POSITION).wrapping_add(sin.wrapping_mul(RF_BURST_RADIUS) as u32);
+        cpu.write32(f, x);
+        let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a)) as i32;
+        let y = cpu.read32(o + O_POSITION + 4).wrapping_add(cos.wrapping_neg().wrapping_mul(RF_BURST_RADIUS) as u32);
+        cpu.write32(f + 4, y);
+        cpu.write32(f + 8, 0);
+        cpu.call(0x0605_4e08, &[f]);
+        for turn in RF_BURST_TURNS {
+            let a = cpu.read16(o + O_ANGLE).wrapping_add(turn);
+            cpu.write16(f + 0x2c, a);
+            cpu.call(0x0605_4e08, &[f]);
+        }
+    }
+    let side = cpu.read8(o + OR_SIDE) as i8 as i32;
+    let x = cpu.read32(o + O_POSITION).wrapping_add(side.wrapping_mul(cpu.read32(o + OR_SPEED) as i32) as u32);
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_add(cpu.read32(o + OR_SPEED + 4));
+    cpu.write32(o + O_POSITION + 4, y);
+    let lift = cpu.read32(o + RF_LIFT);
+    cpu.write32(o + O_POSITION + 8, lift);
+    let flags = cpu.read32(o + O_FLAGS);
+    let flags = if (lift as i32).wrapping_abs() > RF_FAR { flags | F_HIDDEN } else { flags & !F_HIDDEN };
+    cpu.write32(o + O_FLAGS, flags);
+}
+
+/// A route flier's draw (sprite `s`; behaviour 0x06088c68): its flags (+0x7e) handled as the
+/// orbiter's draw does, then a sprite of its kind and frame at its place (lift -8), the colour on
+/// the base (+0xe0 when the flag 1 is up), and the thrust (ground::thrust) behind it.
+pub fn route_flier_draw(cpu: &mut Cpu, s: u32) {
+    let o = s.wrapping_sub(0x10);
+    let at = s + 0x6e;
+    let mut flags = cpu.read16(at) as i16 as i32 as u32;
+    if flags & 2 != 0 {
+        flags &= 0xffff_fffc;
+        cpu.write16(at, flags as u16);
+    }
+    let flags = cpu.read16(at) as i16 as i32 as u32;
+    if flags & 1 != 0 {
+        cpu.write16(at, (flags | 2) as u16);
+    }
+    if cpu.read32(o + O_FLAGS) & F_FLAGGED != 0 {
+        return;
+    }
+    let d = cpu.stack();
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, d));
+    let b = cpu.read8(s + S_KIND);
+    cpu.write8(d + S_KIND, b);
+    let b = cpu.read8(s + S_FRAME);
+    cpu.write8(d + S_FRAME, b);
+    cpu.write8(d + S_LIFT, 0xf8);
+    for k in 0..3 {
+        let v = cpu.read32(o + O_POSITION + 4 * k);
+        cpu.write32(d + S_POSITION + 4 * k, v);
+    }
+    let turn = cpu.read16(s + S_TURN);
+    cpu.write16(d + S_TURN, turn);
+    let colour = if cpu.read16(at) & 1 != 0 {
+        (cpu.read16(CHAR_BASE) as i16 as i32 as u32).wrapping_add(0xe0) as u16
+    } else {
+        cpu.read16(s + S_COLOUR)
+    };
+    cpu.write16(d + S_COLOUR, colour);
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+    nested!(cpu, 0x0605_9d24, ground::thrust(cpu, o, d, 7, 0xa000));
+}
+
+/// An event row's fields (as the other rows': its place +4, +6 in whole units, its side +0xb, its
+/// route +8, its angle +0x14, its type +0x1b), the route flier's kind's first colour, its tables.
+const RF_KIND: u32 = 23;
+const RF_SIZE: u32 = 0xbc;
+const RF_FLAGS_SET: u32 = 0x00c0_0020;
+const RF_ROUTES: u32 = 0x060a_c584;
+const RF_SCRIPT: u32 = 0x060a_c5a4;
+const RF_POWER: u32 = 2000;
+const RF_BEHAVIOUR: u32 = 0x0608_89dc;
+const RF_DRAW: u32 = 0x0608_8c68;
+const RF_OFFSET: u32 = 0xa8;
+
+/// A route flier made from the event row `e` (an object of list 2, 0xbc bytes, flags 0xc00020,
+/// kind 23, the kind's colour plus 16 times the type, its route from the table by +8, its angle
+/// from +0x14, its side +0xb, power 2000, its place from +4 and +6, z 0), and, when the row's
+/// +0xa byte is 0, two orbiters on it, one each side. Gives 1.
+pub fn route_flier_make(cpu: &mut Cpu, e: u32) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, 2)) as i8;
+    if n == -1 {
+        return 1;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, RF_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PART_EXEC));
+    if o == 0 {
+        return 1;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + 0x3c));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + O_BEHAVIOUR, RF_BEHAVIOUR);
+    cpu.write32(o + O_FLAGS, RF_FLAGS_SET);
+    cpu.write32(o + O_DRAW, RF_DRAW);
+    cpu.write8(o + O_KIND, RF_KIND as u8);
+    cpu.write8(o + O_FRAME, 0);
+    let ty = cpu.read8(e + E_TYPE) as u32;
+    let base = cpu.read16(kind(RF_KIND) + K_COLOUR) as i16 as i32 as u32;
+    cpu.write16(o + O_COLOUR_A, (ty << 4).wrapping_add(base) as u16);
+    cpu.write8(o + O_33, 0xf8);
+    let route = cpu.read8(e + E_SCRIPT) as u32;
+    let route = cpu.read32(RF_ROUTES + 4 * route);
+    cpu.write32(o + RF_ROUTE, route);
+    let angle = cpu.read16(e + E_DIRECTION);
+    cpu.write16(o + O_ANGLE, angle);
+    let angle = cpu.read16(e + E_DIRECTION);
+    cpu.write16(o + RF_OFFSET, angle);
+    let side = cpu.read8(e + E_MIRROR);
+    cpu.write8(o + OR_SIDE, side);
+    cpu.write8(o + O_NUMBER, n as u8);
+    let number = cpu.read8(o + O_NUMBER) as i8 as i32 as u32;
+    cpu.write32(NUMBERED.wrapping_add(number << 2), o);
+    cpu.write32(o + O_SCRIPT, RF_SCRIPT);
+    cpu.write32(o + P_POWER, RF_POWER);
+    cpu.write8(o + O_54, 1);
+    cpu.write8(o + O_55, ty as u8);
+    let x = (cpu.read16(e + E_PLACE) as i16 as i32 as u32) << 16;
+    cpu.write32(o + O_POSITION, x);
+    let y = (cpu.read16(e + E_PLACE + 2) as i16 as i32 as u32) << 16;
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    if cpu.read8(e + 0xa) == 0 {
+        nested!(cpu, 0x0608_88f4, orbiter_make(cpu, o, 1));
+        nested!(cpu, 0x0608_88f4, orbiter_make(cpu, o, -1i32 as u32));
+    }
+    1
+}
+
+/// A faller's step (behaviour 0x06088eb8; drawn as an orbiter): done (blown up) when its power is
+/// gone, done when it is under the area (y over 0xd00000); else its frame cycles and it falls by +0x84.
+pub fn faller_step(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(o + P_POWER) as i32 <= 0 {
+        nested!(cpu, 0x0605_9e9c, ground::blown_up_1(cpu, o));
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    if cpu.read32(o + O_POSITION + 4) as i32 > 0xd0_0000 {
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    if cpu.read16(o + OR_HIT_BITS) & 0x200 != 0 {
+        let flags = cpu.read16(o + OR_FLAGS) | 1;
+        cpu.write16(o + OR_FLAGS, flags);
+    }
+    nested!(cpu, 0x0608_8548, cycle_frame(cpu, o));
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_add(cpu.read32(o + OR_SPEED + 4));
+    cpu.write32(o + O_POSITION + 4, y);
+}
+
+/// The wave's fields in its event row `e`: the count (+0x1c), the clock (+0x16), the side flag
+/// (+0x1e).
+const FR_COUNT: u32 = 0x1c;
+const FR_CLOCK: u32 = 0x16;
+const FR_SIDE: u32 = 0x1e;
+const FR_FIRST: i16 = 32;
+const FR_EVERY: u32 = 10;
+const FR_FALLER_SIZE: u32 = 0xbc;
+const FR_FALLER_FLAGS: u32 = 0x00f0_0020;
+const FR_FALLER_BEHAVIOUR: u32 = 0x0608_8eb8;
+const FR_NEAR: i16 = 11;
+const FR_WIDE: [u32; 2] = [0x60_0000, 0xc0_0000];
+
+/// An event row of route fliers (as the other rows': it gives 1 done, 0 to go on). Past its count
+/// of 32 it is a batch of route fliers: two pairs, each side (the side flag in +0x1e makes the
+/// sides go the other way), made by route_flier_make with the row's place, side and type set per
+/// flier (the places x +-96 and +-152, y -176, -216 and -192; the types 0 and 1; the route ids 2
+/// and 3). Before it, every 10th clock tick it makes a faller (an object of list 2; its place x a random multiple of
+/// 0x200000 in 0 to 0x600000 (0xc00000 once the count is past 11) either side, y -208.0; its
+/// colour on the base, plus 16 on the side where it will fall in; a random side +-1, frame 2, a
+/// fall speed 0x3c000 and a random 0-0x3fff, the angle 0x8000), counting up; the side flag is
+/// picked at random with the first.
+pub fn flier_row(cpu: &mut Cpu, e: u32) -> u32 {
+    let f = cpu.stack();
+    if cpu.read16(e + FR_COUNT) as i16 > FR_FIRST {
+        let sign: i32 = if cpu.read16(e + FR_SIDE) & 0x100 == 0 { 1 } else { -1 };
+        cpu.write8(e + 0xa, 1);
+        cpu.write32(f, e + E_MIRROR);
+        cpu.write8(e + E_MIRROR, 1);
+        cpu.write16(e + E_DIRECTION, 0x8000);
+        cpu.write32(f + 4, e + E_TYPE);
+        cpu.write8(e + E_TYPE, 0);
+        cpu.write8(e + E_SCRIPT, 2);
+        let place = |cpu: &mut Cpu, x: i32, y: u32| {
+            cpu.write16(e + E_PLACE, x.wrapping_mul(sign) as u16);
+            cpu.write16(e + E_PLACE + 2, y as u16);
+            nested!(cpu, 0x0608_8d48, route_flier_make(cpu, e));
+        };
+        place(cpu, 96, 0xff50);
+        cpu.write16(e + E_PLACE + 2, 0xff28);
+        nested!(cpu, 0x0608_8d48, route_flier_make(cpu, e));
+        cpu.write8(e + E_SCRIPT, 3);
+        let pair = cpu.read32(f);
+        cpu.write8(pair, sign as u8);
+        place(cpu, 0x98, 0xff40);
+        let ty = cpu.read32(f + 4);
+        cpu.write8(ty, 1);
+        cpu.write8(e + E_SCRIPT, 2);
+        place(cpu, -96, 0xff50);
+        cpu.write16(e + E_PLACE + 2, 0xff28);
+        nested!(cpu, 0x0608_8d48, route_flier_make(cpu, e));
+        cpu.write8(e + E_SCRIPT, 3);
+        let pair = cpu.read32(f);
+        cpu.write8(pair, sign as u8);
+        place(cpu, -0x98, 0xff40);
+        return 1;
+    }
+    let clock = cpu.read16(e + FR_CLOCK).wrapping_add(1);
+    cpu.write16(e + FR_CLOCK, clock);
+    if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, clock as i16 as i32 as u32, FR_EVERY)) != 0 {
+        return 0;
+    }
+    if cpu.read16(e + FR_COUNT) == 0 {
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000)) & 0x100;
+        cpu.write16(e + FR_SIDE, r as u16);
+    }
+    let count = cpu.read16(e + FR_COUNT).wrapping_add(1);
+    cpu.write16(e + FR_COUNT, count);
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, FR_FALLER_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, SHOT_EXEC));
+    if o == 0 {
+        return 1;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + 0x3c));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + O_BEHAVIOUR, FR_FALLER_BEHAVIOUR);
+    cpu.write32(o + O_FLAGS, FR_FALLER_FLAGS);
+    cpu.write32(o + O_DRAW, OR_DRAW);
+    cpu.write8(o + O_KIND, 23);
+    cpu.write8(o + O_FRAME, 1);
+    cpu.write8(o + O_33, 0xf8);
+    cpu.write32(o + O_SCRIPT, OR_SCRIPT);
+    cpu.write32(o + P_POWER, OR_POWER);
+    cpu.write8(o + O_54, 1);
+    cpu.write8(o + O_55, 18);
+    let wide = if cpu.read16(e + FR_COUNT) as i16 > FR_NEAR { FR_WIDE[1] } else { FR_WIDE[0] };
+    let x = nested!(cpu, 0x0604_5d90, math::random(cpu, wide)) & 0xffe0_0000;
+    cpu.write32(o + O_POSITION, x);
+    cpu.write32(o + O_POSITION + 4, 0xff30_0000);
+    cpu.write32(o + O_POSITION + 8, 0);
+    let x = cpu.read32(o + O_POSITION);
+    let base = cpu.read16(kind(RF_KIND) + K_COLOUR);
+    let flip = cpu.read16(e + FR_SIDE) & 0x100 != 0;
+    let in_screen = (x as i32).wrapping_abs() <= 0x5f_ffff;
+    let colour = if in_screen {
+        base
+    } else if flip {
+        if x as i32 > 95 { base.wrapping_add(16) } else { base }
+    } else if x as i32 > 95 {
+        base
+    } else {
+        base.wrapping_add(16)
+    };
+    cpu.write16(o + O_COLOUR_A, colour);
+    let side = if nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000)) & 0x8000 == 0 { 1 } else { 0xff };
+    cpu.write8(o + OR_SIDE, side);
+    cpu.write16(o + 0x8a, 2);
+    cpu.write8(o + OR_PHASE, 1);
+    let speed = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x4000));
+    cpu.write32(o + OR_SPEED + 4, speed.wrapping_add(0x3_c000));
+    cpu.write16(o + O_ANGLE, 0x8000);
+    0
+}
+
+/// Whether the nearer player (aim::nearer_player) is within 0x13ffff in x and y of the point 24 in
+/// front of `o` (along its angle, +0x30). Gives 1 or 0.
+pub fn player_in_front(cpu: &mut Cpu, o: u32) -> u32 {
+    let player = nested!(cpu, 0x0605_6a58, aim::nearer_player(cpu, o + O_FLAGS));
+    let a = cpu.read16(o + O_ANGLE) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a)) as i32;
+    let x = (sin.wrapping_mul(24) as u32).wrapping_add(cpu.read32(o + O_POSITION));
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a)) as i32;
+    let y = (cos.wrapping_mul(-24) as u32).wrapping_add(cpu.read32(o + O_POSITION + 4));
+    let near = 0x13_ffff;
+    if absolute(cpu.read32(player + O_POSITION).wrapping_sub(x)) > near {
+        return 0;
+    }
+    (absolute(cpu.read32(player + O_POSITION + 4).wrapping_sub(y)) <= near) as u32
+}
+
+/// A slider's fields: its phase (+0x7c), the swing angle (+0x8c, a word) and its speed (+0xa6),
+/// the countdown (+0x88), its limits along the way it slides (+0xac, +0xb0), the distance slid
+/// (+0xb4), the trail's centre (+0x92, +0x94) and the trail's points (+0xbe on, 8 apart: x, y).
+const SL_PHASE: u32 = 0x7c;
+const SL_SWING: u32 = 0x8c;
+const SL_SWING_SPEED: u32 = 0xa6;
+const SL_COUNT: u32 = 0x88;
+const SL_LOW: u32 = 0xac;
+const SL_HIGH: u32 = 0xb0;
+const SL_SLID: u32 = 0xb4;
+const SL_TRAIL_AT: u32 = 0xbe;
+const SL_CENTRE: u32 = 0x92;
+const SL_BOTTOM: i32 = 0xb0_0000;
+const SL_SCORE: u32 = 100;
+const SL_SLIDE_STEP: u32 = 0x1200;
+const SL_SPEED: u32 = 0x1_4000;
+const SL_ALONG: u16 = 0x4000;
+const SL_SWING_RELEASE: u16 = 0xc000;
+const SL_SWING_BACK: u32 = 0xffff_f000;
+const SL_SWING_BY: u32 = 0xa0;
+const SL_RECOVER: u16 = 0x600;
+const SL_SOUND: u32 = 60;
+
+/// A slider's step (behaviour 0x06089288): done under the bottom (y over 0xb00000), or scored and
+/// blown up when its power is gone; its flag 0x10 flips each frame; the trail's points (three, two
+/// words each side, each further out by one on the swing angle +0x4000: sine on 8192ths for x,
+/// cosine times 8 on 65536ths for y, about the centre) set; the hit bit 0x200 raises the flag 1.
+/// Then by phase: 0 and past 3 aim (the speed 0x14000 toward the nearer player along its way, the
+/// way being y when the angle's 0x4000 bit is up; once the player is in front the phase is 1, the
+/// recover word 0x600), 1 swings back (the speed to -0x1000 by 0xa0 until the swing is under
+/// -0x4000: then phase 2, the countdown 15, a sound), 2 counts down to phase 3, 3 swings forward
+/// until it is level, to phase 0 (or 1 if the player is in front). The slide itself: along x or
+/// y (by the angle's 0x4000 bit) the speed approached to the aim by 0x1200, the place kept between
+/// the limits, the distance slid kept, the frame from it; along y the limits and place move
+/// down with the ground.
+pub fn swinger_step(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(o + O_POSITION + 4) as i32 > SL_BOTTOM {
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    if cpu.read32(o + P_POWER) as i32 <= 0 {
+        nested!(cpu, 0x0605_61ac, hits::score_hit_by(cpu, o, SL_SCORE));
+        nested!(cpu, 0x0605_9e9c, ground::blown_up_1(cpu, o));
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    let flags = cpu.read32(o + O_FLAGS) ^ 16;
+    cpu.write32(o + O_FLAGS, flags);
+    let mut k = 0u32;
+    loop {
+        let a = (cpu.read16(o + SL_SWING) as i16 as i32 as u32).wrapping_add(0x4000) as i16 as i32 as u32;
+        let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a)) as i32;
+        k += 1;
+        let mut v = sin.wrapping_mul(k as i32);
+        if v < 0 {
+            v = v.wrapping_add(0x1fff);
+        }
+        nested!(cpu, 0x0600_815a, clib::ashiftrt_r4::<13>(cpu, v as u32));
+        let x = ((v >> 13) as u32).wrapping_add(cpu.read16(o + SL_CENTRE) as i16 as i32 as u32);
+        let a = (cpu.read16(o + SL_SWING) as i16 as i32 as u32).wrapping_add(0x4000) as i16 as i32 as u32;
+        let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a)) as i32;
+        let mut v = (cos.wrapping_mul(k as i32) << 3).wrapping_neg();
+        if v < 0 {
+            v = v.wrapping_add(0xffff);
+        }
+        let y = ((v >> 16) as u16).wrapping_add(cpu.read16(o + SL_CENTRE + 2));
+        let at = o + SL_TRAIL_AT + 16 * (k - 1);
+        cpu.write16(at, x as u16);
+        cpu.write16(at + 2, y);
+        cpu.write16(at + 8, x as u16);
+        cpu.write16(at + 10, y);
+        if k > 2 {
+            break;
+        }
+    }
+    if cpu.read16(o + O_ARMS) & 0x200 != 0 {
+        let flags = cpu.read16(o + OR_FLAGS) | 1;
+        cpu.write16(o + OR_FLAGS, flags);
+    }
+    let phase = cpu.read8(o + SL_PHASE);
+    let mut drive = 0;
+    match phase {
+        2 => {
+            let n = cpu.read8(o + SL_COUNT).wrapping_sub(1);
+            cpu.write8(o + SL_COUNT, n);
+            if (n as i8) < 0 {
+                cpu.write8(o + SL_PHASE, phase + 1);
+            }
+        }
+        1 => {
+            let speed = signed_word(cpu, o + SL_SWING_SPEED);
+            let speed = nested!(cpu, 0x0604_6168, actors::approach(cpu, speed, SL_SWING_BACK, SL_SWING_BY));
+            cpu.write16(o + SL_SWING_SPEED, speed as u16);
+            let swing = cpu.read16(o + SL_SWING).wrapping_add(speed as u16);
+            cpu.write16(o + SL_SWING, swing);
+            if (swing as i16) < SL_SWING_RELEASE as i16 {
+                let phase = cpu.read8(o + SL_PHASE).wrapping_add(1);
+                cpu.write8(o + SL_PHASE, phase);
+                cpu.write8(o + SL_COUNT, 15);
+                cpu.write16(o + SL_SWING, SL_SWING_RELEASE);
+                nested!(cpu, 0x0600_50d4, sound::se_set(cpu, SL_SOUND));
+            }
+        }
+        3 => {
+            let swing = cpu.read16(o + SL_SWING).wrapping_add(0x400);
+            cpu.write16(o + SL_SWING, swing);
+            if swing as i16 >= 0 {
+                cpu.write16(o + SL_SWING, 0);
+                let in_front = cpu.holding(&[(8, o), (9, 3), (10, o + SL_PHASE), (11, 0)], |cpu| nested!(cpu, 0x0608_9208, player_in_front(cpu, o)));
+                if in_front as u8 == 0 {
+                    cpu.write8(o + SL_PHASE, 0);
+                } else {
+                    cpu.write8(o + SL_PHASE, 1);
+                    cpu.write16(o + SL_SWING_SPEED, SL_RECOVER);
+                }
+            }
+        }
+        _ => {
+            let player = nested!(cpu, 0x0605_6a58, aim::nearer_player(cpu, o + O_FLAGS));
+            let (own, theirs) = if cpu.read16(o + O_ANGLE) & SL_ALONG == 0 {
+                (cpu.read32(o + O_POSITION), cpu.read32(player + O_POSITION))
+            } else {
+                (cpu.read32(o + O_POSITION + 4), cpu.read32(player + O_POSITION + 4))
+            };
+            drive = if own as i32 > theirs as i32 { SL_SPEED.wrapping_neg() } else { SL_SPEED };
+            let in_front = cpu.holding(&[(8, o), (9, 3), (10, o + SL_PHASE), (11, drive)], |cpu| nested!(cpu, 0x0608_9208, player_in_front(cpu, o)));
+            if in_front as u8 != 0 {
+                cpu.write8(o + SL_PHASE, 1);
+                drive = 0;
+                cpu.write16(o + SL_SWING_SPEED, SL_RECOVER);
+            }
+        }
+    }
+    if cpu.read16(o + O_ANGLE) & SL_ALONG == 0 {
+        let v = cpu.read32(o + OR_SPEED);
+        let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, drive, SL_SLIDE_STEP));
+        cpu.write32(o + OR_SPEED, v);
+        let x = cpu.read32(o + O_POSITION).wrapping_add(v);
+        cpu.write32(o + O_POSITION, x);
+        let low = cpu.read32(o + SL_LOW);
+        if (x as i32) < low as i32 {
+            cpu.write32(o + O_POSITION, low);
+            cpu.write32(o + OR_SPEED, 0);
+        }
+        let x = cpu.read32(o + O_POSITION);
+        let high = cpu.read32(o + SL_HIGH);
+        if x as i32 > high as i32 {
+            cpu.write32(o + O_POSITION, high);
+            cpu.write32(o + OR_SPEED, 0);
+        }
+        let slid = cpu.read32(o + SL_SLID).wrapping_add(cpu.read32(o + OR_SPEED));
+        cpu.write32(o + SL_SLID, slid);
+        let x = cpu.read32(o + O_POSITION);
+        let mut v = x.wrapping_neg() as i32;
+        if v < 0 {
+            v = v.wrapping_add(0x3_ffff);
+        }
+        cpu.write8(o + O_FRAME, ((v >> 16) as i16 >> 2) as u8 & 3);
+    } else {
+        let v = cpu.read32(o + OR_SPEED + 4);
+        let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, drive, SL_SLIDE_STEP));
+        cpu.write32(o + OR_SPEED + 4, v);
+        let y = cpu.read32(o + O_POSITION + 4).wrapping_add(v);
+        cpu.write32(o + O_POSITION + 4, y);
+        let at = cpu.read32(super::globals::GROUND_DY_AT);
+        let dy = cpu.read32(at);
+        let low = cpu.read32(o + SL_LOW).wrapping_sub(dy);
+        cpu.write32(o + SL_LOW, low);
+        let dy = cpu.read32(at);
+        let high = cpu.read32(o + SL_HIGH).wrapping_sub(dy);
+        cpu.write32(o + SL_HIGH, high);
+        let y = cpu.read32(o + O_POSITION + 4);
+        if (y as i32) < low as i32 {
+            cpu.write32(o + O_POSITION + 4, low);
+            cpu.write32(o + OR_SPEED + 4, 0);
+        }
+        let y = cpu.read32(o + O_POSITION + 4);
+        if y as i32 > high as i32 {
+            cpu.write32(o + O_POSITION + 4, high);
+            cpu.write32(o + OR_SPEED + 4, 0);
+        }
+        let slid = cpu.read32(o + SL_SLID).wrapping_add(cpu.read32(o + OR_SPEED + 4));
+        cpu.write32(o + SL_SLID, slid);
+    }
+    let slid = cpu.read32(o + SL_SLID);
+    let mut v = slid.wrapping_neg() as i32;
+    if v < 0 {
+        v = v.wrapping_add(0x3_ffff);
+    }
+    cpu.write8(o + O_FRAME, ((v >> 16) as i16 >> 2) as u8 & 3);
+    let at = cpu.read32(super::globals::GROUND_DY_AT);
+    let dy = cpu.read32(at);
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_sub(dy);
+    cpu.write32(o + O_POSITION + 4, y);
+}
+
+const SL_KIND: u32 = 73;
+const SL_FLAGS_SET: u32 = 0x00c0_0000;
+const SL_POWER: u32 = 3000;
+const SL_STEP: u32 = 0x0608_9288;
+const SL_DRAW: u32 = 0x0608_95d8;
+const SL_BOXES: u32 = 0x060a_c5b4;
+const SL_BOXES_PART: u32 = 0x060a_c5f4;
+const SL_FALL_STEP: u32 = 0x0608_9998;
+const SL_BOXES_AT: u32 = 0xbc;
+const SL_TRAIL_TURN: u32 = 0x2000;
+
+/// A slider's draw (sprite `s`; behaviour 0x060895d8): the flags (+0x7e) as the route flier's,
+/// then three sprites in the kind 73: two wings (frames 4 and 5) at 6 out on the angle plus and
+/// less 0x2000, turned by the angle plus and less the swing (+0x8c), then the body (its frame,
+/// +0x2f) at its place turned by the angle.
+pub fn slider_draw(cpu: &mut Cpu, s: u32) {
+    let o = s.wrapping_sub(0x10);
+    let at = s + 0x6e;
+    let mut flags = cpu.read16(at) as i16 as i32 as u32;
+    if flags & 2 != 0 {
+        flags &= 0xffff_fffc;
+        cpu.write16(at, flags as u16);
+    }
+    let flags = cpu.read16(at) as i16 as i32 as u32;
+    if flags & 1 != 0 {
+        cpu.write16(at, (flags | 2) as u16);
+    }
+    let d = cpu.stack();
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, d));
+    let b = cpu.read8(s + S_KIND);
+    cpu.write8(d + S_KIND, b);
+    cpu.write8(d + S_LIFT, 0xf8);
+    let z = cpu.read32(o + O_POSITION + 8);
+    cpu.write32(d + S_POSITION + 8, z);
+    let colour = if cpu.read16(at) & 1 != 0 {
+        (cpu.read16(CHAR_BASE) as i16 as i32 as u32).wrapping_add(0xe0) as u16
+    } else {
+        cpu.read16(s + S_COLOUR)
+    };
+    cpu.write16(d + S_COLOUR, colour);
+    cpu.write32(d + 0x2c, d + S_FRAME);
+    for (frame, turn, swing) in [(4u8, 0x2000u32, 1i32), (5, 0xffff_e000, -1)] {
+        cpu.write8(d + S_FRAME, frame);
+        let a = (cpu.read16(o + O_ANGLE) as i16 as i32 as u32).wrapping_add(turn) as i16 as i32 as u32;
+        let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a)) as i32;
+        let x = cpu.read32(o + O_POSITION).wrapping_add(sin.wrapping_mul(6) as u32);
+        cpu.write32(d + S_POSITION, x);
+        let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a)) as i32;
+        let y = cpu.read32(o + O_POSITION + 4).wrapping_add(cos.wrapping_mul(-6) as u32);
+        cpu.write32(d + S_POSITION + 4, y);
+        let angle = cpu.read16(o + O_ANGLE);
+        let swung = cpu.read16(o + SL_SWING);
+        cpu.write16(d + S_TURN, if swing > 0 { angle.wrapping_add(swung) } else { angle.wrapping_sub(swung) });
+        nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+    }
+    let frame = cpu.read8(o + O_FRAME);
+    cpu.write8(d + S_FRAME, frame);
+    let x = cpu.read32(o + O_POSITION);
+    cpu.write32(d + S_POSITION, x);
+    let y = cpu.read32(o + O_POSITION + 4);
+    cpu.write32(d + S_POSITION + 4, y);
+    let angle = cpu.read16(o + O_ANGLE);
+    cpu.write16(d + S_TURN, angle);
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+}
+
+/// A slider's trail centre (+0x92, +0x94): the sine of 0x2000 times 6 and the cosine times -6, on
+/// 65536ths.
+fn slider_trail_centre(cpu: &mut Cpu, o: u32) {
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, SL_TRAIL_TURN)) as i32;
+    let mut v = sin.wrapping_mul(6);
+    if v < 0 {
+        v = v.wrapping_add(0xffff);
+    }
+    cpu.write16(o + SL_CENTRE, (v >> 16) as u16);
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, SL_TRAIL_TURN)) as i32;
+    let mut v = cos.wrapping_mul(-6);
+    if v < 0 {
+        v = v.wrapping_add(0xffff);
+    }
+    cpu.write16(o + SL_CENTRE + 2, (v >> 16) as u16);
+}
+
+/// A slider made from the event row `e` (an object of list 2, 0xfc bytes, flags 0xc00000, kind 73,
+/// the colour by the type +0x1b, power 3000, its hit boxes copied in at +0xbc, its place from +4
+/// and +6, the angle +0x14, its limits along its way by +0x1c and +0x1e from its place, the
+/// trail centre). Gives 1.
+pub fn slider_make(cpu: &mut Cpu, e: u32) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, 2)) as i8;
+    if n == -1 {
+        return 1;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 0xfc)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PART_EXEC));
+    if o == 0 {
+        return 1;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + 0x3c));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + O_BEHAVIOUR, SL_STEP);
+    cpu.write32(o + O_FLAGS, SL_FLAGS_SET);
+    cpu.write32(o + O_DRAW, SL_DRAW);
+    cpu.write8(o + O_KIND, SL_KIND as u8);
+    cpu.write8(o + O_FRAME, 0);
+    let ty = cpu.read8(e + E_TYPE) as u32;
+    let base = cpu.read16(kind(SL_KIND) + K_COLOUR) as i16 as i32 as u32;
+    cpu.write16(o + O_COLOUR_A, (ty << 4).wrapping_add(base) as u16);
+    cpu.write8(o + O_NUMBER, n as u8);
+    let number = cpu.read8(o + O_NUMBER) as i8 as i32 as u32;
+    cpu.write32(NUMBERED.wrapping_add(number << 2), o);
+    cpu.write32(o + P_POWER, SL_POWER);
+    cpu.write8(o + O_54, 1);
+    cpu.write8(o + O_55, ty as u8);
+    nested!(cpu, 0x0605_6440, hits::boxes_copy(cpu, o + SL_BOXES_AT, SL_BOXES));
+    cpu.write32(o + O_SCRIPT, o + SL_BOXES_AT);
+    let x = (cpu.read16(e + E_PLACE) as i16 as i32 as u32) << 16;
+    cpu.write32(o + O_POSITION, x);
+    let y = (cpu.read16(e + E_PLACE + 2) as i16 as i32 as u32) << 16;
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    let b = cpu.read16(e + E_PLACE);
+    cpu.write16(o + 0x8a, b);
+    let angle = cpu.read16(e + E_DIRECTION);
+    cpu.write16(o + O_ANGLE, angle);
+    let along = if angle & SL_ALONG == 0 { o + O_POSITION } else { o + O_POSITION + 4 };
+    let low = (cpu.read16(e + 0x1c) as i16 as i32 as u32) << 16;
+    let low = cpu.read32(along).wrapping_add(low);
+    cpu.write32(o + SL_LOW, low);
+    let high = (cpu.read16(e + 0x1e) as i16 as i32 as u32) << 16;
+    let high = cpu.read32(along).wrapping_add(high);
+    cpu.write32(o + SL_HIGH, high);
+    slider_trail_centre(cpu, o);
+    1
+}
+
+/// A slider destroyed: scored (100), blown up and ended.
+pub fn slider_burst(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0605_61ac, hits::score_hit_by(cpu, o, SL_SCORE));
+    nested!(cpu, 0x0605_9e9c, ground::blown_up_1(cpu, o));
+    cpu.write8(o + O_MODE, MODE_DONE);
+}
+
+/// A slider's swing (+0x8c) flickering: a random 0 to 255 less 0xc00; the hit bit 0x200 raises
+/// the flag 1.
+pub fn slider_flicker(cpu: &mut Cpu, o: u32) {
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x100));
+    cpu.write16(o + SL_SWING, r.wrapping_add(0xffff_f400) as u16);
+    if cpu.read16(o + O_ARMS) & 0x200 != 0 {
+        let flags = cpu.read16(o + OR_FLAGS) | 1;
+        cpu.write16(o + OR_FLAGS, flags);
+    }
+}
+
+/// A falling slider's step (behaviour 0x06089998): done under 0xe00000, destroyed when its power is
+/// gone, else flickering and carried up with the ground.
+pub fn slider_fall_step(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(o + O_POSITION + 4) as i32 > 0xe0_0000 {
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    if cpu.read32(o + P_POWER) as i32 <= 0 {
+        nested!(cpu, 0x0608_991c, slider_burst(cpu, o));
+        return;
+    }
+    nested!(cpu, 0x0608_994c, slider_flicker(cpu, o));
+    let at = cpu.read32(super::globals::GROUND_DY_AT);
+    let dy = cpu.read32(at);
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_sub(dy);
+    cpu.write32(o + O_POSITION + 4, y);
+}
+
+/// A slider made falling from the description at `from` (its place, longs x and y at 0 and 4,
+/// its type a word at +0x2c, a byte at +0x2d, its angle at +0x2e): as slider_make's, the behaviour
+/// slider_fall_step, the hit boxes at 0x060ac5f4. The object, or 0.
+pub fn slider_part_make(cpu: &mut Cpu, from: u32) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, 2)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 0xbc)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PART_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + 0x3c));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + O_BEHAVIOUR, SL_FALL_STEP);
+    cpu.write32(o + O_FLAGS, SL_FLAGS_SET);
+    cpu.write32(o + O_DRAW, SL_DRAW);
+    cpu.write8(o + O_KIND, SL_KIND as u8);
+    cpu.write8(o + O_FRAME, 0);
+    let ty = cpu.read16(from + 0x2c) as i16 as i32 as u32;
+    let base = cpu.read16(kind(SL_KIND) + K_COLOUR) as i16 as i32 as u32;
+    cpu.write16(o + O_COLOUR_A, (ty << 4).wrapping_add(base) as u16);
+    cpu.write8(o + O_NUMBER, n as u8);
+    let number = cpu.read8(o + O_NUMBER) as i8 as i32 as u32;
+    cpu.write32(NUMBERED.wrapping_add(number << 2), o);
+    cpu.write32(o + P_POWER, SL_POWER);
+    cpu.write8(o + O_54, 1);
+    let b = cpu.read8(from + 0x2d);
+    cpu.write8(o + O_55, b);
+    cpu.write32(o + O_SCRIPT, SL_BOXES_PART);
+    let x = cpu.read32(from);
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(from + 4);
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    let angle = cpu.read16(from + 0x2e);
+    cpu.write16(o + O_ANGLE, angle);
+    slider_trail_centre(cpu, o);
+    o
+}
+
+/// A pair piece's fields: its side (+0x88: -1 or 1), its state (+0xa8: 0 waiting, 1 released), the
+/// spread (+0xac, whose approach to 0 gives the speed) and its speed (+0x80); its parent is
+/// +0x6c (the pair's platform).
+const PP_STATE: u32 = 0xa8;
+const PP_SPREAD: u32 = 0xac;
+const PP_AREA: [u32; 4] = [0xff20_0000, 0x00e0_0000, 0xfee0_0000, 0x0120_0000];
+const PP_SPREAD_BY: i32 = 0x7000;
+const PP_PULL: i32 = -0x600;
+const PP_REACH: i32 = 0x27_ffff;
+const PP_OUT: i32 = 0x28_0000;
+const PP_EASE: u32 = 0x2000;
+const PP_POWER: u32 = 100;
+
+/// A pair piece's step (behaviour 0x06089b58): done off the area. Once its parent's mode is
+/// past 111 it is released (state 1) with the spread and speed 0x7000 times its side. Released,
+/// the speed is pulled by 0x600 against the side while there is spread; within 0x27ffff of the
+/// middle it is put at 0x280000 on its side and the spread eases to 0 (by 0x2000), which is its
+/// speed too. It moves by its speed and the ground; its power is 100, or 0 on the frames of one
+/// parity (by the side of the middle it is on): hit only on the others.
+pub fn pair_step(cpu: &mut Cpu, o: u32) {
+    let [top, bottom, left, right] = PP_AREA;
+    let out = cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + O_FLAGS, top, bottom, left, right)) as u8;
+    if out != 0 {
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    let state = cpu.read16(o + PP_STATE);
+    let parent = cpu.read32(o + RF_ROUTE);
+    if state as i16 == 0 && cpu.read8(parent + O_MODE) as i8 > 111 {
+        cpu.write16(o + PP_STATE, state.wrapping_add(1));
+        let side = cpu.read8(o + OR_SIDE) as i8 as i32;
+        cpu.write32(o + OR_SPEED, side.wrapping_mul(PP_SPREAD_BY) as u32);
+        let side = cpu.read8(o + OR_SIDE) as i8 as i32;
+        cpu.write32(o + PP_SPREAD, side.wrapping_mul(PP_SPREAD_BY) as u32);
+    }
+    if cpu.read16(o + PP_STATE) != 0 {
+        if cpu.read32(o + PP_SPREAD) != 0 {
+            let side = cpu.read8(o + OR_SIDE) as i8 as i32;
+            let v = cpu.read32(o + OR_SPEED).wrapping_add(side.wrapping_mul(PP_PULL) as u32);
+            cpu.write32(o + OR_SPEED, v);
+        }
+        if absolute(cpu.read32(o + O_POSITION)) <= PP_REACH {
+            let side = cpu.read8(o + OR_SIDE) as i8 as i32;
+            cpu.write32(o + O_POSITION, side.wrapping_mul(PP_OUT) as u32);
+            let spread = cpu.read32(o + PP_SPREAD);
+            let spread = nested!(cpu, 0x0604_6168, actors::approach(cpu, spread, 0, PP_EASE));
+            cpu.write32(o + PP_SPREAD, spread);
+            cpu.write32(o + OR_SPEED, spread);
+        }
+    }
+    let flags = cpu.read16(o + OR_FLAGS) | 0x10;
+    cpu.write16(o + OR_FLAGS, flags);
+    let x = cpu.read32(o + O_POSITION).wrapping_add(cpu.read32(o + OR_SPEED));
+    cpu.write32(o + O_POSITION, x);
+    let at = cpu.read32(super::globals::GROUND_DY_AT);
+    let dy = cpu.read32(at);
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_sub(dy);
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + P_POWER, PP_POWER);
+    let odd = cpu.read32(GAME_FRAMES) & 1;
+    if x as i32 > 0 {
+        if odd == 0 {
+            cpu.write32(o + P_POWER, 0);
+        }
+    } else if odd != 0 {
+        cpu.write32(o + P_POWER, 0);
+    }
+}
+
+/// A platform's fields: its phase (+0x7c), the heading (+0x8a, a word) it is turned to, its speed
+/// along it (+0xac) and its (+0x80, +0x84) speed.
+const PL_PHASE: u32 = 0x7c;
+const PL_HEADING: u32 = 0x8a;
+const PL_SPEED: u32 = 0xac;
+const PL_AREA: [u32; 4] = [0xff6f_0000, 0x0090_0000, 0xff44_0000, 0x00bc_0000];
+const PL_SHOT: u32 = 16;
+const PL_LEVEL: u32 = 0x0600_ed84;
+
+/// A platform's step (behaviour 0x06089cac): done off the area, blown up when its power is gone.
+/// Phase 0 (rising: its y speed less 0x1800 a frame until it is under -0x8000) turns it to
+/// face the nearer player (when the level byte 0x0600ed84 is past 1, else upside down) and goes to
+/// phase 1; that lets the y speed rise by 0x1800 until it is up, then fires a plain bullet at the
+/// player (its flags 0x40000 cleared, its frame 2, its hatch opened) and goes to phase 2, which
+/// has it move along the heading at its speed (the sine and cosine times it), the speed rising to
+/// 0x60000 by 0x4000. Every phase turns it toward the heading (a 32nd of the gap) and moves it.
+pub fn platform_step(cpu: &mut Cpu, o: u32) {
+    let f = cpu.stack();
+    let [top, bottom, left, right] = PL_AREA;
+    let out = cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + O_FLAGS, top, bottom, left, right)) as u8;
+    if out != 0 {
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    if cpu.read32(o + P_POWER) as i32 <= 0 {
+        nested!(cpu, 0x0605_9e4c, ground::blown_up(cpu, o));
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    match cpu.read8(o + PL_PHASE) {
+        0 => {
+            let v = cpu.read32(o + OR_SPEED + 4).wrapping_add(0xffff_e800);
+            cpu.write32(o + OR_SPEED + 4, v);
+            if (v as i32) < -0x8000 {
+                let phase = cpu.read8(o + PL_PHASE).wrapping_add(1);
+                cpu.write8(o + PL_PHASE, phase);
+                let heading = if cpu.read8(PL_LEVEL) as i8 > 1 {
+                    nested!(cpu, 0x0605_6ad4, aim::angle_to_target(cpu, o, 2))
+                } else {
+                    0xffff_8000
+                };
+                cpu.write16(o + PL_HEADING, heading as u16);
+            }
+        }
+        1 => {
+            let v = cpu.read32(o + OR_SPEED + 4).wrapping_add(0x1800);
+            cpu.write32(o + OR_SPEED + 4, v);
+            if v as i32 > 0 {
+                let phase = cpu.read8(o + PL_PHASE).wrapping_add(1);
+                cpu.write8(o + PL_PHASE, phase);
+                let b = cpu.read8(o + O_NUMBER);
+                cpu.write8(f + 0x1e, b);
+                for k in 0..3 {
+                    let place = cpu.read32(o + O_POSITION + 4 * k);
+                    cpu.write32(f + 4 * k, place);
+                }
+                let aim_at = nested!(cpu, 0x0605_6ad4, aim::angle_to_target(cpu, o, PL_SHOT));
+                cpu.write16(f + 0x2c, aim_at as u16);
+                nested!(cpu, 0x0605_3f48, bullets::bullet_set_plain(cpu, f));
+                let flags = cpu.read32(o + O_FLAGS) & 0xfffb_ffff;
+                cpu.write32(o + O_FLAGS, flags);
+                cpu.write8(o + O_FRAME, 2);
+                nested!(cpu, 0x0605_dd54, ground::hatch_opens(cpu, o));
+            }
+        }
+        2 => {
+            let speed = cpu.read32(o + PL_SPEED);
+            let a = signed_word(cpu, o + PL_HEADING);
+            let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+            let x = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, sin, speed));
+            cpu.write32(o + OR_SPEED, x);
+            let speed = cpu.read32(o + PL_SPEED);
+            let a = signed_word(cpu, o + PL_HEADING);
+            let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+            let y = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, cos, speed.wrapping_neg()));
+            cpu.write32(o + OR_SPEED + 4, y);
+            let speed = cpu.read32(o + PL_SPEED);
+            let speed = nested!(cpu, 0x0604_6168, actors::approach(cpu, speed, 0x6_0000, 0x4000));
+            cpu.write32(o + PL_SPEED, speed);
+        }
+        _ => {}
+    }
+    let heading = signed_word(cpu, o + PL_HEADING);
+    let angle = signed_word(cpu, o + O_ANGLE);
+    let gap = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, angle, heading));
+    let share = nested!(cpu, 0x0600_6a78, math::quotient(cpu, gap, 32));
+    let angle = cpu.read16(o + O_ANGLE).wrapping_add(share as u16);
+    cpu.write16(o + O_ANGLE, angle);
+    for k in 0..2 {
+        let v = cpu.read32(o + O_POSITION + 4 * k).wrapping_add(cpu.read32(o + OR_SPEED + 4 * k));
+        cpu.write32(o + O_POSITION + 4 * k, v);
+    }
+}
+
+const PR_TABLE: u32 = 0x060a_c604;
+const PR_EVERY: u32 = 16;
+const PR_SIZE: u32 = 0xbc;
+const PR_FLAGS_SET: u32 = 0x4_0000;
+const PR_KIND: u32 = 27;
+const PR_POWER: u32 = 200;
+const PR_SCRIPT: u32 = 0x0607_3278;
+const PR_START_Y: u32 = 0xff70_0000;
+const PR_FALL: u32 = 0x3_8000;
+const PR_CLOCK: u32 = 0x16;
+const PR_AT: u32 = 0x1c;
+
+/// An event row of platforms (gives 0, going on, or 1, finished): every 16th tick of its clock
+/// (+0x16) it takes the next entry (+0x1c) of the table at 0x060ac604, a word each: -2 is skipped,
+/// -1 the end; else a platform (an object of list 2, 0xbc bytes, flags 0x40000, kind 27, the kind's
+/// colour (+0xcc of the kinds) by the row's type (+0x1b), power 200, heading and angle 0x8000, x
+/// the entry on 65536ths, y -144.0, y speed 0x38000) is made; past the ninth entry the type counts
+/// down (to 2 when it passes 0).
+pub fn platform_row(cpu: &mut Cpu, e: u32) -> u32 {
+    let clock = cpu.read16(e + PR_CLOCK) as i16 as i32 as u32;
+    if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, clock, PR_EVERY)) != 0 {
+        return platform_row_tick(cpu, e);
+    }
+    let at = cpu.read16(e + PR_AT);
+    let entry = cpu.read16(PR_TABLE + 2 * at as u32) as i16;
+    if entry == -2 {
+        cpu.write16(e + PR_AT, at.wrapping_add(1));
+        return 0;
+    }
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, 2)) as i8;
+    if n == -1 {
+        return 0;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, PR_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PART_EXEC));
+    if o == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + 0x3c));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + O_BEHAVIOUR, 0x0608_9cac);
+    cpu.write32(o + O_FLAGS, PR_FLAGS_SET);
+    cpu.write8(o + O_KIND, PR_KIND as u8);
+    cpu.write8(o + O_FRAME, 0);
+    let ty = cpu.read8(e + E_TYPE) as u32;
+    let base = cpu.read16(kind(PR_KIND) + K_COLOUR) as i16 as i32 as u32;
+    let colour = base.wrapping_add(ty << 4) as u16;
+    cpu.write16(o + O_COLOUR_A, colour);
+    cpu.write16(o + O_COLOUR_B, colour);
+    cpu.write8(o + O_NUMBER, n as u8);
+    let number = cpu.read8(o + O_NUMBER) as i8 as i32 as u32;
+    cpu.write32(NUMBERED.wrapping_add(number << 2), o);
+    cpu.write32(o + O_SCRIPT, PR_SCRIPT);
+    cpu.write32(o + P_POWER, PR_POWER);
+    cpu.write8(o + O_54, 1);
+    let ty = cpu.read8(e + E_TYPE);
+    cpu.write8(o + O_55, ty);
+    cpu.write16(o + O_ANGLE, 0x8000);
+    cpu.write16(o + PL_HEADING, 0x8000);
+    let at = cpu.read16(e + PR_AT);
+    let x = (cpu.read16(PR_TABLE + 2 * at as u32) as i16 as i32 as u32) << 16;
+    cpu.write32(o + O_POSITION, x);
+    cpu.write32(o + O_POSITION + 4, PR_START_Y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    cpu.write32(o + OR_SPEED + 4, PR_FALL);
+    let at = cpu.read16(e + PR_AT).wrapping_add(1);
+    cpu.write16(e + PR_AT, at);
+    if cpu.read16(PR_TABLE + 2 * at as u32) as i16 == -1 {
+        return 1;
+    }
+    if at as i16 > 8 {
+        let ty = cpu.read8(e + E_TYPE).wrapping_sub(1);
+        cpu.write8(e + E_TYPE, ty);
+        if (ty as i8) < 0 {
+            cpu.write8(e + E_TYPE, 2);
+        }
+    }
+    platform_row_tick(cpu, e)
+}
+
+fn platform_row_tick(cpu: &mut Cpu, e: u32) -> u32 {
+    let clock = cpu.read16(e + PR_CLOCK).wrapping_add(1);
+    cpu.write16(e + PR_CLOCK, clock);
+    0
+}
 
 // ==== from 0x06094000 on ===========================================================================
 // (A second STG03 worktree, wip-stg03b, writes the functions from 0x06094000 below this line while
