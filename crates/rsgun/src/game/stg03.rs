@@ -4,7 +4,7 @@
 
 use super::globals::{bios_setting_is_1, GAME_FRAMES, GAME_MODE};
 use super::bullets::{self, AS_FLAGS, AS_POSITION, AS_SHOOTER, AS_SPEED};
-use super::{actors, aim, bg, camera, ground, hud, parts, sgl, sprites, dma, effects, explosions, files, hits, kinds, math, models, nested, objects, screen, sound, states, stg02, timeline, Cpu};
+use super::{clib, actors, aim, bg, camera, ground, hud, parts, sgl, sprites, dma, effects, explosions, files, hits, kinds, math, models, nested, objects, screen, sound, states, stg02, timeline, Cpu};
 
 // ---- the stage's mode ----------------------------------------------------------------------------
 
@@ -1631,6 +1631,418 @@ pub fn boss_draw(cpu: &mut Cpu, s: u32) {
     cpu.call(SL_POP_MATRIX, &[]);
 }
 
+// ---- the boss's body -----------------------------------------------------------------------------
+
+/// The boss's fields: its kind (+0x6e: 9 to 12, which four-part model set and turn it starts with),
+/// its step (+0x6c) within its state (+0x6d), a count (+0x70, a long; its low word +0x72 is the
+/// sway's angle), a speed (+0x74, a word) and a rate (+0x78, a word). Its body and two of its
+/// parts (the second and third, +0xb8 and +0xbc) are tilted about x (+0x2c, a word) each frame
+/// toward an angle by a share of the gap held to the speed.
+const B_KIND: u32 = 0x6e;
+const B_COUNT: u32 = O_70;
+const B_SWAY: u32 = 0x72;
+const B_SPEED: u32 = O_74;
+const B_RATE: u32 = O_78;
+const B_DRAW: u32 = 0x34;
+const B_TILT: u32 = 0x2c;
+const B_PART_2: u32 = 0xb8;
+const B_PART_3: u32 = 0xbc;
+const B_PLACE_X: u32 = 0xd8;
+const B_PLACE_Y: u32 = 0xdc;
+const B_DRAW_CODE: u32 = 0x0608_24b4;
+/// The kinds' part tables (0x78 apart, from 9) and the turns they start at.
+const B_TABLES: [(u32, u32); 4] = [(0x060a_b9d4, 0x2000), (0x060a_ba4c, 0x6000), (0x060a_bac4, 0xa000), (0x060a_bb3c, 0xe000)];
+const B_FIRST_KIND: i32 = 9;
+/// The states: swaying (15, from the start), then four tilting moves (16 and 17 lean back, 18 nods
+/// up and down, 19 nods once, 20 strikes: its steps 1, 2, 10 and 12) and 21 (a raise).
+const BS_SWAY: i8 = 15;
+const BS_LEAN: i8 = 16;
+const BS_LEAN_LONG: i8 = 17;
+const BS_NOD: i8 = 18;
+const BS_NOD_ONCE: i8 = 19;
+const BS_STRIKE: i8 = 20;
+const BS_RAISE: i8 = 21;
+/// A turn toward an angle is the plain gap, the way ahead or the way behind (camera.rs).
+#[derive(Clone, Copy)]
+enum Gap {
+    Plain,
+    Ahead,
+    Behind,
+}
+/// A share of a gap: all of it, the quotient by 2^n (the SH-2 code adds 2^n - 1 to a negative
+/// gap and shifts it) or by 64 through GCC's shift helper.
+#[derive(Clone, Copy)]
+enum Share {
+    All,
+    Shift(u32),
+    Helper6,
+}
+
+fn gap_to(cpu: &mut Cpu, from: u32, gap: Gap, to: u32) -> i32 {
+    (match gap {
+        Gap::Plain => nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, from, to)),
+        Gap::Ahead => nested!(cpu, 0x0604_61cc, camera::angle_ahead(cpu, from, to)),
+        Gap::Behind => nested!(cpu, 0x0604_61f0, camera::angle_behind(cpu, from, to)),
+    }) as i32
+}
+
+fn shift_6(cpu: &mut Cpu, v: u32) {
+    nested!(cpu, 0x0600_8168, clib::ashiftrt_r4::<6>(cpu, v));
+}
+
+fn shift_7(cpu: &mut Cpu, v: u32) {
+    nested!(cpu, 0x0600_8166, clib::ashiftrt_r4::<7>(cpu, v));
+}
+
+fn share_of(cpu: &mut Cpu, d: i32, share: Share) -> i32 {
+    let bias = |n: u32| if d < 0 { (1 << n) - 1 } else { 0 };
+    match share {
+        Share::All => d,
+        Share::Shift(n) => d.wrapping_add(bias(n)) >> n,
+        Share::Helper6 => {
+            let v = d.wrapping_add(bias(6));
+            shift_6(cpu, v as u32);
+            v >> 6
+        }
+    }
+}
+
+/// A tilt (the angle at `at` + 0x2c) moved toward `to`: a share of the gap, held to `limit` when
+/// there is one.
+fn tilt(cpu: &mut Cpu, at: u32, gap: Gap, to: u32, share: Share, limit: Option<u32>) {
+    let angle = cpu.read16(at + B_TILT) as i16 as i32 as u32;
+    let d = gap_to(cpu, angle, gap, to);
+    let part = share_of(cpu, d, share) as u32;
+    let step = match limit {
+        Some(limit) => nested!(cpu, 0x0606_4f3c, math::clamp(cpu, part, limit)),
+        None => part,
+    };
+    let angle = cpu.read16(at + B_TILT).wrapping_add(step as u16);
+    cpu.write16(at + B_TILT, angle);
+}
+
+/// The three tilts (body, second part, third part) toward `targets`, each a share of the gap.
+fn tilts(cpu: &mut Cpu, o: u32, targets: [(Gap, u32); 3], share: Share, limit: Option<u32>) {
+    let at = [o, cpu.read32(o + B_PART_2), cpu.read32(o + B_PART_3)];
+    for (at, (gap, to)) in at.into_iter().zip(targets) {
+        tilt(cpu, at, gap, to, share, limit);
+    }
+}
+
+fn speed(cpu: &mut Cpu, o: u32) -> u32 {
+    cpu.read16(o + B_SPEED) as i16 as i32 as u32
+}
+
+/// The speed taken toward `to` by `step`.
+fn speed_up(cpu: &mut Cpu, o: u32, to: u32, step: u32) {
+    let v = speed(cpu, o);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, to, step));
+    cpu.write16(o + B_SPEED, v as u16);
+}
+
+/// The step's count taken up by one; true once it is past `last`.
+fn count_past(cpu: &mut Cpu, o: u32, last: i32) -> bool {
+    let n = (cpu.read32(o + B_COUNT) as i32).wrapping_add(1);
+    cpu.write32(o + B_COUNT, n as u32);
+    n > last
+}
+
+/// The speed and count cleared and the rate set, as a nod's step begins; then step `next`.
+fn begin_nod(cpu: &mut Cpu, o: u32, next: u8) {
+    cpu.write16(o + B_SPEED, 0);
+    cpu.write16(o + B_RATE, NOD_RATE);
+    cpu.write32(o + B_COUNT, 0);
+    cpu.write8(o + O_STEP, next);
+}
+
+/// The boss's body (behaviour 0x0608271c), the state machine on its state (+0x6d) and step
+/// (+0x6c). 0 picks the part table and turn from its kind (nothing if the parts cannot be made),
+/// sets its draw, turns its place by that and goes to 15; 15 sways the body and the second and
+/// third parts about the sway angle (the count's low word, going up by 0x100); 16 to 21 are the
+/// moves, see the states.
+pub fn boss_step(cpu: &mut Cpu, o: u32) {
+    nested!(cpu, 0x0605_2970, models::follow_parent(cpu, o));
+    match cpu.read8(o + O_STATE) as i8 {
+        0 => boss_start(cpu, o),
+        BS_SWAY => boss_sway(cpu, o),
+        state @ (BS_LEAN | BS_LEAN_LONG) => boss_lean(cpu, o, state),
+        BS_NOD => boss_nod(cpu, o),
+        BS_NOD_ONCE => boss_nod_once(cpu, o),
+        BS_STRIKE => boss_strike(cpu, o),
+        BS_RAISE => boss_raise(cpu, o),
+        _ => {}
+    }
+}
+
+fn boss_start(cpu: &mut Cpu, o: u32) {
+    cpu.write16(o + O_ANGLE, 0);
+    let which = (cpu.read8(o + B_KIND) as i8 as i32).wrapping_sub(B_FIRST_KIND) as u32;
+    if let Some(&(table, turn)) = B_TABLES.get(which as usize)
+        && nested!(cpu, 0x0605_332c, models::model_parts_set(cpu, o, table)) != 0
+    {
+        cpu.write16(o + O_ANGLE, turn as u16);
+    }
+    if cpu.read16(o + O_ANGLE) == 0 {
+        return;
+    }
+    cpu.write32(o + B_DRAW, B_DRAW_CODE);
+    let t = cpu.stack();
+    let x = cpu.read32(o + B_PLACE_X);
+    let y = cpu.read32(o + B_PLACE_Y);
+    cpu.write32(t, x);
+    cpu.write32(t + 4, y);
+    cpu.write32(t + 16, 0x1_0000);
+    cpu.write32(t + 12, 0x1_0000);
+    cpu.write32(t + 20, 0);
+    let turn = cpu.read16(o + O_ANGLE);
+    cpu.write16(t + 24, turn);
+    nested!(cpu, 0x0606_4eac, math::turn_point(cpu, t));
+    let x = cpu.read32(t);
+    cpu.write32(o + B_PLACE_X, x);
+    let y = cpu.read32(t + 4);
+    cpu.write32(o + B_PLACE_Y, y);
+    cpu.write16(o + O_STEP, BS_SWAY as u16);
+}
+
+const SWAY_SPEED: u32 = 0x1000;
+const SWAY_STEP: u32 = 2;
+const SWAY_MIDDLE: u32 = 0x800;
+
+/// State 15: the speed up to 0x1000 by 2; the body toward 0x800 less the sway's cosine times 0x800,
+/// the second part toward the cosine times 0x800 less 0x800, the third toward 0; the count up by
+/// 0x100.
+fn boss_sway(cpu: &mut Cpu, o: u32) {
+    if cpu.read8(o + O_STEP) == 0 {
+        cpu.write16(o + B_SPEED, 0);
+        cpu.write32(o + B_COUNT, 0);
+        cpu.write8(o + O_STEP, 1);
+    }
+    speed_up(cpu, o, SWAY_SPEED, SWAY_STEP);
+    let limit = speed(cpu, o);
+    let sway = cpu.read16(o + B_SWAY) as i16 as i32 as u32;
+    let c = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, sway));
+    let m = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, SWAY_MIDDLE, c));
+    tilt(cpu, o, Gap::Plain, SWAY_MIDDLE.wrapping_sub(m), Share::All, Some(limit));
+    let part = cpu.read32(o + B_PART_2);
+    let limit = speed(cpu, o);
+    let sway = cpu.read16(o + B_SWAY) as i16 as i32 as u32;
+    let c = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, sway));
+    let m = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, SWAY_MIDDLE, c));
+    tilt(cpu, part, Gap::Plain, m.wrapping_sub(SWAY_MIDDLE), Share::All, Some(limit));
+    let part = cpu.read32(o + B_PART_3);
+    let limit = speed(cpu, o);
+    tilt(cpu, part, Gap::Plain, 0, Share::All, Some(limit));
+    let n = cpu.read32(o + B_COUNT).wrapping_add(0x100);
+    cpu.write32(o + B_COUNT, n);
+}
+
+const LEAN_SPEED: u32 = 0x1000;
+const LEAN_BODY: u32 = 0xffff_c800;
+const LEAN_PART: u32 = 0xffff_c000;
+const LEAN_HOLD: [u32; 2] = [0x3c, 0x78];
+const LEAN_START: [u32; 2] = [0x20, 0x40];
+const LEAN_RISE: [(Gap, u32); 3] = [(Gap::Ahead, 0x1000), (Gap::Plain, 0xffff_e000), (Gap::Plain, 0)];
+const LEAN_HOLDING: u8 = 2;
+const STEP_RISE: u8 = 10;
+
+/// States 16 and 17 (a short and a long lean): step 0 sets the speed 0 and the count 0x20 or 0x40;
+/// step 1 takes the speed up to 0x1000 by the count and tilts the body and second part back
+/// (the way behind) to 0xc800 and 0xc000 and the third to 0, and once the body is at 0xc800 cuts
+/// the speed to a quarter and sets the count 0x3c or 0x78, going to step 2; step 2 counts down and
+/// goes to step 10, which tilts them up again (a 64th of the gaps, to 0x1000, 0xe000 and 0).
+fn boss_lean(cpu: &mut Cpu, o: u32, state: i8) {
+    let long = (state == BS_LEAN_LONG) as usize;
+    match cpu.read8(o + O_STEP) as i8 {
+        0 => {
+            cpu.write16(o + B_SPEED, 0);
+            cpu.write32(o + B_COUNT, LEAN_START[long]);
+            cpu.write8(o + O_STEP, 1);
+        }
+        1 => {
+            let step = cpu.read32(o + B_COUNT);
+            speed_up(cpu, o, LEAN_SPEED, step);
+            let limit = speed(cpu, o);
+            tilts(cpu, o, [(Gap::Behind, LEAN_BODY), (Gap::Behind, LEAN_PART), (Gap::Plain, 0)], Share::All, Some(limit));
+            if cpu.read16(o + B_TILT) as i16 as i32 != LEAN_BODY as i32 {
+                return;
+            }
+            // a logical shift, as the SH-2 code has it
+            let v = cpu.read16(o + B_SPEED) as i16 as i32;
+            let v = (v.wrapping_add(if v < 0 { 3 } else { 0 }) as u32) >> 2;
+            cpu.write16(o + B_SPEED, v as u16);
+            cpu.write32(o + B_COUNT, LEAN_HOLD[long]);
+            cpu.write8(o + O_STEP, LEAN_HOLDING);
+        }
+        2 => {
+            let n = (cpu.read32(o + B_COUNT) as i32).wrapping_sub(1);
+            cpu.write32(o + B_COUNT, n as u32);
+            if n <= 0 {
+                cpu.write8(o + O_STEP, STEP_RISE);
+            }
+        }
+        10 => {
+            let limit = speed(cpu, o);
+            tilts(cpu, o, LEAN_RISE, Share::Helper6, Some(limit));
+        }
+        _ => {}
+    }
+}
+
+const NOD_SPEED: u32 = 0x100;
+const NOD_RATE: u16 = 0x10;
+const NOD_FRAMES: i32 = 119;
+const NOD_DOWN: [(Gap, u32); 3] = [(Gap::Plain, 0x4000), (Gap::Plain, 0xffff_d000), (Gap::Plain, 0)];
+const NOD_UP: [(Gap, u32); 3] = [(Gap::Plain, 0x800), (Gap::Plain, 0xffff_f800), (Gap::Plain, 0)];
+const NOD_ONCE: [(Gap, u32); 3] = [(Gap::Plain, 0x4000), (Gap::Plain, 0xffff_c000), (Gap::Plain, 0)];
+const NOD_TO_UP: u8 = 10;
+const NOD_UP_STEP: u8 = 11;
+
+/// The speed up to 0x100 by the rate (+0x78), then the three tilts a 32nd of their gaps toward
+/// `targets`, held to the speed.
+fn nod_tilts(cpu: &mut Cpu, o: u32, targets: [(Gap, u32); 3]) {
+    let rate = cpu.read16(o + B_RATE) as i16 as i32 as u32;
+    speed_up(cpu, o, NOD_SPEED, rate);
+    let limit = speed(cpu, o);
+    tilts(cpu, o, targets, Share::Shift(5), Some(limit));
+}
+
+/// State 18: step 0 starts the speed and count at 0 and the rate at 0x10; step 1 tilts them down
+/// (to 0x4000, 0xd000 and 0) for 120 frames, then goes to 10, which starts again and goes to 11,
+/// which tilts them up (to 0x800, 0xf800, 0) for 120 frames and goes back to 0.
+fn boss_nod(cpu: &mut Cpu, o: u32) {
+    match cpu.read8(o + O_STEP) as i8 {
+        0 => begin_nod(cpu, o, 1),
+        1 => {
+            nod_tilts(cpu, o, NOD_DOWN);
+            if count_past(cpu, o, NOD_FRAMES) {
+                cpu.write8(o + O_STEP, NOD_TO_UP);
+            }
+        }
+        10 => {
+            begin_nod(cpu, o, NOD_UP_STEP);
+        }
+        11 => {
+            nod_tilts(cpu, o, NOD_UP);
+            if count_past(cpu, o, NOD_FRAMES) {
+                cpu.write8(o + O_STEP, 0);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// State 19: step 0 as 18's; step 1 tilts them down (to 0x4000, 0xc000 and 0) and stays there.
+fn boss_nod_once(cpu: &mut Cpu, o: u32) {
+    match cpu.read8(o + O_STEP) as i8 {
+        0 => begin_nod(cpu, o, 1),
+        1 => nod_tilts(cpu, o, NOD_ONCE),
+        _ => {}
+    }
+}
+
+const STRIKE_SPEED: u32 = 0x100;
+const STRIKE_STEP: u32 = 10;
+const STRIKE_WIND: [(Gap, u32); 3] = [(Gap::Ahead, 0x4000), (Gap::Plain, 0xffff_d000), (Gap::Plain, 0x1000)];
+const STRIKE_SWING: [(Gap, u32); 3] = [(Gap::Ahead, 0x4000), (Gap::Plain, 0x1000), (Gap::Plain, 0x4000)];
+const STRIKE_WIND_FRAMES: i32 = 39;
+const STRIKE_SWING_FRAMES: i32 = 79;
+const STRIKE_RETURN_SPEED: u32 = 0x800;
+const STRIKE_RETURN_STEP: u32 = 8;
+const STRIKE_RETURN_FRAMES: i32 = 89;
+const STRIKE_SETTLE_FRAMES: i32 = 59;
+const STRIKE_WINDING: u8 = 2;
+const STRIKE_RETURN: u8 = 10;
+const STRIKE_SETTLE: u8 = 12;
+
+/// The speed up to 0x100 by 10, then the three tilts a 32nd of their gaps toward `targets`.
+fn strike_tilts(cpu: &mut Cpu, o: u32, targets: [(Gap, u32); 3]) {
+    speed_up(cpu, o, STRIKE_SPEED, STRIKE_STEP);
+    let limit = speed(cpu, o);
+    tilts(cpu, o, targets, Share::Shift(5), Some(limit));
+}
+
+/// State 20: step 0 clears the speed and count; step 1 winds up (40 frames: the body and second
+/// part toward 0x4000 ahead and 0xd000, the third to 0x1000) and goes to 2, which swings (80
+/// frames: toward 0x4000, 0x1000, 0x4000) and goes to 10, which returns them (90 frames: the body
+/// and second part an eighth of the gap to 0x800, the third an eighth of the gap to 0x4000 held
+/// to a 128th of the speed) and goes to 12, which settles them (a 64th of their gaps to 0x800, 0
+/// and 0, 60 frames) and goes to state 15.
+fn boss_strike(cpu: &mut Cpu, o: u32) {
+    match cpu.read8(o + O_STEP) as i8 {
+        0 => {
+            cpu.write16(o + B_SPEED, 0);
+            cpu.write32(o + B_COUNT, 0);
+            cpu.write8(o + O_STEP, 1);
+        }
+        1 => {
+            strike_tilts(cpu, o, STRIKE_WIND);
+            if count_past(cpu, o, STRIKE_WIND_FRAMES) {
+                cpu.write32(o + B_COUNT, 0);
+                cpu.write8(o + O_STEP, STRIKE_WINDING);
+            }
+        }
+        2 => {
+            strike_tilts(cpu, o, STRIKE_SWING);
+            if count_past(cpu, o, STRIKE_SWING_FRAMES) {
+                cpu.write16(o + B_SPEED, 0);
+                cpu.write32(o + B_COUNT, 0);
+                cpu.write8(o + O_STEP, STRIKE_RETURN);
+            }
+        }
+        10 => {
+            speed_up(cpu, o, STRIKE_RETURN_SPEED, STRIKE_RETURN_STEP);
+            let limit = speed(cpu, o);
+            let part = cpu.read32(o + B_PART_2);
+            tilt(cpu, o, Gap::Plain, 0x800, Share::Shift(3), Some(limit));
+            tilt(cpu, part, Gap::Plain, 0x800, Share::Shift(3), Some(limit));
+            let part = cpu.read32(o + B_PART_3);
+            let v = speed(cpu, o) as i32;
+            let v = v.wrapping_add(if v < 0 { 127 } else { 0 });
+            shift_7(cpu, v as u32);
+            let limit = (v >> 7) as i16 as i32 as u32;
+            tilt(cpu, part, Gap::Plain, 0x4000, Share::Shift(3), Some(limit));
+            if count_past(cpu, o, STRIKE_RETURN_FRAMES) {
+                cpu.write32(o + B_COUNT, 0);
+                cpu.write8(o + O_STEP, STRIKE_SETTLE);
+                cpu.write16(o + O_STEP, BS_SWAY as u16);
+            }
+        }
+        12 => {
+            tilts(cpu, o, [(Gap::Plain, 0x800), (Gap::Plain, 0), (Gap::Plain, 0)], Share::Helper6, None);
+            if count_past(cpu, o, STRIKE_SETTLE_FRAMES) {
+                cpu.write16(o + O_STEP, BS_SWAY as u16);
+            }
+        }
+        _ => {}
+    }
+}
+
+const RAISE_SPEED: u32 = 0x80;
+const RAISE_STEP: u32 = 1;
+
+/// State 21: step 0 clears the speed and count; step 1 takes the speed up to 0x80 by 1 and tilts
+/// the body and second part a 64th of their gaps to 0x4000 and 0xc000, the third all of its gap to
+/// 0, held to the speed.
+fn boss_raise(cpu: &mut Cpu, o: u32) {
+    match cpu.read8(o + O_STEP) as i8 {
+        0 => {
+            cpu.write16(o + B_SPEED, 0);
+            cpu.write32(o + B_COUNT, 0);
+            cpu.write8(o + O_STEP, 1);
+        }
+        1 => {
+            speed_up(cpu, o, RAISE_SPEED, RAISE_STEP);
+            let limit = speed(cpu, o);
+            let part = cpu.read32(o + B_PART_2);
+            tilt(cpu, o, Gap::Plain, 0x4000, Share::Helper6, Some(limit));
+            tilt(cpu, part, Gap::Plain, 0xffff_c000, Share::Helper6, Some(limit));
+            let part = cpu.read32(o + B_PART_3);
+            tilt(cpu, part, Gap::Plain, 0, Share::All, Some(limit));
+        }
+        _ => {}
+    }
+}
+
 // ---- small parts ---------------------------------------------------------------------------------
 
 /// A part that waits for the boss: state 0 hides nothing but is flagged (+0x10's top bit) and goes
@@ -3206,3 +3618,1165 @@ pub fn frame_list_step(cpu: &mut Cpu, o: u32) {
     let count = cpu.read8(o + FRAME_COUNT).wrapping_sub(1);
     cpu.write8(o + FRAME_COUNT, count);
 }
+
+// ---- the divers ----------------------------------------------------------------------------------
+
+/// An object given a list of frames (frame_list_step's): the list at +0xc4, the count 0.
+pub fn frame_list_set(cpu: &mut Cpu, o: u32, list: u32) {
+    cpu.write32(o + FRAME_LIST, list);
+    cpu.write8(o + FRAME_COUNT, 0);
+}
+
+const AIM_SPEED: u32 = 0x9a;
+const AIM_TURN: u32 = 0x9e;
+const AIM_MOST: u32 = 0x800;
+const AIM_EASE: u32 = 8;
+const AIM_ACCEL: u32 = 16;
+static AIM_PROLOGUE: std::sync::OnceLock<super::Prologue> = std::sync::OnceLock::new();
+
+/// An object's turn (+0x30) sprung toward `to` (aim::turn_toward, at most 0x800 a go, eased by 8
+/// and accelerated by 16): its speed is +0x9a and its turn (+0x9e) what it adds each frame.
+pub fn aim_turn(cpu: &mut Cpu, o: u32, to: u32) {
+    let from = cpu.read16(o + P_TURN) as u32;
+    let to = to & 0xffff;
+    cpu.nested_with_stack(&AIM_PROLOGUE, 0x0605_70d8, &[AIM_MOST, AIM_EASE, AIM_ACCEL], |cpu| {
+        aim::turn_toward(cpu, o + AIM_TURN, o + AIM_SPEED, from, to, AIM_MOST, AIM_EASE, AIM_ACCEL)
+    });
+}
+
+/// An object aimed at the nearest player (aim::angle_to_target with no delay; kept at +0xa0, a
+/// word) and its turn sprung toward it.
+pub fn aim_at_target(cpu: &mut Cpu, o: u32) {
+    let a = nested!(cpu, 0x0605_6ad4, aim::angle_to_target(cpu, o, 0));
+    cpu.write16(o + D_AIM, a as u16);
+    let a = cpu.read16(o + D_AIM) as i16 as i32 as u32;
+    nested!(cpu, 0x0608_6ae8, aim_turn(cpu, o, a));
+}
+
+/// A diver's speed (+0x80, +0x84: longs) eased to rest by 0x1000.
+pub fn diver_slow(cpu: &mut Cpu, o: u32) {
+    for at in [D_VX, D_VY] {
+        let v = cpu.read32(o + at);
+        let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, 0, 0x1000));
+        cpu.write32(o + at, v);
+    }
+}
+
+/// A diver: an enemy that comes along a route (ground.rs's route_step, the script at +0x6c; its
+/// flags +0x7e, a word; its side +0x88 and +0x89 the route's flag), waits out a count (+0xb4),
+/// then dives at the nearest player. Its fields: the phase (+0x7c), its speed (+0x80, +0x84), the
+/// aim (+0xa0), the swirl (+0xbc, +0xc0), its frame count (+0xb8) and the trail (+0xcc, seven
+/// words).
+const D_ROUTE: u32 = 0x6c;
+const D_PHASE: u32 = 0x7c;
+const D_FLAGS: u32 = 0x7e;
+const D_VX: u32 = 0x80;
+const D_VY: u32 = 0x84;
+const D_SIDE: u32 = 0x88;
+const D_ROUTE_END: u32 = 0x89;
+const D_ROUTE_TURN: u32 = 0x8c;
+const D_AIM: u32 = 0xa0;
+const D_LIFT: u32 = 0xb0;
+const D_WAIT: u32 = 0xb4;
+const D_FRAMES: u32 = 0xb8;
+const D_SWIRL: u32 = 0xbc;
+const D_SWIRL_SPEED: u32 = 0xc0;
+const D_TRAIL: u32 = 0xcc;
+const D_TRAIL_N: i32 = 7;
+const D_TRAIL_FLIP: u32 = 0x102;
+const D_AREA: [u32; 4] = [0xff40_0000, 0x00c0_0000, 0xff00_0000, 0x0100_0000];
+const D_SCORE: u32 = 100;
+const D_FRAME_LIST: u32 = 0x060a_c348;
+const D_ROUTE_FLIPPED: u8 = 7;
+const D_DONE: u16 = 0x10;
+const D_HIT: u16 = 0x200;
+const D_SOUND_START: u32 = 60;
+const D_SOUND_SWIRL: u32 = 62;
+const D_SWIRL_AT: u32 = 0xc000;
+const D_FAR: i32 = 0x4_0000;
+const D_OFF: u32 = 0x8_0000;
+const D_FRAME_SOUND: i32 = 10;
+const D_FRAME_AIM: i32 = 40;
+const D_RAM_GROUND_DY: u32 = super::globals::GROUND_DY_AT;
+const D_DRIVE: u32 = 0x1_8000;
+const D_KIND: u8 = 22;
+const D_SIZE: u32 = 0x114;
+const D_STEP: u32 = 0x0608_6ba8;
+const D_DRAW: u32 = 0x0608_6f38;
+const D_POWER: u32 = 0x157c;
+const D_BOXES: u32 = 0xca;
+const D_BOXES_FROM: u32 = 0x060a_c2f0;
+const D_ROUTES: u32 = 0x060a_c2d8;
+const S_TURN: u32 = 0x20;
+
+/// The diver's step (behaviour 0x06086ba8). Done when off the area (a box around the screen), or
+/// scored and blown up when its power (+0x50) is gone. On its route (script at +0x6c) it takes
+/// the route's steps (its flag 0x10 when the route says 7; the route dropped then if +0x89 is 1),
+/// its turn the side (+0x88) times +0x8c, its lift (+0x1c) +0xb0; with no route its wait
+/// counts down. Phase 0 waits for the wait to run out or the route to end, then gives it its
+/// frames and a sound (60) and goes to phase 1 (diver_dive). Then the frame count up, the turn on
+/// by +0x9e, the frames, the trail, the position moved by the speed and the lift's far flag.
+pub fn diver_step(cpu: &mut Cpu, o: u32) {
+    let [top, bottom, left, right] = D_AREA;
+    let out = cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + O_FLAGS, top, bottom, left, right)) as u8;
+    if out != 0 {
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    if cpu.read32(o + P_POWER) as i32 <= 0 {
+        nested!(cpu, 0x0605_61ac, hits::score_hit_by(cpu, o, D_SCORE));
+        nested!(cpu, 0x0605_9fc4, ground::blown_up_burster(cpu, o));
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    let route = cpu.read32(o + D_ROUTE);
+    if route != 0 {
+        let r = nested!(cpu, 0x0605_a000, ground::route_step(cpu, o, route)) as u8;
+        if r == D_ROUTE_FLIPPED {
+            let flags = cpu.read16(o + D_FLAGS) | D_DONE;
+            cpu.write16(o + D_FLAGS, flags);
+            if cpu.read8(o + D_ROUTE_END) as i8 == 1 {
+                cpu.write32(o + D_ROUTE, out as u32);
+            }
+        }
+        let side = cpu.read8(o + D_SIDE) as i8 as i32;
+        let turn = cpu.read16(o + D_ROUTE_TURN) as i16 as i32;
+        cpu.write16(o + P_TURN, side.wrapping_mul(turn) as u16);
+        let lift = cpu.read32(o + D_LIFT);
+        cpu.write32(o + O_POSITION + 8, lift);
+    } else {
+        let wait = cpu.read32(o + D_WAIT).wrapping_sub(1);
+        cpu.write32(o + D_WAIT, wait);
+    }
+    match cpu.read8(o + D_PHASE) {
+        0 => {
+            if (cpu.read32(o + D_WAIT) as i32) < 0 || cpu.read16(o + D_FLAGS) & D_DONE != 0 {
+                cpu.write8(o + D_PHASE, 1);
+                cpu.write32(o + D_FRAMES, 0);
+                nested!(cpu, 0x0608_6ad0, frame_list_set(cpu, o, D_FRAME_LIST));
+                nested!(cpu, 0x0600_50d4, sound::se_set(cpu, D_SOUND_START));
+            }
+        }
+        1 => diver_dive(cpu, o),
+        _ => {}
+    }
+    let frames = cpu.read32(o + D_FRAMES).wrapping_add(1);
+    cpu.write32(o + D_FRAMES, frames);
+    let turn = cpu.read16(o + P_TURN).wrapping_add(cpu.read16(o + AIM_TURN));
+    cpu.write16(o + P_TURN, turn);
+    nested!(cpu, 0x0608_6a80, frame_list_step(cpu, o));
+    for i in 0..D_TRAIL_N {
+        let swirl = cpu.read32(o + D_SWIRL);
+        let a = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, swirl, (i * 10) as u32));
+        let b = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, swirl, 0x20));
+        cpu.write16(o + D_TRAIL + 8 * i as u32, a.wrapping_add(b) as u16);
+    }
+    let shown = if cpu.read8(o + O_FRAME) == 3 { 0x10 } else { 0 };
+    cpu.write16(o + D_TRAIL_FLIP + 2, shown);
+    cpu.write16(o + D_TRAIL_FLIP + 10, shown);
+    if cpu.read16(o + D_HIT_FLAGS) & D_HIT != 0 {
+        let flags = cpu.read16(o + D_FLAGS) | 1;
+        cpu.write16(o + D_FLAGS, flags);
+    }
+    let side = cpu.read8(o + D_SIDE) as i8 as i32;
+    let x = cpu.read32(o + O_POSITION).wrapping_add((cpu.read32(o + D_VX) as i32).wrapping_mul(side) as u32);
+    cpu.write32(o + O_POSITION, x);
+    let dy_at = cpu.read32(D_RAM_GROUND_DY);
+    let dy = cpu.read32(dy_at);
+    let vy = cpu.read32(o + D_VY);
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_add(vy.wrapping_sub(dy));
+    cpu.write32(o + O_POSITION + 4, y);
+    let far = (cpu.read32(o + O_POSITION + 8) as i32).wrapping_abs() > D_FAR;
+    let flags = cpu.read32(o + O_FLAGS);
+    cpu.write32(o + O_FLAGS, if far { flags | D_OFF } else { flags & !D_OFF });
+}
+
+/// The diver's phase 1: with no frames left to run, the swirl (+0xbc) moved toward 0xc000 by its
+/// speed (+0xc0, eased toward a 32nd of the way to it by a 512th of the way; sound 62 once); once
+/// the route has ended (+0x89 is 1): at frame 10 it is aimed at the nearest player, to frame 40 it
+/// slows, then it turns toward the aim and its speed eases to 0x18000 times the aim's sine and
+/// -0x18000 times its cosine.
+fn diver_dive(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(o + FRAME_LIST) == 0 {
+        let a = cpu.read16(o + D_AIM) as i16;
+        if a == 0 {
+            cpu.write16(o + D_AIM, 1);
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, D_SOUND_SWIRL));
+        }
+        let off = cpu.read32(o + D_SWIRL).wrapping_sub(D_SWIRL_AT);
+        let q = nested!(cpu, 0x0600_6a78, math::quotient(cpu, off, 0x200)) as i32;
+        let to = nested!(cpu, 0x0600_6a78, math::quotient(cpu, off.wrapping_neg(), 0x20));
+        let speed = cpu.read32(o + D_SWIRL_SPEED);
+        let speed = nested!(cpu, 0x0604_6168, actors::approach(cpu, speed, to, q.wrapping_abs() as u32));
+        cpu.write32(o + D_SWIRL_SPEED, speed);
+        let swirl = cpu.read32(o + D_SWIRL).wrapping_add(speed);
+        cpu.write32(o + D_SWIRL, swirl);
+    }
+    if cpu.read8(o + D_ROUTE_END) as i8 != 1 {
+        return;
+    }
+    if cpu.read32(o + D_FRAMES) as i32 == D_FRAME_SOUND {
+        nested!(cpu, 0x0608_6b24, aim_at_target(cpu, o));
+    }
+    if cpu.read32(o + D_FRAMES) as i32 <= D_FRAME_AIM {
+        nested!(cpu, 0x0608_6b58, diver_slow(cpu, o));
+        return;
+    }
+    let a = cpu.read16(o + D_AIM) as i16 as i32 as u32;
+    nested!(cpu, 0x0608_6ae8, aim_turn(cpu, o, a));
+    let a = cpu.read16(o + D_AIM) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    drive(cpu, o, D_VX, sin, D_DRIVE);
+    let a = cpu.read16(o + D_AIM) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    drive(cpu, o, D_VY, cos, D_DRIVE.wrapping_neg());
+}
+
+/// A speed (at `at`) eased toward `trig` times `scale` by a 32nd of that.
+fn drive(cpu: &mut Cpu, o: u32, at: u32, trig: u32, scale: u32) {
+    let m = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, trig, scale));
+    let m_abs = (m as i32).wrapping_abs();
+    let step = m_abs.wrapping_add(if m_abs < 0 { 31 } else { 0 }) >> 5;
+    let v = cpu.read32(o + at);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, v, m, step as u32));
+    cpu.write32(o + at, v);
+}
+
+/// The diver's draw (its sprite `s`; the hit mark of the piece's draw): unless hidden (the top bit
+/// of its flags), a sprite of kind 22 with its frame and turn, its colour by its type (+0x55) and
+/// the frame count's parity, drawn; with a swirl (+0xbc) scaled by it and the loop count's low
+/// bits; then two more, 0x4000 either side of its turn 0x18-ish out, and its thrust (0xa000 behind
+/// by 13) with the flag 0x10 flipped.
+pub fn diver_draw(cpu: &mut Cpu, s: u32) {
+    let o = s.wrapping_sub(0x10);
+    let at = s + 0x6e;
+    let mut flags = cpu.read16(at) as i16 as i32 as u32;
+    if flags & 2 != 0 {
+        flags &= 0xffff_fffc;
+        cpu.write16(at, flags as u16);
+    }
+    let flags = cpu.read16(at) as i16 as i32 as u32;
+    if flags & 1 != 0 {
+        cpu.write16(at, (flags | 2) as u16);
+    }
+    if cpu.read32(s) & F_FLAGGED != 0 {
+        return;
+    }
+    let d = cpu.stack();
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, d));
+    cpu.write8(d + S_KIND, D_KIND);
+    let frame = cpu.read8(s + S_FRAME);
+    cpu.write8(d + S_FRAME, frame);
+    cpu.write8(d + S_LIFT, 0xf8);
+    for k in 0..3 {
+        let v = cpu.read32(s + S_POSITION + 4 * k);
+        cpu.write32(d + S_POSITION + 4 * k, v);
+    }
+    let turn = cpu.read16(s + S_TURN);
+    cpu.write16(d + S_TURN, turn);
+    let base = cpu.read16(CHAR_BASE);
+    let colour = if cpu.read16(at) & 1 == 0 { cpu.read16(s + S_COLOUR) } else { base.wrapping_add(0xe0) };
+    cpu.write16(d + S_COLOUR, colour);
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+    let swirl = cpu.read32(o + D_SWIRL) as i32;
+    if swirl != 0 {
+        let loops = cpu.read32(LOOPS);
+        let k = (loops & 3) as i32;
+        let sx = swirl.wrapping_add((swirl.wrapping_add(if swirl < 0 { 7 } else { 0 }) >> 3).wrapping_mul(k));
+        cpu.write32(d + S_SCALES, sx as u32);
+        let q = swirl.wrapping_add(if swirl < 0 { 15 } else { 0 }) >> 4;
+        let sy = q.wrapping_mul(k).wrapping_add(0x2_0000).wrapping_sub(swirl);
+        cpu.write32(d + S_SCALES + 4, sy as u32);
+        let odd = loops & 1 != 0;
+        let add = match cpu.read8(o + P_55) {
+            0 if odd => 0,
+            0 => 0x10,
+            2 => 0x40,
+            _ if odd => 0x20,
+            _ => 0x30,
+        };
+        cpu.write16(d + S_COLOUR, base.wrapping_add(add));
+        cpu.write8(d + S_FRAME, 4);
+        cpu.write8(d + S_LIFT, 0xf7);
+        for (flags, quarter) in [(None, 0x4000u32), (Some(0x10), 0xc000)] {
+            if let Some(f) = flags {
+                cpu.write32(d + S_FLAGS, f);
+            }
+            let a = (cpu.read16(o + P_TURN).wrapping_add(quarter as u16)) as i16 as i32 as u32;
+            let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+            let m = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, sin, 0x18_0000));
+            let x = cpu.read32(o + O_POSITION).wrapping_add(m);
+            cpu.write32(d + S_POSITION, x);
+            let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+            let m = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, cos, 0xffe8_0000));
+            let y = cpu.read32(o + O_POSITION + 4).wrapping_add(m);
+            cpu.write32(d + S_POSITION + 4, y);
+            nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+        }
+    }
+    let flags = cpu.read32(s) ^ 0x10;
+    cpu.write32(s, flags);
+    nested!(cpu, 0x0605_9d24, ground::thrust(cpu, o, d, 13, 0xa000));
+}
+
+/// A diver made from the event row `e` (its place +4, +6; its route +8; +10, +11 and +0x1b its
+/// flag, side and type; +0x14 and +0x16 its turns; +0x1c its wait): object of 0x114 bytes in list
+/// 2 on the free number, flags 0xc00000, kind 22 whose colour it takes plus 16 a type, power
+/// 0x157c, its boxes copied from the row table's. Gives 1 either way.
+pub fn diver_row(cpu: &mut Cpu, e: u32) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, 2)) as i8;
+    if n == -1 {
+        return 1;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, D_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PART_EXEC));
+    if o == 0 {
+        return 1;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + O_BEHAVIOUR, D_STEP);
+    cpu.write32(o + O_FLAGS, PIECE_FLAGS);
+    cpu.write32(o + O_DRAW, D_DRAW);
+    cpu.write8(o + O_KIND, D_KIND);
+    cpu.write8(o + O_FRAME, 0);
+    let t = cpu.read8(e + E_TYPE);
+    let base = cpu.read16(kind(D_KIND as u32) + K_COLOUR);
+    cpu.write16(o + O_COLOUR_A, base.wrapping_add((t as u16) << 4));
+    cpu.write8(o + O_NUMBER, n as u8);
+    let at = cpu.read8(o + O_NUMBER) as i8 as i32 as u32;
+    cpu.write32(NUMBERED.wrapping_add(at << 2), o);
+    cpu.write32(o + P_POWER, D_POWER);
+    cpu.write8(o + P_54, 1);
+    cpu.write8(o + P_55, t);
+    let boxes = o + D_BOXES;
+    nested!(cpu, 0x0605_6440, hits::boxes_copy(cpu, boxes, D_BOXES_FROM));
+    cpu.write32(o + O_SCRIPT, boxes);
+    let x = (cpu.read16(e + E_PLACE) as i16 as i32 as u32) << 16;
+    cpu.write32(o + O_POSITION, x);
+    let y = (cpu.read16(e + E_PLACE + 2) as i16 as i32 as u32) << 16;
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    cpu.write32(o + FRAME_LIST, 0);
+    cpu.write8(o + FRAME_COUNT, 0);
+    cpu.write32(o + D_SWIRL, 0);
+    cpu.write32(o + D_SWIRL_SPEED, 0);
+    let side = cpu.read8(e + E_MIRROR);
+    cpu.write8(o + D_SIDE, side);
+    let end = cpu.read8(e + E_SETTINGS);
+    cpu.write8(o + D_ROUTE_END, end);
+    let route = cpu.read8(e + E_SCRIPT) as u32;
+    let script = cpu.read32(D_ROUTES + 4 * route);
+    cpu.write32(o + D_ROUTE, script);
+    let wait = cpu.read16(e + E_1C) as i16 as i32 as u32;
+    cpu.write32(o + D_WAIT, wait);
+    let turn = cpu.read16(e + E_DIRECTION);
+    cpu.write16(o + P_TURN, turn);
+    let turn = cpu.read16(e + E_TURN);
+    cpu.write16(o + AIM_TURN, turn);
+    1
+}
+
+// ---- the divers' fan shots and the carriers ------------------------------------------------------
+
+const FAN_STEP: u32 = 0x0608_7314;
+const FAN_SCRIPT: u32 = 0x060a_c3a8;
+const FAN_SOUND: u32 = 30;
+const FAN_SPEED: u32 = 0x1_8000;
+const FAN_ANGLES: [u16; 3] = [0, 0x5555, 0xaaaa];
+const FAN_NUMBER: u32 = 0x1e;
+const FAN_SIDE: u32 = 0x2c;
+const FAN_AIM: u32 = 0x78;
+const FAN_SHOOTER: u32 = 0x70;
+const FAN_SIZE: u32 = 0xbc;
+const SHOT_SPRITE_FLAGS: u32 = 0x2000_0400;
+const SHOT_COLOUR_ADD: u16 = 0x40;
+const SHOT_OFF: u32 = 0x8_0000;
+
+/// A fan shot (behaviour 0x06087314): unless it ends (bullets::bullet_ends), moved by its speed
+/// (+0x80, +0x84) with its frame (+0x2f) 0x75 to 0x78 by the frame count's bits 2 and 3, and shown
+/// every other frame by its count (+0x88, a byte going up each frame).
+pub fn fan_shot_step(cpu: &mut Cpu, o: u32) {
+    if nested!(cpu, 0x0605_3b10, bullets::bullet_ends(cpu, o, 0)) as u8 != 0 {
+        return;
+    }
+    let x = cpu.read32(o + O_POSITION).wrapping_add(cpu.read32(o + D_VX));
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_add(cpu.read32(o + D_VY));
+    cpu.write32(o + O_POSITION + 4, y);
+    let frames = cpu.read32(GAME_FRAMES);
+    cpu.write8(o + O_FRAME, (((frames >> 2) & 3) + 0x75) as u8);
+    let count = cpu.read8(o + D_SIDE).wrapping_add(1);
+    cpu.write8(o + D_SIDE, count);
+    let flags = cpu.read32(o + O_FLAGS);
+    cpu.write32(o + O_FLAGS, if count & 1 == 0 { flags & !SHOT_OFF } else { flags | SHOT_OFF });
+}
+
+/// A fan shot made at the place at `from` (x, y longs; the shooter's number at +0x1e; a word at
+/// +0x2c whose sign picks its count's start) heading `angle`: an object of list 2 (0xbc bytes), its
+/// speed 0x18000 along the angle (sine for x, minus cosine for y), its script 0x060ac3a8.
+pub fn fan_shot_make(cpu: &mut Cpu, from: u32, angle: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, FAN_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, SHOT_EXEC));
+    if o == 0 {
+        return;
+    }
+    let angle = angle as u16 as i16 as i32 as u32;
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    let number = cpu.read8(from + FAN_NUMBER);
+    cpu.write8(o + O_NUMBER, number);
+    cpu.write32(o + O_BEHAVIOUR, FAN_STEP);
+    cpu.write32(o + O_FLAGS, SHOT_SPRITE_FLAGS);
+    let x = cpu.read32(from);
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(from + 4);
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    cpu.write8(o + O_33, 8);
+    cpu.write8(o + O_FRAME, 0x73);
+    cpu.write8(o + O_KIND, 0);
+    let colour = cpu.read16(CHAR_BASE).wrapping_add(SHOT_COLOUR_ADD);
+    cpu.write16(o + O_COLOUR_B, colour);
+    cpu.write16(o + O_COLOUR_A, colour);
+    cpu.write32(o + O_SCRIPT, FAN_SCRIPT);
+    cpu.write8(o + P_54, 1);
+    cpu.write8(o + P_55, 5);
+    let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, angle));
+    let vx = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, s, FAN_SPEED));
+    cpu.write32(o + D_VX, vx);
+    let c = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, angle));
+    let vy = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, c, FAN_SPEED.wrapping_neg()));
+    cpu.write32(o + D_VY, vy);
+    let side = if cpu.read16(from + FAN_SIDE) as i16 > 0 { 0 } else { 1 };
+    cpu.write8(o + D_SIDE, side);
+}
+
+/// A wing gun's burst: three fan shots from its place, a third of a turn apart from its aim (+0x78),
+/// with sound 30. (The shooter's number (+0x32) and its side (+0x70, a byte as a word) are handed
+/// over in the frame.)
+pub fn fan_burst(cpu: &mut Cpu, o: u32) {
+    let from = cpu.stack();
+    let number = cpu.read8(o + O_NUMBER);
+    cpu.write8(from + FAN_NUMBER, number);
+    let x = cpu.read32(o + O_POSITION);
+    cpu.write32(from, x);
+    let y = cpu.read32(o + O_POSITION + 4);
+    cpu.write32(from + 4, y);
+    let side = cpu.read8(o + FAN_SHOOTER) as i8 as i16 as u16;
+    cpu.write16(from + FAN_SIDE, side);
+    for add in FAN_ANGLES {
+        let aim = cpu.read16(o + FAN_AIM).wrapping_add(add) as u32;
+        nested!(cpu, 0x0608_7394, fan_shot_make(cpu, from, aim));
+    }
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, FAN_SOUND));
+}
+
+const WG_SIDE: u32 = 0x70;
+const WG_PARENT: u32 = 0x6c;
+const WG_SPREAD: u32 = 0x74;
+const WG_AIM: u32 = 0x78;
+const WG_COUNT: u32 = 0x7c;
+const WG_BURSTS: u32 = 0x80;
+const WG_OFFSET_X: i32 = 0x34_0000;
+const WG_OFFSET_Y: i32 = 0xffcc_0000_u32 as i32;
+const WG_COPIED: u32 = 0x8_0030;
+const WG_KEPT: u32 = 0xfff7_ffcf;
+const WG_RISE: u32 = 0x1_0000;
+const WG_RISE_STEP: u32 = 0x800;
+const WG_TURN_RATE: i32 = 0x80;
+const WG_PACES: u32 = 0x060a_c3b8;
+const WG_BURST_EVERY: u32 = 15;
+const WG_BURST_LAST: i32 = 8;
+const WG_GONE: i8 = 111;
+
+/// A wing gun on a carrier or diver (behaviour 0x0608754c; its parent +0x6c, its side +0x70: 1 or
+/// -1): once the parent has ended (past mode 111) it ends, with a burning if the parent's power is
+/// gone. Otherwise its flags take the parent's (0x30 and 0x80000), its turn the parent's, its place
+/// the parent's turned a quarter and set out by its side (0x340000 across, 0xffcc0000 down). While
+/// the parent has not flagged 0x10 its spread (+0x74) eases to 0; once it does it eases up to
+/// 0x10000, and at 0x10000 its aim (+0x78) turns by its side times the parent's times 0x80, and a
+/// count (+0x7c) steps; at the count's pace by the difficulty, a count (+0x80) steps and, up to 8
+/// of every 15, it fires a burst.
+pub fn wing_gun_step(cpu: &mut Cpu, o: u32) {
+    let parent = cpu.read32(o + WG_PARENT);
+    if cpu.read8(parent + O_MODE) as i8 > WG_GONE {
+        if cpu.read32(parent + P_POWER) as i32 <= 0 {
+            let at = cpu.stack();
+            for k in [0, 4, 8] {
+                let v = cpu.read32(o + O_POSITION + k);
+                cpu.write32(at + k, v);
+            }
+            nested!(cpu, 0x0605_7cb0, explosions::burning_set(cpu, at));
+        }
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    let flags = cpu.read32(o + O_FLAGS) & WG_KEPT;
+    cpu.write32(o + O_FLAGS, flags);
+    let flags = flags | (cpu.read32(parent + O_FLAGS) & WG_COPIED);
+    cpu.write32(o + O_FLAGS, flags);
+    let turn = cpu.read16(parent + P_TURN);
+    cpu.write16(o + P_TURN, turn);
+    let side = cpu.read8(o + WG_SIDE) as i8 as i32;
+    let a = (turn.wrapping_add(0x4000)) as i16 as i32 as u32;
+    let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let m = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, s, side.wrapping_mul(WG_OFFSET_X) as u32));
+    let x = cpu.read32(parent + O_POSITION).wrapping_add(m);
+    cpu.write32(o + O_POSITION, x);
+    let a = (cpu.read16(o + P_TURN).wrapping_add(0x4000)) as i16 as i32 as u32;
+    let c = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let m = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, c, side.wrapping_mul(WG_OFFSET_Y) as u32));
+    let y = cpu.read32(parent + O_POSITION + 4).wrapping_add(m);
+    cpu.write32(o + O_POSITION + 4, y);
+    let z = cpu.read32(parent + O_POSITION + 8);
+    cpu.write32(o + O_POSITION + 8, z);
+    let spread = cpu.read32(o + WG_SPREAD);
+    if cpu.read16(parent + D_FLAGS) & D_DONE == 0 {
+        let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, spread, 0, WG_RISE_STEP));
+        cpu.write32(o + WG_SPREAD, v);
+        return;
+    }
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, spread, WG_RISE, WG_RISE_STEP));
+    cpu.write32(o + WG_SPREAD, v);
+    if v != WG_RISE {
+        return;
+    }
+    let side = cpu.read8(o + WG_SIDE) as i8 as i32;
+    let by = (cpu.read8(parent + D_SIDE) as i8 as i32).wrapping_mul(WG_TURN_RATE);
+    let aim = (cpu.read16(o + WG_AIM) as i16 as i32).wrapping_sub(side.wrapping_mul(by));
+    cpu.write16(o + WG_AIM, aim as u16);
+    let n = cpu.read32(o + WG_COUNT).wrapping_add(1);
+    cpu.write32(o + WG_COUNT, n);
+    let at = cpu.read8(DIFFICULTY) as i8 as i32 as u32;
+    let pace = cpu.read8(WG_PACES.wrapping_add(at)) as u32;
+    if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, n, pace)) != 0 {
+        return;
+    }
+    let bursts = cpu.read32(o + WG_BURSTS);
+    let r = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, bursts, WG_BURST_EVERY)) as i32;
+    if r <= WG_BURST_LAST {
+        nested!(cpu, 0x0608_74d0, fan_burst(cpu, o));
+    }
+    let bursts = cpu.read32(o + WG_BURSTS).wrapping_add(1);
+    cpu.write32(o + WG_BURSTS, bursts);
+}
+
+const WGD_KIND: u8 = 0;
+const WGD_FRONT: u32 = 0x1c_0000;
+const WGD_BACK: u32 = 0x5_0000;
+const WGD_ACROSS: u32 = 0x2d_0000;
+const WGD_FLAGS: u32 = 0x30;
+const WGD_CORONA: u16 = 0x30;
+const WGD_FLARE: u16 = 0x40;
+const WGD_SCALE: u32 = 0xa000;
+const WGD_FRAME: u8 = 0x70;
+const WGD_FLARE_FRAME: u8 = 0x36;
+const WGD_FLARE_SPREAD: u32 = 0x1800;
+const WGD_LIFT: u8 = 0xf7;
+
+/// A wing gun's draw (its sprite `s`): a sprite of the gun at the parent's place set out by the
+/// parent's turn (a quarter, in quarters: the turn of 0, 0x4000, 0x8000 or 0xc000 puts it 0x1c0000
+/// or -0x50000 along and 0x2d0000 across, the parent's flips (0x10 and 0x20) taking the signs), its
+/// frame 0x70 to 0x72 by the loop count, drawn; and, while its spread (+0x74) is up, a flare at the
+/// gun's place with a random size and turn.
+pub fn wing_gun_draw(cpu: &mut Cpu, s: u32) {
+    let o = s.wrapping_sub(0x10);
+    let parent = cpu.read32(o + WG_PARENT);
+    let d = cpu.stack();
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, d));
+    let pflags = cpu.read32(parent + O_FLAGS);
+    let sx: i32 = if pflags & 0x10 != 0 { -1 } else { 1 };
+    let sy: i32 = if pflags & 0x20 != 0 { -1 } else { 1 };
+    let turn = cpu.read16(s + S_TURN);
+    let front = cpu.read8(o + WG_SIDE) as i8 > 0;
+    let (px, py) = (cpu.read32(parent + O_POSITION), cpu.read32(parent + O_POSITION + 4));
+    let off = if front { sx.wrapping_mul(WGD_BACK.wrapping_neg() as i32) } else { sx.wrapping_mul(WGD_FRONT as i32) } as u32;
+    let across = sy.wrapping_mul(WGD_ACROSS as i32) as u32;
+    match turn {
+        0 => {
+            cpu.write32(d + S_POSITION, px.wrapping_add(off));
+            cpu.write32(d + S_POSITION + 4, py.wrapping_add(across));
+        }
+        0x4000 => {
+            cpu.write32(d + S_POSITION + 4, py.wrapping_add(off));
+            cpu.write32(d + S_POSITION, px.wrapping_sub(across));
+        }
+        0x8000 => {
+            cpu.write32(d + S_POSITION, px.wrapping_sub(off));
+            cpu.write32(d + S_POSITION + 4, py.wrapping_sub(across));
+        }
+        0xc000 => {
+            cpu.write32(d + S_POSITION + 4, py.wrapping_sub(off));
+            cpu.write32(d + S_POSITION, px.wrapping_add(across));
+        }
+        _ => {}
+    }
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    cpu.write32(d + S_FLAGS, (r & 0x100) | (pflags & WGD_FLAGS));
+    cpu.write8(d + S_KIND, WGD_KIND);
+    let loops = cpu.read32(LOOPS);
+    let m = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, loops, 3));
+    cpu.write8(d + S_FRAME, (m as u8).wrapping_add(WGD_FRAME));
+    cpu.write32(d + S_SCALES, WGD_SCALE);
+    let base = cpu.read16(CHAR_BASE);
+    cpu.write16(d + S_COLOUR, base.wrapping_add(WGD_CORONA));
+    let z = cpu.read32(parent + O_POSITION + 8);
+    cpu.write32(d + S_POSITION + 8, z);
+    cpu.write8(d + S_LIFT, WGD_LIFT);
+    let v = if front { WGD_SCALE as i32 } else { 0x6000 };
+    let spin = v.wrapping_mul(sy).wrapping_mul(sx).wrapping_add(cpu.read16(parent + P_TURN) as i16 as i32);
+    cpu.write16(d + S_TURN, spin as u16);
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+    let spread = cpu.read32(o + WG_SPREAD);
+    if spread == 0 {
+        return;
+    }
+    let (x, y) = (cpu.read32(o + O_POSITION), cpu.read32(o + O_POSITION + 4));
+    cpu.write32(d + S_POSITION, x);
+    cpu.write32(d + S_POSITION + 4, y);
+    let z = cpu.read32(parent + O_POSITION + 8).wrapping_sub(1);
+    cpu.write32(d + S_POSITION + 8, z);
+    cpu.write8(d + S_KIND, 3);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    cpu.write8(d + S_FRAME, ((r & 1) as u8).wrapping_add(WGD_FLARE_FRAME));
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, WGD_FLARE_SPREAD));
+    let size = spread.wrapping_add(r);
+    cpu.write32(d + S_SCALES, size);
+    cpu.write32(d + S_SCALES + 4, size);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    cpu.write16(d + S_TURN, r as u16);
+    let base = cpu.read16(CHAR_BASE);
+    cpu.write16(d + S_COLOUR, base.wrapping_add(WGD_FLARE));
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+}
+
+const WGM_SIZE: u32 = 0x84;
+const WGM_STEP: u32 = 0x0608_754c;
+const WGM_DRAW: u32 = 0x0608_7704;
+const WGM_POWER: u32 = 10;
+const WGM_BOXES: u32 = 0x060a_c3b0;
+
+/// A wing gun made on the object `parent`, on `side` (1 or -1): an object of list 2 (0x84 bytes) with
+/// the gun's behaviour and draw, flags 0xc00000, power 10 and its boxes, stepped once at once.
+pub fn wing_gun_make(cpu: &mut Cpu, parent: u32, side: u32) {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, 2)) as i8;
+    if n == -1 {
+        return;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, WGM_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PART_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    cpu.write32(o + O_BEHAVIOUR, WGM_STEP);
+    cpu.write32(o + O_FLAGS, PIECE_FLAGS);
+    cpu.write32(o + O_DRAW, WGM_DRAW);
+    cpu.write32(o + O_POSITION + 8, 0);
+    cpu.write8(o + O_NUMBER, n as u8);
+    let at = cpu.read8(o + O_NUMBER) as i8 as i32 as u32;
+    cpu.write32(NUMBERED.wrapping_add(at << 2), o);
+    cpu.write8(o + P_54, 1);
+    cpu.write32(o + P_POWER, WGM_POWER);
+    cpu.write32(o + O_SCRIPT, WGM_BOXES);
+    cpu.write32(o + WG_PARENT, parent);
+    cpu.write8(o + WG_SIDE, side as u8);
+    cpu.write32(o + WG_SPREAD, 0);
+    cpu.write16(o + WG_AIM, 0);
+    cpu.write32(o + WG_COUNT, 0);
+    cpu.write32(o + WG_BURSTS, 0);
+    nested!(cpu, 0x0608_754c, wing_gun_step(cpu, o));
+}
+
+const CR_BOX_WIDE: [u32; 4] = [0xff48_0000, 0x00b8_0000, 0xfee0_0000, 0x0120_0000];
+const CR_BOX_NARROW: [u32; 4] = [0xff20_0000, 0x00e0_0000, 0xff08_0000, 0x00f8_0000];
+const CR_NARROW: u16 = 0x4000;
+const CR_CHECKED: u16 = 0x1000;
+const CR_BOXES: [u32; 2] = [0x060a_c40e, 0x060a_c3be];
+const CR_FRAMES: u32 = 0x060a_c460;
+const CR_ROUTE_BEGUN: u8 = 7;
+const CR_ROUTE_OVER: u8 = 9;
+const CR_SCORE: u32 = 100;
+
+/// A carrier (behaviour 0x06087a38): ends when off its box (the narrow one when its turn has 0x4000,
+/// checked only once flagged 0x1000) or, its power gone, scored and blown up (ground.rs's
+/// blown_up_wounded). Otherwise its boxes swap each frame, its frame (+0x2f) cycles with the frame
+/// count's bits 2 and 3, it takes its route's steps (flag 0x10 set by the route's 7, cleared by its
+/// 9), moves by its speed (the side +0x88 times x) and its lift (+0xb0) is its height, far when
+/// past 0x40000.
+pub fn carrier_step(cpu: &mut Cpu, o: u32) {
+    let [top, bottom, left, right] = if cpu.read16(o + P_TURN) & CR_NARROW == 0 { CR_BOX_WIDE } else { CR_BOX_NARROW };
+    if cpu.read16(o + D_FLAGS) & CR_CHECKED != 0 {
+        let out = cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + O_FLAGS, top, bottom, left, right)) as u8;
+        if out != 0 {
+            cpu.write8(o + O_MODE, MODE_DONE);
+            return;
+        }
+    }
+    if cpu.read32(o + P_POWER) as i32 <= 0 {
+        nested!(cpu, 0x0605_61ac, hits::score_hit_by(cpu, o, CR_SCORE));
+        nested!(cpu, 0x0605_9ee4, ground::blown_up_wounded(cpu, o));
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    let frames = cpu.read32(GAME_FRAMES);
+    cpu.write32(o + O_SCRIPT, CR_BOXES[(frames & 1) as usize]);
+    let frame = cpu.read8(CR_FRAMES + ((frames >> 2) & 3));
+    cpu.write8(o + O_FRAME, frame);
+    let script = cpu.read32(o + D_ROUTE);
+    match nested!(cpu, 0x0605_a000, ground::route_step(cpu, o, script)) as u8 {
+        CR_ROUTE_BEGUN => {
+            let flags = cpu.read16(o + D_FLAGS) | D_DONE;
+            cpu.write16(o + D_FLAGS, flags);
+        }
+        CR_ROUTE_OVER => {
+            let flags = cpu.read16(o + D_FLAGS) & !D_DONE;
+            cpu.write16(o + D_FLAGS, flags);
+        }
+        _ => {}
+    }
+    let side = cpu.read8(o + D_SIDE) as i8 as i32;
+    let x = cpu.read32(o + O_POSITION).wrapping_add((cpu.read32(o + D_VX) as i32).wrapping_mul(side) as u32);
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_add(cpu.read32(o + D_VY));
+    cpu.write32(o + O_POSITION + 4, y);
+    let lift = cpu.read32(o + D_LIFT);
+    cpu.write32(o + O_POSITION + 8, lift);
+    let far = (lift as i32).wrapping_abs() > D_FAR;
+    let flags = cpu.read32(o + O_FLAGS);
+    cpu.write32(o + O_FLAGS, if far { flags | D_OFF } else { flags & !D_OFF });
+}
+
+const CRR_SIZE: u32 = 0xbc;
+const CRR_STEP: u32 = 0x0608_7a38;
+const CRR_KIND: u8 = 24;
+const CRR_POWER: u32 = 20000;
+const CRR_FLAGS: u32 = 0x2000_0000;
+const CRR_ROUTES: u32 = 0x060a_c3a0;
+const CRR_NARROW_AT: u32 = 0x14;
+const CRR_FLIP_X: u32 = 0x1c;
+const CRR_FLIP_Y: u32 = 0x1e;
+const CRR_WING_SIDES: [u32; 2] = [0xffff_ffff, 1];
+
+/// A carrier made from the event row `e` (its place +4, +6; its route +8; its side +0xb; its turn
+/// +0x14; flips +0x1c and +0x1e; its type +0x1b): an object of list 2 (0xbc bytes), kind 24 with its
+/// colour 16 a type on, power 20000, then its two wing guns made, one each side. Gives 1.
+pub fn carrier_row(cpu: &mut Cpu, e: u32) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, 2)) as i8;
+    if n == -1 {
+        return 1;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, CRR_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PART_EXEC));
+    if o == 0 {
+        return 1;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + O_BEHAVIOUR, CRR_STEP);
+    let flags = cpu.read32(o + O_FLAGS) | CRR_FLAGS;
+    cpu.write32(o + O_FLAGS, flags);
+    let turn = cpu.read16(e + CRR_NARROW_AT);
+    cpu.write16(o + P_TURN, turn);
+    if cpu.read16(e + CRR_FLIP_X) != 0 {
+        let flags = cpu.read32(o + O_FLAGS) | 0x10;
+        cpu.write32(o + O_FLAGS, flags);
+    }
+    if cpu.read16(e + CRR_FLIP_Y) != 0 {
+        let flags = cpu.read32(o + O_FLAGS) | 0x20;
+        cpu.write32(o + O_FLAGS, flags);
+    }
+    cpu.write8(o + O_KIND, CRR_KIND);
+    cpu.write8(o + O_FRAME, 0);
+    let t = cpu.read8(e + E_TYPE);
+    let base = cpu.read16(kind(CRR_KIND as u32) + K_COLOUR);
+    let colour = base.wrapping_add((t as u16) << 4);
+    cpu.write16(o + O_COLOUR_A, colour);
+    cpu.write16(o + O_COLOUR_B, colour);
+    cpu.write8(o + O_33, 0xf7);
+    cpu.write8(o + O_NUMBER, n as u8);
+    let at = cpu.read8(o + O_NUMBER) as i8 as i32 as u32;
+    cpu.write32(NUMBERED.wrapping_add(at << 2), o);
+    cpu.write32(o + O_SCRIPT, CR_BOXES[1]);
+    cpu.write32(o + P_POWER, CRR_POWER);
+    cpu.write8(o + P_54, 1);
+    cpu.write8(o + P_55, t);
+    let x = (cpu.read16(e + E_PLACE) as i16 as i32 as u32) << 16;
+    cpu.write32(o + O_POSITION, x);
+    let y = (cpu.read16(e + E_PLACE + 2) as i16 as i32 as u32) << 16;
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    let side = cpu.read8(e + E_MIRROR);
+    cpu.write8(o + D_SIDE, side);
+    for side in CRR_WING_SIDES {
+        nested!(cpu, 0x0608_7950, wing_gun_make(cpu, o, side));
+    }
+    let route = cpu.read8(e + E_SCRIPT) as u32;
+    let script = cpu.read32(CRR_ROUTES + 4 * route);
+    cpu.write32(o + D_ROUTE, script);
+    1
+}
+
+// ---- the gunners ---------------------------------------------------------------------------------
+
+const SPRAY_STEP: u32 = 0x0608_7d28;
+const SPRAY_KIND: u8 = 25;
+const SPRAY_SCRIPT: u32 = 0x060a_c494;
+const SPRAY_SCALE_AT: u32 = 0x34;
+const SPRAY_RANDOM_AT: u32 = 0x2c;
+const SPRAY_SIDE_AT: u32 = 0x2d;
+const SPRAY_BIG: i32 = 0xbfff;
+const SPRAY_SMALL_FLAG: u32 = 0x100;
+const SPRAY_SMALL_AT: u32 = 0x58;
+const SPRAY_SPEED_SHIFT: u32 = 4;
+const SPRAY_TURN: u32 = 0x1000;
+
+/// A spray shot (behaviour 0x06087d28): unless it ends (bullets::bullet_ends, going back), moved
+/// by its speed, and shown on every frame whose parity is its count's (+0x88).
+pub fn spray_shot_step(cpu: &mut Cpu, o: u32) {
+    if nested!(cpu, 0x0605_3b10, bullets::bullet_ends(cpu, o, 1)) as u8 != 0 {
+        return;
+    }
+    let x = cpu.read32(o + O_POSITION).wrapping_add(cpu.read32(o + D_VX));
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_add(cpu.read32(o + D_VY));
+    cpu.write32(o + O_POSITION + 4, y);
+    let parity = cpu.read32(GAME_FRAMES) & 1;
+    let shown = cpu.read8(o + D_SIDE) as i8 as i32 as u32 & 0xffff;
+    let flags = cpu.read32(o + O_FLAGS);
+    cpu.write32(o + O_FLAGS, if parity == shown { flags | D_OFF } else { flags & !D_OFF });
+}
+
+/// A spray shot made at the place at `from` (x, y longs; the shooter's number at +0x1e; its scale
+/// at +0x34) heading `angle`: an object of list 2 (0xbc bytes), its speed 16 times the sine for x
+/// and minus 16 times the cosine for y, put on by a random 0 to 15 times 0x1000 of it (kept at
+/// +0x2c of `from`, a long, whose byte +0x2d the SH-2 code then reads for the side: always 0 as
+/// that is); with the side 0 it is turned by the angle plus 0x1000, otherwise by 0xf000 less.
+pub fn spray_shot_make(cpu: &mut Cpu, from: u32, angle: u32) {
+    let angle = angle as u16;
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, FAN_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, SHOT_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    let number = cpu.read8(from + FAN_NUMBER);
+    cpu.write8(o + O_NUMBER, number);
+    cpu.write32(o + O_BEHAVIOUR, SPRAY_STEP);
+    cpu.write32(o + O_FLAGS, SHOT_SPRITE_FLAGS);
+    let x = cpu.read32(from);
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(from + 4);
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    cpu.write8(o + O_33, 7);
+    cpu.write8(o + O_FRAME, 4);
+    cpu.write8(o + O_KIND, SPRAY_KIND);
+    let colour = cpu.read16(CHAR_BASE);
+    cpu.write16(o + O_COLOUR_B, colour);
+    cpu.write16(o + O_COLOUR_A, colour);
+    cpu.write32(o + O_SCRIPT, SPRAY_SCRIPT);
+    cpu.write8(o + P_54, 1);
+    cpu.write8(o + P_55, 5);
+    let scale = cpu.read32(from + SPRAY_SCALE_AT);
+    cpu.write32(o + O_SCALE, scale);
+    cpu.write32(o + O_SCALE_2, 0x1_0000);
+    if cpu.read32(o + O_SCALE) as i32 <= SPRAY_BIG {
+        cpu.write16(o + SPRAY_SMALL_AT, 0);
+        let flags = cpu.read32(o + O_FLAGS) | SPRAY_SMALL_FLAG;
+        cpu.write32(o + O_FLAGS, flags);
+    }
+    cpu.write16(o + P_TURN, angle);
+    let a = angle as i16 as i32 as u32;
+    let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    cpu.write32(o + D_VX, s << SPRAY_SPEED_SHIFT);
+    let c = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    cpu.write32(o + D_VY, (c << SPRAY_SPEED_SHIFT).wrapping_neg());
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000)) as i32;
+    let by = (((r.wrapping_add((r < 0) as i32)) >> 1) & 15).wrapping_mul(0x1000) as u32;
+    let local = cpu.stack();
+    cpu.write32(local, SPRAY_TURN);
+    cpu.write32(from + SPRAY_RANDOM_AT, by);
+    let vx = cpu.read32(o + D_VX);
+    let m = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, vx, by));
+    let x = cpu.read32(o + O_POSITION).wrapping_add(m);
+    cpu.write32(o + O_POSITION, x);
+    let at = cpu.read32(from + SPRAY_RANDOM_AT);
+    let vy = cpu.read32(o + D_VY);
+    let m = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, vy, at));
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_add(m);
+    cpu.write32(o + O_POSITION + 4, y);
+    let side = cpu.read8(from + SPRAY_SIDE_AT);
+    cpu.write8(o + D_SIDE, side);
+    if side as i8 == 0 {
+        let flags = cpu.read32(o + O_FLAGS) | 0x10;
+        cpu.write32(o + O_FLAGS, flags);
+        let sum = cpu.read32(local).wrapping_add(cpu.read16(o + P_TURN) as i16 as i32 as u32);
+        cpu.write32(local, sum);
+        cpu.write16(o + P_TURN, sum as u16);
+    } else {
+        let turn = cpu.read16(o + P_TURN).wrapping_add(0xf000);
+        cpu.write16(o + P_TURN, turn);
+    }
+}
+
+const GR_AREA: [u32; 4] = [0xff70_0000, 0x0090_0000, 0xff30_0000, 0x00d0_0000];
+const GR_AIM: u32 = 0xa0;
+const GR_SPIN: u32 = 0x9e;
+const GR_AIM_MAX: u32 = 60;
+const GR_AIM_FAR: i32 = 43;
+const GR_SOUND: u32 = 0x23;
+const GR_OFFSET: u32 = 24;
+const GR_SIDES: [(u16, u16, u16); 2] = [(0x5800, 0x1000, 1), (0xa800, 0xf000, 0)];
+
+/// A gunner (behaviour 0x06087f64): ends when off its box (checked once flagged 0x1000) or, its
+/// power gone, scored and blown up; otherwise its hit mark (flag 1), its far flag (the lift
+/// +0x1c past 0x40000), the flip (0x10), the route's steps (7 flags 0x10 and clears its aim, 9
+/// clears the flag), moved by its speed, its turn the side times +0x8c, its spin (+0x9e) taken up by
+/// the aim, its frame the spin in 128ths, 0 to 3. While not flagged its aim eases to 0, once flagged
+/// to 60; every other frame it sprays a shot from each side (the scale by the aim: 0x10000 at 60,
+/// 0x1000 up to 43, between), and the sound 35 every 8.
+pub fn gunner_step(cpu: &mut Cpu, o: u32) {
+    let [top, bottom, left, right] = GR_AREA;
+    if cpu.read16(o + D_FLAGS) & CR_CHECKED != 0 {
+        let out = cpu.nested_with_stack(&aim::AREA_FLAGS_PROLOGUE, aim::AREA_FLAGS, &[right], |cpu| aim::area_flags(cpu, o + O_FLAGS, top, bottom, left, right)) as u8;
+        if out != 0 {
+            cpu.write8(o + O_MODE, MODE_DONE);
+            return;
+        }
+    }
+    if cpu.read32(o + P_POWER) as i32 <= 0 {
+        nested!(cpu, 0x0605_61ac, hits::score_hit_by(cpu, o, D_SCORE));
+        nested!(cpu, 0x0605_9fc4, ground::blown_up_burster(cpu, o));
+        cpu.write8(o + O_MODE, MODE_DONE);
+        return;
+    }
+    if cpu.read16(o + D_HIT_FLAGS) & D_HIT != 0 {
+        let flags = cpu.read16(o + D_FLAGS) | 1;
+        cpu.write16(o + D_FLAGS, flags);
+    }
+    let far = (cpu.read32(o + O_POSITION + 8) as i32).wrapping_abs() > D_FAR;
+    let flags = cpu.read32(o + O_FLAGS);
+    cpu.write32(o + O_FLAGS, if far { flags | D_OFF } else { flags & !D_OFF });
+    let flags = cpu.read32(o + O_FLAGS) ^ 0x10;
+    cpu.write32(o + O_FLAGS, flags);
+    let script = cpu.read32(o + D_ROUTE);
+    match nested!(cpu, 0x0605_a000, ground::route_step(cpu, o, script)) as u8 {
+        CR_ROUTE_BEGUN => {
+            let flags = cpu.read16(o + D_FLAGS) | D_DONE;
+            cpu.write16(o + D_FLAGS, flags);
+            cpu.write16(o + GR_AIM, 0);
+        }
+        CR_ROUTE_OVER => {
+            let flags = cpu.read16(o + D_FLAGS) & !D_DONE;
+            cpu.write16(o + D_FLAGS, flags);
+        }
+        _ => {}
+    }
+    let side = cpu.read8(o + D_SIDE) as i8 as i32;
+    let x = cpu.read32(o + O_POSITION).wrapping_add((cpu.read32(o + D_VX) as i32).wrapping_mul(side) as u32);
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_add(cpu.read32(o + D_VY));
+    cpu.write32(o + O_POSITION + 4, y);
+    let lift = cpu.read32(o + D_LIFT);
+    cpu.write32(o + O_POSITION + 8, lift);
+    let turn = side.wrapping_mul(cpu.read16(o + D_ROUTE_TURN) as i16 as i32);
+    cpu.write16(o + P_TURN, turn as u16);
+    let spin = cpu.read16(o + GR_SPIN).wrapping_add(cpu.read16(o + GR_AIM));
+    cpu.write16(o + GR_SPIN, spin);
+    let spin = spin as i16 as i32;
+    let biased = spin.wrapping_add(if spin < 0 { 127 } else { 0 });
+    shift_7(cpu, biased as u32);
+    cpu.write8(o + O_FRAME, ((biased >> 7) & 3) as u8);
+    let aim_now = cpu.read16(o + GR_AIM) as i16 as i32 as u32;
+    if cpu.read16(o + D_FLAGS) & D_DONE == 0 {
+        let a = nested!(cpu, 0x0604_6168, actors::approach(cpu, aim_now, 0, 1));
+        cpu.write16(o + GR_AIM, a as u16);
+        return;
+    }
+    let a = nested!(cpu, 0x0604_6168, actors::approach(cpu, aim_now, GR_AIM_MAX, 1));
+    cpu.write16(o + GR_AIM, a as u16);
+    let frames = cpu.read32(GAME_FRAMES);
+    if frames & 1 == 0 {
+        return;
+    }
+    let d = cpu.stack();
+    cpu.write32(d + 8, 0);
+    let aim_now = cpu.read16(o + GR_AIM) as i16 as i32;
+    let scale = if aim_now == GR_AIM_MAX as i32 {
+        0x1_0000
+    } else if aim_now <= GR_AIM_FAR {
+        0x1000
+    } else {
+        0x1_0000i32.wrapping_sub((GR_AIM_MAX as i32 - aim_now) << 12) as u32
+    };
+    cpu.write32(d + SPRAY_SCALE_AT, scale);
+    for (place, extra, side) in GR_SIDES {
+        cpu.write16(d + SPRAY_RANDOM_AT, side);
+        let turn = cpu.read16(o + P_TURN);
+        let a = turn.wrapping_add(place) as i16 as i32 as u32;
+        let s = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+        let x = cpu.read32(o + O_POSITION).wrapping_add((s as i32).wrapping_mul(GR_OFFSET as i32) as u32);
+        cpu.write32(d, x);
+        let c = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+        let y = cpu.read32(o + O_POSITION + 4).wrapping_sub((c as i32).wrapping_mul(GR_OFFSET as i32) as u32);
+        cpu.write32(d + 4, y);
+        let angle = turn.wrapping_add(extra) as u32;
+        nested!(cpu, 0x0608_7d98, spray_shot_make(cpu, d, angle));
+    }
+    if cpu.read32(GAME_FRAMES) & 7 == 0 {
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, GR_SOUND));
+    }
+}
+
+const GRD_KIND: u8 = 25;
+const GRD_FLARE: u16 = 0xe0;
+const GRD_FLARE_KEEP: u16 = 0x2000;
+const GRD_JET_SIZE: [u32; 2] = [0xb000, 0x1_a000];
+const GRD_JETS: [(u16, u16); 2] = [(0xb000, 0xf000), (0x5000, 0x1000)];
+
+/// A gunner's draw (its sprite `s`; the hit mark as the others'): unless hidden, a sprite of kind 25
+/// with its frame and turn, its colour (with the hit mark the base plus 0xe0 and the colour's
+/// 0x2000 bit), drawn; once flagged 0x10, a jet beside it (alternate loops each side, 0x18 out
+/// at the turn 0x5000 or 0xb000, its size by the spin (+0xa0), its frame 0x70 to 0x72 by the frame
+/// count), drawn.
+pub fn gunner_draw(cpu: &mut Cpu, s: u32) {
+    let o = s.wrapping_sub(0x10);
+    let at = s + 0x6e;
+    let mut flags = cpu.read16(at) as i16 as i32 as u32;
+    if flags & 2 != 0 {
+        flags &= 0xffff_fffc;
+        cpu.write16(at, flags as u16);
+    }
+    let flags = cpu.read16(at) as i16 as i32 as u32;
+    if flags & 1 != 0 {
+        cpu.write16(at, (flags | 2) as u16);
+    }
+    let sprite_flags = cpu.read32(o + O_FLAGS) & F_FLAGGED;
+    if sprite_flags != 0 {
+        return;
+    }
+    let d = cpu.stack();
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, d));
+    cpu.write32(d + S_FLAGS, sprite_flags);
+    cpu.write8(d + S_KIND, GRD_KIND);
+    let frame = cpu.read8(s + S_FRAME);
+    cpu.write8(d + S_FRAME, frame);
+    cpu.write8(d + S_LIFT, 8);
+    for k in 0..3 {
+        let v = cpu.read32(o + O_POSITION + 4 * k);
+        cpu.write32(d + S_POSITION + 4 * k, v);
+    }
+    let turn = cpu.read16(s + S_TURN);
+    cpu.write16(d + S_TURN, turn);
+    let base = cpu.read16(CHAR_BASE);
+    let own = cpu.read16(s + S_COLOUR);
+    let colour = if cpu.read16(at) & 1 == 0 { own } else { (own & GRD_FLARE_KEEP | GRD_FLARE).wrapping_add(base) };
+    cpu.write16(d + S_COLOUR, colour);
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+    if cpu.read16(o + D_FLAGS) & D_DONE == 0 {
+        return;
+    }
+    cpu.write32(d + S_FLAGS, 0);
+    cpu.write8(d + S_KIND, 0);
+    let frames = cpu.read32(GAME_FRAMES);
+    let m = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, frames, 3));
+    cpu.write8(d + S_FRAME, (m as u8).wrapping_add(WGD_FRAME));
+    let spin = (cpu.read16(o + GR_AIM) as i16 as i32 as u32) << 10;
+    let v = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, spin, GRD_JET_SIZE[0]));
+    cpu.write32(d + S_SCALES, v);
+    let v = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, spin, GRD_JET_SIZE[1]));
+    cpu.write32(d + S_SCALES + 4, v);
+    cpu.write16(d + S_COLOUR, base);
+    let (place, extra) = if cpu.read32(LOOPS) & 1 == 0 { GRD_JETS[0] } else { GRD_JETS[1] };
+    let turn = cpu.read16(o + P_TURN);
+    let a = turn.wrapping_add(place) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let x = cpu.read32(o + O_POSITION).wrapping_add((sin as i32).wrapping_mul(GR_OFFSET as i32) as u32);
+    cpu.write32(d + S_POSITION, x);
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let y = cpu.read32(o + O_POSITION + 4).wrapping_sub((cos as i32).wrapping_mul(GR_OFFSET as i32) as u32);
+    cpu.write32(d + S_POSITION + 4, y);
+    cpu.write16(d + S_TURN, turn.wrapping_add(extra));
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+}
+
+const GRM_STEP: u32 = 0x0608_7f64;
+const GRM_DRAW: u32 = 0x0608_822c;
+const GRM_KIND: u8 = 25;
+const GRM_FLAGS: u32 = 0xc8_0000;
+const GRM_POWER: u32 = 6000;
+const GRM_ROUTES: u32 = 0x060a_c48c;
+const GRM_BOXES: u32 = 0x060a_c49c;
+
+/// A gunner made from the event row `e` (its place +4, +6; its route +8; its side +0xb; its turn
+/// +0x14; its type +0x1b): an object of list 2 (0xbc bytes), flags 0xc80000, kind 25 with its colour
+/// 16 a type on, power 6000. Gives 1.
+pub fn gunner_row(cpu: &mut Cpu, e: u32) -> u32 {
+    let n = nested!(cpu, 0x0604_5df8, aim::free_number(cpu, 2)) as i8;
+    if n == -1 {
+        return 1;
+    }
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, CRR_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, PART_EXEC));
+    if o == 0 {
+        return 1;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + O_BEHAVIOUR, GRM_STEP);
+    cpu.write32(o + O_FLAGS, GRM_FLAGS);
+    cpu.write32(o + O_DRAW, GRM_DRAW);
+    let turn = cpu.read16(e + E_DIRECTION);
+    cpu.write16(o + P_TURN, turn);
+    let side = cpu.read8(e + E_MIRROR);
+    cpu.write8(o + D_SIDE, side);
+    cpu.write8(o + O_KIND, GRM_KIND);
+    cpu.write8(o + O_FRAME, 0);
+    let t = cpu.read8(e + E_TYPE);
+    let base = cpu.read16(kind(GRM_KIND as u32) + K_COLOUR);
+    cpu.write16(o + O_COLOUR_A, ((t as u16) << 4).wrapping_add(base));
+    cpu.write8(o + O_33, 0xf8);
+    cpu.write8(o + O_NUMBER, n as u8);
+    let at = cpu.read8(o + O_NUMBER) as i8 as i32 as u32;
+    cpu.write32(NUMBERED.wrapping_add(at << 2), o);
+    cpu.write32(o + O_SCRIPT, GRM_BOXES);
+    cpu.write32(o + P_POWER, GRM_POWER);
+    cpu.write8(o + P_54, 1);
+    cpu.write8(o + P_55, t);
+    let x = (cpu.read16(e + E_PLACE) as i16 as i32 as u32) << 16;
+    cpu.write32(o + O_POSITION, x);
+    let y = (cpu.read16(e + E_PLACE + 2) as i16 as i32 as u32) << 16;
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    let route = cpu.read8(e + E_SCRIPT) as u32;
+    let script = cpu.read32(GRM_ROUTES + 4 * route);
+    cpu.write32(o + D_ROUTE, script);
+    1
+}
+
+/// A frame counter (+0x8a, going 0 to 9 and then back to 7, by one plus the count's low bit; the
+/// count +0x8c, a word, going up one a call).
+pub fn cycle_frame(cpu: &mut Cpu, o: u32) {
+    let count = cpu.read16(o + CYCLE_COUNT);
+    let at = (count & 1).wrapping_add(cpu.read16(o + CYCLE_FRAME));
+    cpu.write16(o + CYCLE_FRAME, at);
+    if at as i16 > CYCLE_LAST {
+        cpu.write16(o + CYCLE_FRAME, at.wrapping_sub(CYCLE_BACK));
+    }
+    let count = cpu.read16(o + CYCLE_COUNT).wrapping_add(1);
+    cpu.write16(o + CYCLE_COUNT, count);
+}
+
+const CYCLE_FRAME: u32 = 0x8a;
+const CYCLE_COUNT: u32 = 0x8c;
+const CYCLE_LAST: i16 = 9;
+const CYCLE_BACK: u16 = 3;
