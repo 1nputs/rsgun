@@ -4,7 +4,7 @@
 
 use super::globals::{bios_setting_is_1, GAME_FRAMES, GAME_MODE};
 use super::bullets::{self, AS_FLAGS, AS_POSITION, AS_SHOOTER, AS_SPEED};
-use super::{clib, actors, aim, bg, camera, ground, hud, palette, parts, results, sgl, sprites, dma, effects, explosions, files, hits, kinds, math, models, nested, objects, screen, sound, states, stg02, timeline, Cpu};
+use super::{clib, director, player, actors, aim, bg, camera, ground, hud, palette, parts, results, sgl, sprites, dma, effects, explosions, files, hits, kinds, math, models, nested, objects, screen, sound, states, stg02, timeline, Cpu};
 
 // ---- the stage's mode ----------------------------------------------------------------------------
 
@@ -237,6 +237,212 @@ const MODE_DONE: u8 = 0x70;
 /// An object's flags: the sprite's.
 const F_NOT_CULLED: u32 = 0x2000_0400;
 const F_HIDDEN: u32 = 0x8_0000;
+
+// ---- the cover's chunks ------------------------------------------------------------------------------
+
+/// A chunk (an object of list 3 that `chunk_set` makes where a cover ends; its behaviour is
+/// `chunk_step`): its phase (+0x3c: 0 start, 1 sparking, 2 and 3 the bursts, 4 gone), a flag
+/// (+0x3d: 1 makes the second burst), its count (+0x40, a word), its speeds (+0x44, +0x48, +0x4c),
+/// the third speed's step (+0x50), its three turns (+0x2c, +0x2e, +0x30) and their steps (+0x60,
+/// +0x62, +0x64).
+const CH_PHASE: u32 = 0x3c;
+const CH_FLAG: u32 = 0x3d;
+const CH_COUNT: u32 = 0x40;
+const CH_SPEED: u32 = 0x44;
+const CH_STEP: u32 = 0x50;
+const CH_TURN: u32 = 0x2c;
+const CH_SPIN: u32 = 0x60;
+/// The sparks' reach (a random up to it on each axis, the third taken back by it), their scale
+/// 0x8000 and a random up to 0x4000, the colour 0x90 past kind 0's first, the links of a spark and
+/// of a burst, and the burst's scale 0xc000 and its drop.
+const CH_REACH: u32 = 0x10_0000;
+const CH_SCALE: u32 = 0x8000;
+const CH_COLOUR_ADD: u16 = 0x90;
+const CH_SPARK_LINK: u32 = 0x0607_2bbc;
+const CH_BURST_LINK: u32 = 0x0607_2be0;
+const CH_BURST_SCALE: u32 = 0xc000;
+const CH_BURST_DROP: u32 = 0xfff0_0000;
+/// The first count is 0xb4 and a random 0-59 more; a spark every 10th count, a sound every 40th;
+/// the sounds 12-14 and, at its end, 16-18.
+const CH_COUNT_BASE: u32 = 0xb4;
+const CH_SPARK_EVERY: u32 = 10;
+const CH_SOUND_EVERY: u32 = 40;
+const CH_SOUND: i32 = 12;
+const CH_SOUND_END: i32 = 16;
+/// The second struct's place on the stack (the first at the bottom; the smoke's at 0x40).
+const CH_SECOND: u32 = 0x80;
+const CH_SMOKE: u32 = 0x40;
+
+/// A random 0-2 and `base` played as a sound effect.
+fn chunk_sound(cpu: &mut Cpu, base: i32) {
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 3)) as i32;
+    let r = if r < 0 { r.wrapping_neg() } else { r };
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, r.wrapping_add(base) as i16 as i32 as u32));
+}
+
+/// A chunk's step: phase 0 gives it random speeds (up to 0x4000, the second 0x8000 more, the
+/// third 0x10000 less), its third step 0x400 and its count; 1 makes a spark (the effect struct on
+/// the stack, its frame byte unset) every 10th count and a sound every 40th, counting down, then
+/// goes to 2 (or, with the flag, 3); 2 makes a smoke burst where it is; 3 makes one burst effect
+/// 0x100000 below; 4 sounds and ends it (112). Then it moves by its speeds, the third speeded
+/// by its step, and turns by its steps.
+pub fn chunk_step(cpu: &mut Cpu, o: u32) {
+    use effects as fx;
+    let e = cpu.stack();
+    let phase = cpu.read8(o + CH_PHASE);
+    let mut next = None;
+    if phase <= 4 {
+        match phase {
+            0 => {
+                let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x4000));
+                cpu.write32(o + CH_SPEED, r);
+                let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x4000));
+                cpu.write32(o + CH_SPEED + 4, r.wrapping_add(0x8000));
+                let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x4000));
+                cpu.write32(o + CH_SPEED + 8, r.wrapping_add(0xffff_0000));
+                cpu.write32(o + CH_STEP, 0x400);
+                let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 60));
+                cpu.write16(o + CH_COUNT, r.wrapping_add(CH_COUNT_BASE) as u16);
+                next = Some(1);
+            }
+            1 => {
+                let count = cpu.read16(o + CH_COUNT) as i16 as i32 as u32;
+                if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, count, CH_SPARK_EVERY)) == 0 {
+                    for k in 0..3 {
+                        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, CH_REACH));
+                        let mut v = cpu.read32(o + O_POSITION + 4 * k).wrapping_add(r);
+                        if k == 2 {
+                            v = v.wrapping_sub(CH_REACH);
+                        }
+                        cpu.write32(e + fx::X + 4 * k, v);
+                    }
+                    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x4000));
+                    let scale = r.wrapping_add(CH_SCALE);
+                    cpu.write32(e + fx::SCALE_Y, scale);
+                    cpu.write32(e + fx::SCALE_X, scale);
+                    cpu.write32(e + fx::FLAGS_LONG, 3);
+                    let angle = nested!(cpu, 0x0604_5d90, math::random(cpu, 0));
+                    cpu.write16(e + fx::ANGLE, angle as u16);
+                    cpu.write16(e + fx::FRAMES, 0);
+                    cpu.write8(e + fx::FRAMES_2, 0);
+                    cpu.write8(e + fx::KIND, 0);
+                    let colour = cpu.read16(CHAR_BASE).wrapping_add(CH_COLOUR_ADD);
+                    cpu.write16(e + fx::COLOUR, colour);
+                    let player = cpu.read8(o + O_NUMBER);
+                    cpu.write8(e + fx::PLAYER, player);
+                    cpu.write32(e + fx::LINK, CH_SPARK_LINK);
+                    cpu.write32(e + fx::RELATIVE_3C, 0);
+                    nested!(cpu, 0x0604_e1cc, effects::effect_set(cpu, e));
+                }
+                let count = cpu.read16(o + CH_COUNT) as i16 as i32 as u32;
+                if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, count, CH_SOUND_EVERY)) == 0 {
+                    chunk_sound(cpu, CH_SOUND);
+                }
+                let count = cpu.read16(o + CH_COUNT).wrapping_sub(1);
+                cpu.write16(o + CH_COUNT, count);
+                if count as i16 <= 0 {
+                    next = Some(if cpu.read8(o + CH_FLAG) != 0 { 3 } else { 2 });
+                }
+            }
+            2 => {
+                let s = e + CH_SMOKE;
+                for k in 0..3 {
+                    let v = cpu.read32(o + O_POSITION + 4 * k);
+                    cpu.write32(s + 4 * k, v);
+                }
+                nested!(cpu, 0x0605_7754, explosions::smoke_burst(cpu, s));
+                next = Some(4);
+            }
+            3 => {
+                let e = e + CH_SECOND;
+                for k in 0..2 {
+                    let v = cpu.read32(o + O_POSITION + 4 * k);
+                    cpu.write32(e + fx::X + 4 * k, v);
+                }
+                let z = cpu.read32(o + O_POSITION + 8).wrapping_add(CH_BURST_DROP);
+                cpu.write32(e + fx::X + 8, z);
+                let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x4000));
+                let scale = r.wrapping_add(CH_BURST_SCALE);
+                cpu.write32(e + fx::SCALE_Y, scale);
+                cpu.write32(e + fx::SCALE_X, scale);
+                cpu.write32(e + fx::FLAGS_LONG, 3);
+                let angle = nested!(cpu, 0x0604_5d90, math::random(cpu, 0));
+                cpu.write16(e + fx::ANGLE, angle as u16);
+                cpu.write16(e + fx::FRAMES, 0);
+                cpu.write8(e + fx::FRAMES_2, 0);
+                cpu.write8(e + fx::KIND, 0);
+                let colour = cpu.read16(CHAR_BASE).wrapping_add(CH_COLOUR_ADD);
+                cpu.write16(e + fx::COLOUR, colour);
+                let player = cpu.read8(o + O_NUMBER);
+                cpu.write8(e + fx::PLAYER, player);
+                cpu.write32(e + fx::LINK, CH_BURST_LINK);
+                cpu.write32(e + fx::RELATIVE_3C, 0);
+                nested!(cpu, 0x0604_e1cc, effects::effect_set(cpu, e));
+                next = Some(4);
+            }
+            _ => {
+                chunk_sound(cpu, CH_SOUND_END);
+                cpu.write8(o + O_MODE, MODE_DONE);
+            }
+        }
+    }
+    if let Some(p) = next {
+        cpu.write8(o + CH_PHASE, p);
+    }
+    for k in 0..3 {
+        let v = cpu.read32(o + CH_SPEED + 4 * k);
+        if k == 2 {
+            let step = cpu.read32(o + CH_STEP);
+            cpu.write32(o + CH_SPEED + 8, v.wrapping_add(step));
+        }
+        let v = cpu.read32(o + CH_SPEED + 4 * k);
+        let p = cpu.read32(o + O_POSITION + 4 * k).wrapping_add(v);
+        cpu.write32(o + O_POSITION + 4 * k, p);
+    }
+    for k in 0..3 {
+        let t = cpu.read16(o + CH_TURN + 2 * k).wrapping_add(cpu.read16(o + CH_SPIN + 2 * k));
+        cpu.write16(o + CH_TURN + 2 * k, t);
+    }
+}
+
+/// A chunk where the cover `o` is (its place, turns, steps' number and mode 0x33): an object of
+/// list 3 (0x80 bytes) with the plain actor's behaviour, `chunk_step` its step, the flag bit
+/// 0x800000, its parent's model place at +0x34 (the first long of the cover's +0x44's), the cover's
+/// turns, player byte and mode, and the three steps of a random up to 0x400; its second step is
+/// then 0 and the flag 1. It, or 0.
+pub fn chunk_set(cpu: &mut Cpu, o: u32) -> u32 {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 0x80)) as i8 as i32 as u32;
+    let c = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 3, blocks, 0x0604_dcb4));
+    if c == 0 {
+        return 0;
+    }
+    nested!(cpu, 0x0604_dd50, effects::actor_init(cpu, c));
+    let flags = cpu.read32(c + O_FLAGS) | 0x80_0000;
+    cpu.write32(c + O_FLAGS, flags);
+    let place = cpu.read32(o + 0x44);
+    let place = cpu.read32(place);
+    cpu.write32(c + 0x34, place);
+    cpu.write32(c + O_BEHAVIOUR, 0x0608_0480);
+    for k in [0x1c, 0x18, 0x14] {
+        cpu.write32(c + k, 0);
+    }
+    nested!(cpu, 0x0605_2c44, models::model_point(cpu, o, c + O_POSITION));
+    for k in [0x2c, 0x2e, 0x30] {
+        let v = cpu.read16(o + k);
+        cpu.write16(c + k, v);
+    }
+    let v = cpu.read8(o + 0x32);
+    cpu.write8(c + 0x32, v);
+    let v = cpu.read8(o + 0x33);
+    cpu.write8(c + 0x33, v);
+    for k in [CH_SPIN, CH_SPIN + 2, CH_SPIN + 4] {
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x400));
+        cpu.write16(c + k, r as u16);
+    }
+    cpu.write16(c + CH_SPIN + 2, 0);
+    cpu.write8(c + CH_FLAG, 1);
+    c
+}
 
 /// The shot made by `muzzle_shot`: it flies in its angle, its speed 0x18000 at most; on the ground
 /// (or with +0x56's bit 0x400 set, a hit) it makes a spark effect (its angle turned round, its
@@ -532,7 +738,7 @@ pub fn part_step(cpu: &mut Cpu, o: u32) {
         PS_FALL => part_fall(cpu, o, boss),
         PS_WRECK => part_wreck(cpu, o),
         101 => {
-            cpu.call(COVER_END, &[o]);
+            nested!(cpu, COVER_END, chunk_set(cpu, o));
             part_release(cpu, o);
         }
         PS_RELEASE => part_release(cpu, o),
@@ -2185,7 +2391,7 @@ pub fn lamp_step(cpu: &mut Cpu, o: u32) {
 // ---- the boss's covers, sparks and gauge -----------------------------------------------------------
 
 /// The cover (a boss part, behaviour 0x06083708): flashing with its parent's part at +0xbc; its
-/// state 100 goes on to 101, which runs the part at 0x0608076c (not seen run), clears the parent's
+/// state 100 goes on to 101, which makes the chunk (0x0608076c, `chunk_set`), clears the parent's
 /// slot for it and ends it (112).
 const COVER_PARENT_PART: u32 = 0xbc;
 const COVER_END: u32 = 0x0608_076c;
@@ -2213,7 +2419,7 @@ pub fn cover_step(cpu: &mut Cpu, o: u32) {
         POD_WAIT => cpu.write16(o + O_STEP, POD_TO_RUN as u16),
         POD_DESTROY => cpu.write16(o + O_STEP, POD_END as u16),
         POD_END => {
-            cpu.call(COVER_END, &[o]);
+            nested!(cpu, COVER_END, chunk_set(cpu, o));
             let parent = cpu.read32(o + P_PARENT);
             let which = cpu.read8(o + P_WHICH) as i8 as i32 as u32;
             cpu.write32(parent.wrapping_add(which << 2).wrapping_add(P_PART), 0);
@@ -21278,6 +21484,242 @@ pub fn floor2_step(cpu: &mut Cpu, s: u32) {
     let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
     nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, 0, ((speed as i32) >> 1) as u32));
 }
+
+// ---- the stage's end scene (0x060a2d20-0x060a32cc) -------------------------------------------------
+
+/// The end scene's fields (the object `s`): its step (+8: 0 fade and set up, 1 count, 2 run), the
+/// byte at +10 (the cells put), the speed (+0x20), the fade (+0x28: 16.16 progress of the colours,
+/// 0x10000 done; it starts at 0x10000 and counts down in step 0, up in the frame) and the count
+/// (+0x2c).
+const END_FADE: u32 = 0x28;
+const END_COUNT: u32 = 0x2c;
+const END_BYTE: u32 = 10;
+/// The angle (a word) the second plane's speed goes along.
+const END_TURN: u32 = 0x0607_476a;
+/// The word the scene keeps at 0x06074750 (the mover's spin): its high word the part (0 sets up,
+/// 1 waits and ends, 2 and over only fades), its low word the count up by 0x100.
+const END_PART: u32 = SCN_MOVER_SPIN;
+/// The frames the scene waits in step 1, and in part 1.
+const END_WAIT: u32 = 29;
+const END_WAIT_PART: u32 = 0x100;
+
+/// The scene's reset (the object `s`): the step and the fade at 0x10000 and the count cleared.
+pub fn finale_reset(cpu: &mut Cpu, s: u32) {
+    cpu.write8(s + SCN_STEP, 0);
+    cpu.write32(s + END_COUNT, 0);
+    cpu.write32(s + END_FADE, 0x1_0000);
+}
+
+/// The scene's step (the object `s`; the step in +8): the second plane's frame and speed
+/// (-speed / 2) and the view, then 0 fades the colours down by 0x800 a frame while the fade is not
+/// negative; then it puts backgrounds 0x30014, the page of NBG0, the cells (0xeb60 from the part 24,
+/// then 0x2000 from the buffer's 0x23000) and 0xf0 colours from 0x100, clears the count and goes
+/// on; 1 counts to 29, then puts backgrounds 0x20015, the first map (at 0x060b20c0: a plane with
+/// cells at 0x25e76000, 0x2000000 across and down), the first plane's place (0xb00000, 0x700000)
+/// and frame, clears the count and goes on; 2 runs the view, the first plane's frame and speed
+/// (-speed) and streams the map, the stage scrolled on when it ends.
+pub fn finale_step(cpu: &mut Cpu, s: u32) {
+    let step = cpu.read8(s + SCN_STEP) as i8;
+    if step == 1 {
+        nested!(cpu, 0x060a_2c5c, floor2_view(cpu, s));
+        let count = cpu.read32(s + END_COUNT).wrapping_add(1);
+        cpu.write32(s + END_COUNT, count);
+        if count == END_WAIT {
+            nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x2_0015));
+            let map = SCN_MAP_0;
+            cpu.write8(map, 3);
+            cpu.write8(map + 1, 0);
+            cpu.write32(map + 20, 0x060a_fd8c);
+            cpu.write32(map + 16, 0x25e7_6000);
+            cpu.write32(map + 8, 0x0200_0000);
+            cpu.write32(map + 12, 0x0200_0000);
+            cpu.write16(map + 4, 0);
+            cpu.write16(map + 6, 0x1fff);
+            cpu.write16(map + 2, 0x90);
+            cpu.write32(map + 28, 0);
+            cpu.write32(map + 24, 0);
+            nested!(cpu, 0x0605_f14c, bg::map_clear(cpu, map));
+            scn_plane_set(cpu, SCN_PLANE_0, 0xb0_0000, 0x70_0000);
+            nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+            cpu.write32(s + END_COUNT, 0);
+            let step = cpu.read8(s + SCN_STEP).wrapping_add(1);
+            cpu.write8(s + SCN_STEP, step);
+        }
+    } else if step > 1 {
+        if step == 2 {
+            nested!(cpu, 0x060a_2c5c, floor2_view(cpu, s));
+            nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+            let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+            nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, 0, speed));
+            let r = nested!(cpu, 0x0605_f170, bg::map_stream(cpu, SCN_PLANE_0, SCN_MAP_0));
+            if r == 0xffff_ffff {
+                nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+            }
+        }
+    } else if step == 0 {
+        nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+        let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+        nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, 0, ((speed as i32) >> 1) as u32));
+        nested!(cpu, 0x060a_2c5c, floor2_view(cpu, s));
+        let fade = cpu.read32(s + END_FADE);
+        if (fade as i32) >= 0 {
+            nested!(cpu, 0x060a_2bf8, fade_colours(cpu, fade));
+            cpu.write32(s + END_FADE, fade.wrapping_add(0xffff_f800));
+        } else {
+            nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x3_0014));
+            nested!(cpu, 0x0606_e300, sgl::sl_page_nbg0(cpu, 0x25e6_0000, 0x200, 0xc000));
+            let src = scn_part(cpu, SCN_CELL_PARTS, 24);
+            nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, src, 0x25e6_0000, 0xeb60, 0x800));
+            let src = cpu.read32(SCN_BUFFER).wrapping_add(0x2_3000);
+            nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, src, 0x25e7_6000, 0x2000));
+            let colours = scn_part(cpu, SCN_COLOUR_PARTS, 48);
+            nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0x100, 0xf0));
+            cpu.write32(s + END_COUNT, 0);
+            let step = cpu.read8(s + SCN_STEP).wrapping_add(1);
+            cpu.write8(s + SCN_STEP, step);
+        }
+    }
+}
+
+/// The scene's start (the object `s`): the priorities of screens 1, 0, 5 and -8 (3, 5, 2, 3), the
+/// colour offset on (82, 1) and screen B's offset 0, the page of RBG0, the picture queued
+/// (0x060b0604), the colours (16 from 0) of the stage data's part 40, the record at 0x06074810
+/// cleared, the tables 0x060b2100 (0x1000 long) queued to 0x25e2f800, the spin word cleared, the
+/// view along 0x060b0944, the step and the byte at +10 cleared, the fade cleared; the ships' scene
+/// on.
+pub fn finale_start(cpu: &mut Cpu, s: u32) {
+    for (screen, pri) in [(1, 3), (0, 5), (5, 2), (0xffff_fff8, 3)] {
+        nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, screen, pri));
+    }
+    nested!(cpu, 0x0606_e25c, sgl::sl_col_offset_on(cpu, 82, 1));
+    nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, 0, 0, 0));
+    nested!(cpu, 0x0606_e2ce, sgl::sl_page_rbg0(cpu, SCN_VDP2_RAM, 0, 0xc000));
+    cpu.call(SCN_PICTURE_B, &[0x060b_0604]);
+    let colours = scn_part(cpu, SCN_COLOUR_PARTS, 40);
+    nested!(cpu, 0x0600_5b18, palette::set_colours(cpu, colours, 0, 16));
+    let p = SCN_PANEL_PLACE;
+    for k in [20, 16, 12, 32, 28, 24] {
+        cpu.write32(p + k, 0);
+    }
+    for k in [4, 2, 0, 10, 8, 6] {
+        cpu.write16(p + k, 0);
+    }
+    nested!(cpu, 0x0605_ecf0, screen::queue_copy(cpu, SCN_TABLE_COPY, SCN_TABLE_RAM, 0x1000));
+    cpu.write32(END_PART, 0);
+    nested!(cpu, 0x0605_f5b0, bg::view_along(cpu, 0x060b_0944));
+    cpu.write8(s + SCN_STEP, 0);
+    cpu.write8(s + END_BYTE, 0);
+    cpu.write32(s + END_FADE, 0);
+    nested!(cpu, 0x0606_1738, player::scene_on(cpu));
+}
+
+/// One frame of the end scene (the object `s`): start taken ends the scene's stage (scroll_next);
+/// the view's matrix and the record at 0x06074810's (moved by the speed, +0x20, along y; its
+/// flags masked 0x01ffffff). Then by the spin word's high word (the part): 0 sets the screens up
+/// (a word of 0: priority of screen 5 is 4), the first plane's place (0x300000 past the spin's
+/// second long) and frame, and its speed; the colours fade out as the spin's third long (3.0 less
+/// it) >> 10 shows; up to 0xffff the scales of the plane lerp 1.0 to 2.0 and the offset B goes
+/// white to 0xffa0 of it, past it the cells are put (the byte at +10) with backgrounds 0x30014;
+/// the spin word 0x100 more; 1 puts backgrounds 0x10016 at its start, counts 0x100 frames (+0x2c)
+/// and ends the stage's scroll, then fades up by 0x200 till 1.0; 2 only fades up; then in all of
+/// them the second plane's speed along the angle at 0x0607476a. The view along 0x060b0944, the
+/// panels' draw and the ships still.
+pub fn finale_frame(cpu: &mut Cpu, s: u32) {
+    if nested!(cpu, 0x0606_1780, player::start_pressed(cpu)) != 0 {
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+    }
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    nested!(cpu, 0x0605_f468, bg::view_matrix(cpu));
+    nested!(cpu, 0x0605_f530, bg::rotation_matrix(cpu, SCN_PANEL_PLACE));
+    let speed = cpu.read32(s + SCN_SPEED);
+    nested!(cpu, 0x0605_f3a4, bg::mover_move(cpu, 0, speed, 0));
+    let w = cpu.read32(SCN_PANEL_PLACE + 16) & 0x01ff_ffff;
+    cpu.write32(SCN_PANEL_PLACE + 16, w);
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+    let spin = cpu.read32(END_PART);
+    let part = (spin >> 16) as u16 as i16;
+    let mut skip = false;
+    match part {
+        0 => {
+            if spin == 0 {
+                nested!(cpu, 0x0606_98dc, sgl::sl_priority(cpu, 5, 4));
+            }
+            nested!(cpu, 0x0605_f040, bg::plane_a_frame(cpu));
+            let x = cpu.read32(END_PART + 4).wrapping_add(0x30_0000);
+            cpu.write32(SCN_PLANE_0, x);
+            let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+            nested!(cpu, 0x0605_efd4, bg::plane_a_speed(cpu, 0, speed));
+            let left = 0x0300_0000u32.wrapping_sub(cpu.read32(END_PART + 12));
+            nested!(cpu, 0x0600_8160, clib::ashiftrt_r4::<10>(cpu, left));
+            let t = ((left as i32) >> 10) as u32;
+            if (t as i32) > 0xffff {
+                if cpu.read8(s + END_BYTE) == 0 {
+                    let src = scn_part(cpu, SCN_CELL_PARTS, 36);
+                    nested!(cpu, 0x0605_ed2c, screen::queue_long_copy(cpu, src, 0x25e6_0000, 0x9ca0, 0x2000));
+                    nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x3_0014));
+                    let b = cpu.read8(s + END_BYTE).wrapping_add(1);
+                    cpu.write8(s + END_BYTE, b);
+                }
+            } else {
+                let scale = nested!(cpu, 0x0606_2e7c, math::lerp(cpu, 0x1_0000, 0x2_0000, t));
+                cpu.write32(SCN_PLANE_0 + 20, scale);
+                cpu.write32(SCN_PLANE_0 + 16, scale);
+                let c = nested!(cpu, 0x0606_2e7c, math::lerp(cpu, 0, 0xffa0_0000, t));
+                let c = (c >> 16) as u16 as i16 as i32 as u32;
+                nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, c, c, c));
+            }
+            let spin = cpu.read32(END_PART).wrapping_add(0x100);
+            cpu.write32(END_PART, spin);
+            skip = true;
+        }
+        1 => {
+            if spin as u16 == 0 {
+                nested!(cpu, 0x0606_e23c, sgl::sl_bg_on(cpu, 0x1_0016));
+            }
+            let count = cpu.read32(s + END_COUNT).wrapping_add(1);
+            cpu.write32(s + END_COUNT, count);
+            if count == END_WAIT_PART {
+                nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+            }
+        }
+        2 => {}
+        _ => skip = true,
+    }
+    if !skip {
+        let fade = cpu.read32(s + END_FADE);
+        if (fade as i32) <= 0x1_0000 {
+            nested!(cpu, 0x060a_2bf8, fade_colours(cpu, fade));
+            let fade = cpu.read32(s + END_FADE).wrapping_add(0x200);
+            cpu.write32(s + END_FADE, fade);
+        }
+        let angle = cpu.read16(END_TURN) as i16 as i32 as u32;
+        let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, angle));
+        let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
+        let down = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, speed, cos));
+        let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, angle));
+        let speed = cpu.read32(s + SCN_SPEED);
+        let across = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, speed, sin));
+        nested!(cpu, 0x0605_f08c, bg::plane_b_frame(cpu));
+        nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, across, down));
+    }
+    nested!(cpu, 0x0605_f648, bg::view_along_eased(cpu, 0x060b_0944));
+    nested!(cpu, 0x060a_1818, panels_draw(cpu, s));
+    nested!(cpu, 0x0606_16b8, player::ships_still(cpu));
+}
+
+/// The end scene's finish: both screens' offsets 0, the byte at 0x0600edcc 1 and the mode done.
+pub fn finale_off(cpu: &mut Cpu) {
+    nested!(cpu, 0x0605_e6fc, screen::set_offset_a(cpu, 0, 0, 0));
+    nested!(cpu, 0x0605_e71c, screen::set_offset_b(cpu, 0, 0, 0));
+    cpu.write8(0x0600_edcc, 1);
+    nested!(cpu, 0x0604_0c64, director::mode_done(cpu));
+}
+
+/// The end scene's frame as the screen's draw runs it: `finale_frame`.
+pub fn finale_draw(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x060a_3048, finale_frame(cpu, s));
+}
+
 
 // ---- the stage's boss, its swings and its entrance (0x060a32e4-0x060a4cfc) -----------------------
 

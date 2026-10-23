@@ -1352,6 +1352,8 @@ pub fn register(n: &mut Natives) {
     // STG03.BIN's code (fingerprint fd6475daa2eebeb4, the stage 4 route's)
     rewrites! { n; overlay "STG03";
         0x0608_0000 => stg03::stg03_mode[game] -> u32,
+        0x0608_0480 => stg03::chunk_step[o] -> (),
+        0x0608_076c => stg03::chunk_set[o] -> u32,
         0x0608_0860 => stg02::model_screen_angle[o] -> u32,
         0x0608_0890 => stg03::shot_step[o] -> (),
         0x0608_0a54 => stg03::muzzle_shot[gun, turn] -> (),
@@ -1784,6 +1786,12 @@ pub fn register(n: &mut Natives) {
         0x060a_2bf8 => stg03::fade_colours[v] -> (),
         0x060a_2c5c => stg03::floor2_view[s] -> (),
         0x060a_2cc8 => stg03::floor2_step[s] -> (),
+        0x060a_2d20 => stg03::finale_reset[s] -> (),
+        0x060a_2d3c => stg03::finale_step[s] -> (),
+        0x060a_2f38 => stg03::finale_start[s] -> (),
+        0x060a_3048 => stg03::finale_frame[s] -> (),
+        0x060a_328c => stg03::finale_off[] -> (),
+        0x060a_32cc => stg03::finale_draw[s] -> (),
         0x060a_32e4 => stg03::qb_exec[s] -> (),
         0x060a_3470 => stg03::qb_draw[s] -> (),
         0x060a_3540 => stg03::qb_wing_draw[s] -> (),
