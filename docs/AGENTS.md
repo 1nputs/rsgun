@@ -111,6 +111,12 @@ into the next brief for that overlay.
   the SH-2 code's register values at that call (read them off the disassembly: loop counters,
   table pointers, the object), or `cpu.call_returning(PR, ..)`. Found in STG01 (targets' rotation
   matrix, the arms' aim), STG02 (thruster_set's obj_size).
+- **A new recording finds stale-stack reads in merged code.** The stage 4 route (STG03, never
+  in the marathon) made obj_exec diverge in eight segments before any STG03 rewrite: STG03's code
+  reads stack slots its callers never set, and merged rewrites left other bytes there (a nested
+  call's pushed return address: `nested!(cpu, ENTRY, returning PR, f(...))` pushes the SH-2
+  code's; loop variables the SH-2 code keeps in its frame: the rewrite writes their final values).
+  Six fixes (shared modules) went in after check.sh and the whole marathon passed on their branch.
 - **Delay slots** run before the branch lands; a `bt/s`'s slot runs both ways; a compare in a delay
   slot sets T after the branch decided. Recount every `jsr` in a path.
 - **Sign extension**: `mov.b`/`mov.w` loads and `mov.w` literal-pool constants (0x8000 and up are

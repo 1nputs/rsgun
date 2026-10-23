@@ -37,9 +37,14 @@ Overlays (fingerprint, game mode, marathon segments, worktree and branch, where 
   frames from 70000; extended to 210000 as route4-end.txt: STG03 ends at 176670) is STG03's
   evidence (fingerprint fd6475daa2eebeb4, 461 functions translated, all 453 the baseline saw run).
   `tools/port/check_route4.sh` compares the route's segments (r060000, f070000-f200000); its
-  baseline on main (out/port/route4-base) has obj_exec diverging in eight segments before any
-  STG03 rewrite (under investigation on ../rsgun-fix, wip-fix). STG03 is batched on
-  ../rsgun-stg03 (wip-stg03) from 0x06080000. It is also the attract mode's third demo (mode 14).
+  baseline on main (out/port/route4-base) had obj_exec diverging in eight segments before any
+  STG03 rewrite: stale-stack reads, fixed in shared modules (the "objects:" commits). Left:
+  three in f170000 (frames 176282, 176354, 176467): STG03's code at 0x0608052e-0x06080594 builds
+  an effect's struct on the stack without its +0x1d, and the slave CPU's pushes reach that slot
+  (060ff0e0); compare mode keeps the frame private, so it is a two-CPU timing difference to look
+  at when that code is rewritten (the rewrite still matches the SH-2 code, unset field and all). STG03 is batched on
+  ../rsgun-stg03 (wip-stg03) below 0x06094000 and ../rsgun-stg03b (wip-stg03b) from it (markers in
+  stg03.rs and its rewrites! block split the two). It is also the attract mode's third demo (mode 14).
 The whole-game check on main 96b4bf4 (out/port/marathon-96b4bf4): all 21 segments every call equal;
 still run unrewritten there: RANK's 16 (since done) and STG02's 0x06097610 (f140000) and 0x060a19d0-0x060a2504
 (f150000, before STG04 loads), both in hand.
