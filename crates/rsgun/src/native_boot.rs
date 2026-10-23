@@ -344,6 +344,9 @@ pub fn build(img: &Inputs) -> Machine {
     onchip(&mut m);
     devices(&mut m, img);
     sound_ram(&mut m);
+    // the instant is mid-line: the cycles each CPU has run into line 228 (run dependent; the machine
+    // goes on from them, so the timers' counts line up with the reference's)
+    m.time = [75, 64];
     m
 }
 
@@ -459,6 +462,16 @@ fn sound_driver_start(m: &mut Machine) {
         }
         m.sys.run_sound(per_line);
     }
+    // the samples made so far were heard in the real boot's time, not the game's
+    m.sys.scsp.out.clear();
+    // the SCSP's counters are the real boot's at the handover, 851,200 samples after the reset that
+    // began it: they set the envelope clock's parity, the noise generator's and the DSP's counter's
+    // place and the sound stack's, and decide what a sound the game starts first sounds like
+    let s = &mut m.sys.scsp;
+    s.samples = 851_200;
+    s.noise = 0x1_E9C4;
+    s.stack_pos = 0;
+    s.dsp.dec = 768;
 }
 
 /// The lines the real boot runs the sound CPU before the handover: from frame 1157 line 173 to
@@ -726,29 +739,11 @@ fn cmp_scalars(name: &str, native: &[(&str, u64)], reference: &[(&str, u64)]) ->
     d.len()
 }
 
-/// What the earlier loads of the BIOS's sound driver left in the SCSP's engine and the native boot
-/// does not make, as (start, end, what) in the saved bytes of [`Rest`]: the sound CPU, the RAM and
-/// the registers are equal; no slot sounds in either; a slot that is keyed on starts afresh. The
-/// run from the native boot gives the same sound as from the reference (docs/HANDOFF.md).
-const IGNORED_SCSP: [(usize, usize, &str); 4] = [
-    (0x288, 0x2a0, "one inactive slot's phase and envelope"),
-    (0x309, 0x389, "the sound stack (the slots' last outputs)"),
-    (0xa51, 0xad1, "the DSP's MEMS"),
-    (0xad1, 0xb15, "the DSP's MIXS and the rest"),
-];
-
-/// Compares a part's saved bytes, the `ignored` ranges apart (listed with their number of differing
-/// bytes, not counted).
-fn cmp_saved(name: &str, native: &dyn State, reference: &dyn State, ignored: &[(usize, usize, &str)]) -> usize {
+/// Compares a part's saved bytes.
+fn cmp_saved(name: &str, native: &dyn State, reference: &dyn State) -> usize {
     let (mut a, mut b) = (Vec::new(), Vec::new());
     native.save(&mut a);
     reference.save(&mut b);
-    for &(s, e, what) in ignored {
-        let d = a[s..e].iter().zip(&b[s..e]).filter(|(x, y)| x != y).count();
-        println!("{name}: ignored {s:#x}-{e:#x} ({what}): {d} of {} bytes differ", e - s);
-        a[s..e].fill(0);
-        b[s..e].fill(0);
-    }
     let n = if a.len() == b.len() { extents(&a, &b, 1).len() } else { usize::MAX };
     if n == 0 {
         println!("{name}: equal ({} bytes saved)", a.len());
@@ -798,12 +793,13 @@ pub fn check(entry_state: &[u8], img: &Inputs, show: usize) -> Result<usize, Str
     let vdp2 = |v: &stv::video::Vdp2| vec![("vblank", v.vblank as u64), ("hblank", v.hblank.into()), ("odd", v.odd.into())];
     part(cmp_scalars("vdp1 registers", &vdp1(&n.vdp1), &vdp1(&r.vdp1)));
     part(cmp_scalars("vdp2 flags", &vdp2(&n.vdp2), &vdp2(&r.vdp2)));
-    part(cmp_saved("scsp (all but RAM: slots, DSP, timers)", &Rest(&n.scsp), &Rest(&r.scsp), &IGNORED_SCSP));
+    part(cmp_saved("scsp (all but RAM: slots, DSP, timers)", &Rest(&n.scsp), &Rest(&r.scsp)));
     println!("sounding slots native:\n{}reference:\n{}", native.sys.scsp.describe_slots(), reference.sys.scsp.describe_slots());
     part(cmp_debug("m68k", &n.m68k, &r.m68k, show));
     println!("== machine");
-    let sys = |s: &stv::machine::Sys| vec![("sound_on", s.sound_on as u64), ("slave_on", s.slave_on.into()), ("clock352", s.clock352.into()), ("line", s.line.into()), ("frame", s.frame)];
+    let sys = |s: &stv::machine::Sys| vec![("sound_on", s.sound_on as u64), ("slave_on", s.slave_on.into()), ("clock352", s.clock352.into()), ("line", s.line.into()), ("frame", s.frame), ("sound_owed", s.sound_phase().0), ("sound_in_sample", s.sound_phase().1.into())];
     part(cmp_scalars("system", &sys(n), &sys(r)));
+    part(cmp_scalars("cycles into the line", &[("master", native.time[0].into()), ("slave", native.time[1].into())], &[("master", reference.time[0].into()), ("slave", reference.time[1].into())]));
     println!("(not compared: sound_steps, a statistic: {} / {})", n.sound_steps, r.sound_steps);
     println!("{bad} parts differ");
     Ok(bad)

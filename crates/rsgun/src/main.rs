@@ -2,7 +2,7 @@
 //! cabinet's controls, the settings EEPROM and backup RAM kept between runs.
 //!
 //!     rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute]
-//!           [--native] [--cold] [--cpu-speed N] [--frame-delay MS] [--no-gpu-sync]
+//!           [--native] [--cold] [--native-boot] [--cpu-speed N] [--frame-delay MS] [--no-gpu-sync]
 //!     rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--evidence FILE]
 //!           [--dump F,F --dump-dir DIR] [--native | --compare REPORT] [--cold] [--cpu-speed N] [--rom DIR]
 //!           [--save DIR] [--load-state FILE] [--save-state FILE] [--states F,F]
@@ -10,7 +10,8 @@
 //! `--rom`: the images tools/rom/mkcart.py makes (default build/rom). `--save`: where the EEPROM,
 //! the backup RAM and the boot state (boot.rs) are kept (default $XDG_DATA_HOME/rsgun or
 //! ~/.local/share/rsgun; a headless run writes them back only when it is given). A run starts from the boot state, where the BIOS hands over to the game,
-//! unless `--cold` (or `--evidence`, `--compare`) has it go through the BIOS's boot from power on.
+//! unless `--cold` (or `--evidence`, `--compare`) has it go through the BIOS's boot from power on, or
+//! `--native-boot` has it start from the state native_boot.rs builds from the images (no BIOS run).
 //! `--script`: an input script (controls.rs) played instead of the keyboard and pads, its frames
 //! counted from power on. `--headless`: no window; runs to frame N and writes the last picture
 //! (`--shot`), the sound (`--wav`) and the evidence of what code ran (`--evidence`, stv::evidence's
@@ -98,6 +99,9 @@ struct Options {
     /// DIR/entry.state (tools/boot/reach); `--boot-eeprom` and `--boot-backup` name the EEPROM and
     /// backup RAM files the reference run had (else the images' own EEPROM and a blank backup).
     boot_check: Option<PathBuf>,
+    /// `--native-boot`: starts from the state native_boot.rs builds from the images (not the saved
+    /// boot state, not the BIOS's boot).
+    native_boot: bool,
     boot_eeprom: Option<PathBuf>,
     boot_backup: Option<PathBuf>,
 }
@@ -138,6 +142,7 @@ fn parse_args() -> Result<Options, String> {
         states: Vec::new(),
         reach: None,
         boot_check: None,
+        native_boot: false,
         boot_eeprom: None,
         boot_backup: None,
     };
@@ -175,6 +180,7 @@ fn parse_args() -> Result<Options, String> {
             "--states" => o.states = value()?.split(',').filter_map(|f| f.parse().ok()).collect(),
             "--reach" => o.reach = Some(u32::from_str_radix(value()?.trim_start_matches("0x"), 16).map_err(|_| "--reach: a hex address")?),
             "--cpu-speed" => o.cpu_speed = value()?.parse().map_err(|_| "--cpu-speed: a number")?,
+            "--native-boot" => o.native_boot = true,
             "--native-boot-check" => o.boot_check = Some(PathBuf::from(value()?)),
             "--boot-eeprom" => o.boot_eeprom = Some(PathBuf::from(value()?)),
             "--boot-backup" => o.boot_backup = Some(PathBuf::from(value()?)),
@@ -198,7 +204,13 @@ fn load_machine(o: &Options) -> Result<(Machine, Option<Boot>), String> {
     let eeprom = fs::read(o.save.join("eeprom.bin")).or_else(|_| fs::read(o.rom.join("eeprom.bin"))).ok();
     // the boot state depends on the EEPROM and on the CPUs' speed
     let key = stv::mem::fnv1a(eeprom.as_deref().unwrap_or_default()).wrapping_add((o.cpu_speed as u64 - 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    let mut m = Machine::new(bios, cart, 1, eeprom.as_deref());
+    let backup = fs::read(o.save.join("backup.bin")).ok();
+    let mut m = if o.native_boot {
+        let img = native_boot::Inputs { bios: &bios, cart: &cart, eeprom: eeprom.as_deref(), backup: backup.as_deref(), area: 1 };
+        native_boot::build(&img)
+    } else {
+        Machine::new(bios, cart, 1, eeprom.as_deref())
+    };
     m.cpu_speed = o.cpu_speed;
     // the picture's lines in bands, on the cores there are
     m.render_threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(4));
@@ -207,12 +219,13 @@ fn load_machine(o: &Options) -> Result<(Machine, Option<Boot>), String> {
         generated::register(&mut m.sys.natives);
         game::register(&mut m.sys.natives);
     }
-    if let Ok(backup) = fs::read(o.save.join("backup.bin"))
+    if !o.native_boot
+        && let Some(backup) = backup
         && backup.len() == m.sys.backup.len()
     {
         m.sys.backup = backup;
     }
-    let cold = o.cold || o.evidence.is_some() || o.compare.is_some() || o.load_state.is_some();
+    let cold = o.native_boot || o.cold || o.evidence.is_some() || o.compare.is_some() || o.load_state.is_some();
     let boot = (!cold).then(|| Boot::start(&mut m, o.save.join("boot.state"), key));
     Ok((m, boot))
 }
@@ -612,7 +625,7 @@ fn main() -> ExitCode {
                 eprintln!("rsgun: {e}");
             }
             eprintln!("usage: rsgun [--rom DIR] [--save DIR] [--script FILE] [--scale N] [--fullscreen] [--smooth] [--mute] [--native] [--cold] [--cpu-speed N] [--frame-delay MS] [--no-gpu-sync]");
-            eprintln!("       rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--native] [--cold] [--cpu-speed N] [--rom DIR] [--save DIR]");
+            eprintln!("       rsgun --headless --frames N [--script FILE] [--shot FILE.ppm] [--wav FILE.wav] [--native] [--cold] [--native-boot] [--cpu-speed N] [--rom DIR] [--save DIR]");
             return ExitCode::from(2);
         }
     };
