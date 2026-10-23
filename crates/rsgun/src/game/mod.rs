@@ -1407,6 +1407,8 @@ pub fn register(n: &mut Natives) {
         0x0608_822c => stg03::gunner_draw[s] -> (),
         0x0608_8404 => stg03::gunner_row[e] -> u32,
         0x0608_8548 => stg03::cycle_frame[o] -> (),
+        // ---- from 0x06094000 on (a second STG03 worktree, wip-stg03b, adds its entries below
+        // this line while wip-stg03 adds the ones before 0x06094000 above it; merged in order)
     }
     // OPENING.BIN's code (the opening mode's), with its copies of SGL's NBG3 and sprite setters
     rewrites! { n; overlay "OPENING";

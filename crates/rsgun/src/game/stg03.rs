@@ -4780,3 +4780,7 @@ const CYCLE_FRAME: u32 = 0x8a;
 const CYCLE_COUNT: u32 = 0x8c;
 const CYCLE_LAST: i16 = 9;
 const CYCLE_BACK: u16 = 3;
+
+// ==== from 0x06094000 on ===========================================================================
+// (A second STG03 worktree, wip-stg03b, writes the functions from 0x06094000 below this line while
+// wip-stg03 writes the ones before it above.)
