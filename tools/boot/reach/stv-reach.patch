@@ -1,6 +1,5 @@
-diff -ru a/src/eeprom.rs stv/src/eeprom.rs
---- a/src/eeprom.rs	2026-10-23 16:14:03.232193966 -0400
-+++ b/src/eeprom.rs	2026-10-23 16:39:55.812792652 -0400
+--- a/src/eeprom.rs	2026-10-23 18:32:27.665203900 -0400
++++ stv/src/eeprom.rs	2026-10-23 18:32:27.677204347 -0400
 @@ -80,6 +80,7 @@
          match op {
              2 if self.bits == 9 => {
@@ -9,14 +8,14 @@ diff -ru a/src/eeprom.rs stv/src/eeprom.rs
                  // the dummy 0 now; the word's bits on the following clocks
                  self.out = Some((self.mem[addr as usize], 16));
                  self.dout = false;
-@@ -103,6 +104,7 @@
-                 let data = (self.shift & 0xFFFF) as u16;
-                 let addr = ((self.shift >> 16) & 63) as usize;
-                 if self.write_enabled {
-+                    if std::env::var_os("EELOG").is_some() { eprintln!("EE write {addr} {data:04x} op{op}"); }
-                     if op == 1 {
-                         self.mem[addr] = data;
-                     } else {
+@@ -106,6 +107,7 @@
+             // bits since the ninth clock, so the opcode is read from here (not from `op` above)
+             let (op, addr, data) = ((self.shift >> 22) & 3, ((self.shift >> 16) & 63) as usize, (self.shift & 0xFFFF) as u16);
+             if self.write_enabled {
++                if std::env::var_os("EELOG").is_some() { eprintln!("EE write {addr} {data:04x} op{op}"); }
+                 match (op, addr >> 4) {
+                     (1, _) => self.mem[addr] = data,
+                     (0, 1) => self.mem = [data; 64],
 diff -ru a/src/machine.rs stv/src/machine.rs
 --- a/src/machine.rs	2026-10-23 16:14:03.232193966 -0400
 +++ b/src/machine.rs	2026-10-23 16:46:12.964881736 -0400

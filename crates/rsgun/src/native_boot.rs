@@ -322,6 +322,31 @@ fn backup_boot(backup: &mut [u8], eeprom: &[u8; 128]) {
     }
 }
 
+/// The BIOS's checksum of a settings block (the RAM code at 0x060013bc, called from ROM 0x49c4): a
+/// CRC-16 (polynomial 0x1021) over the bytes, run in a 32-bit register that starts at 0xdebdeb00.
+fn settings_checksum(block: &[u8]) -> u16 {
+    let mut r = 0xDEBD_EB00u32;
+    for step in block.iter().map(|&b| Some(b)).chain([None; 1]) {
+        r |= step.map_or(0, u32::from);
+        for _ in 0..8 {
+            let carry = r >> 31 != 0;
+            r <<= 1;
+            if carry {
+                r ^= 0x1021_0000;
+            }
+        }
+    }
+    (r >> 16) as u16
+}
+
+/// Whether the BIOS accepts the EEPROM as it is (ROM 0x4996: "SEGA", and in each of the two copies, at
+/// bytes 8 and 68, the checksum of the 56 bytes after its 4 bytes). The value ranges it also checks
+/// are not ported: a setting out of range (or a bad checksum) sends the BIOS down its repair path,
+/// which resets the settings and rewrites the EEPROM, and the native boot does not make that.
+pub fn eeprom_accepted(eeprom: &[u8; 128]) -> bool {
+    &eeprom[..4] == b"SEGA" && [8, 68].iter().all(|&b| eeprom[b..b + 2] == settings_checksum(&eeprom[b + 4..b + 60]).to_be_bytes())
+}
+
 /// Builds the machine at the handover.
 pub fn build(img: &Inputs) -> Machine {
     let mut m = Machine::new(img.bios.to_vec(), img.cart.to_vec(), img.area, img.eeprom);
@@ -332,6 +357,9 @@ pub fn build(img: &Inputs) -> Machine {
         }
         e
     };
+    if !eeprom_accepted(&eeprom) {
+        eprintln!("rsgun: native boot: the BIOS would repair this EEPROM (bad checksum); its state is not made");
+    }
     if let Some(b) = img.backup
         && b.len() == m.sys.backup.len()
     {
@@ -803,4 +831,21 @@ pub fn check(entry_state: &[u8], img: &Inputs, show: usize) -> Result<usize, Str
     println!("(not compared: sound_steps, a statistic: {} / {})", n.sound_steps, r.sound_steps);
     println!("{bad} parts differ");
     Ok(bad)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checksum_of_a_block() {
+        // a block of the layout the BIOS keeps (settings, 0xff padding): the checksum is stable and
+        // sensitive to every byte
+        let mut block = [0xFFu8; 56];
+        block[..8].copy_from_slice(&[0, 0, 0, 1, 1, 0, 1, 1]);
+        let c = settings_checksum(&block);
+        assert_ne!(c, settings_checksum(&[0xFF; 56]));
+        block[55] = 0;
+        assert_ne!(c, settings_checksum(&block));
+    }
 }
