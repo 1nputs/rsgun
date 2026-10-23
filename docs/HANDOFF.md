@@ -71,7 +71,14 @@ three times a frame, also through the RAM stubs 0x0600143e/0x06001464) and, rare
 the service table at 0x06000200-0x06000800 points into it: interrupts, SCU mask, vblank hook,
 coins, credits, continue, backup I/O) is 41 functions called, 40 of them mechanical translations.
 Next: rewrite those in bios.rs (compare mode, as the overlays), then the native boot (the handover
-state is mapped in "The native boot: the handover state", before section 6).
+state is mapped in "The native boot: the handover state", before section 6; native_boot.rs builds
+work RAM, the CPUs and the devices' registers equal to it, `--native-boot-check`). Left for the
+boot: the sound driver's state (the BIOS's commands to it), the stack residue and boot variables
+written as literals (never read: make the check ignore those ranges instead), other EEPROMs (the
+BIOS's repair path; the checksum word 0x9015), wiring it in under boot.rs (and boot.rs's state is
+the end of frame 1159, before the game is copied: the handover is mid-frame 1160), and eeprom.rs's
+write decoding (it takes a write's opcode from the data bits: the BIOS's repair path then leaves
+the EEPROM zeros; a valid EEPROM never takes that path).
 Left besides the overlays: the BIOS's services (the machine's code, not the game's), and a
 readable pass over the routines asm2sm.py generated (the slave's polygon pipeline, the VDP
 set-up). When the overlays are done, run the whole-game check again on main.
