@@ -296,8 +296,9 @@ const SR_PUSH: u8 = 20;
 /// and the others (and GBR, which the rewrite writes itself); slScrAutoDisp pushes PR first, then
 /// the others, and takes its frame by a subtraction; SGL's interrupt handlers save what they use,
 /// GBR, MACH, MACL and SR among it; SGL's routines run block by block (asm2sm.py) make their own
-/// pushes; STG05's matrix multiply pushes and pops its scratch words as it goes.
-const PROLOGUES: [(u32, &[u8], u32); 14] = [
+/// pushes; STG05's matrix multiply pushes and pops its scratch words as it goes; STG03's falling craft part (0x06093410) makes its
+/// 64 bytes of locals too far into its code for the reader.
+const PROLOGUES: [(u32, &[u8], u32); 15] = [
     (0x0606_e9fc, &[6, 7], 0),
     (0x0607_10b0, &[PR_PUSH, 9, 8], 0),
     (0x0606_e50c, &[8, PR_PUSH, 14, 13, 12, 11, 10, 9], 0),
@@ -312,6 +313,7 @@ const PROLOGUES: [(u32, &[u8], u32); 14] = [
     (0x0603_3884, &[], 0),
     (0x0603_4cb0, &[PR_PUSH], 0),
     (0x0608_da34, &[], 0),
+    (0x0609_3410, &[8, 9, 10, 11, 12, 13, 14, PR_PUSH], 64),
 ];
 
 impl Prologue {
@@ -1238,6 +1240,7 @@ pub fn register(n: &mut Natives) {
         0x0605_69f8 => aim::area_flags[s, top, bottom, left; right] -> u32,
         0x0605_6a24 => aim::off_screen[s] -> u32,
         0x0605_70d8 => aim::turn_toward[angle, speed, from, to; most, ease, accel] -> (),
+        0x0605_7194 => aim::turn_eased[angle, speed, from, to; most, ease, accel] -> (),
         0x0605_73a0 => actors::anim_step[actor] -> u32,
         0x0605_73f0 => actors::drift[actor] -> (),
         0x0605_6cc8 => parts::part_exec[part] -> (),

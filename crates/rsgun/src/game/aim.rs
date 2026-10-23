@@ -325,6 +325,27 @@ pub fn turn_toward(cpu: &mut Cpu, angle: u32, speed: u32, from: u32, to: u32, mo
     cpu.write16(angle, a as u16);
 }
 
+/// `turn_toward` without the turn's direction (0x06057194): the turning speed is eased toward the
+/// turn left (at most `most`) over `ease` as given (its sign the caller's), by at most `accel`; the
+/// angle moves by the speed but not past the turn. (STG03's leader.)
+#[allow(clippy::too_many_arguments)]
+pub fn turn_eased(cpu: &mut Cpu, angle: u32, speed: u32, from: u32, to: u32, most: u32, ease: u32, accel: u32) {
+    let (from, to) = (from & 0xffff, to & 0xffff);
+    let most = most & 0xffff;
+    let ease = ease as i16 as i32;
+    let accel = accel as i16 as i32;
+    let d = nested!(cpu, ANGLE_BETWEEN, angle_between(cpu, from, to)) as i16 as i32;
+    let left = (d.unsigned_abs() & 0xffff).min(most);
+    let target = nested!(cpu, QUOTIENT, math::quotient(cpu, left, ease as u32));
+    let s = cpu.read16(speed) as i16 as i32 as u32;
+    let s = nested!(cpu, APPROACH, super::actors::approach(cpu, s, target, accel as u32));
+    cpu.write16(speed, s as u16);
+    let a = cpu.read16(angle) as i16 as i32 as u32;
+    let s = cpu.read16(speed) as i16 as i32 as u32;
+    let a = nested!(cpu, APPROACH, super::actors::approach(cpu, a, s, left));
+    cpu.write16(angle, a as u16);
+}
+
 /// The numbered objects: the two players first.
 const PLAYER_1: u32 = 0x0607_40f0;
 const PLAYER_2: u32 = 0x0607_40f4;
