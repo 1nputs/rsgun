@@ -8781,3 +8781,1197 @@ pub fn head_fire(cpu: &mut Cpu, p: u32) {
         }
     }
 }
+
+// ---- the homing shards ---------------------------------------------------------------------------
+
+/// A homing shard's heading (+0x8c), the heading it turns toward (+0x8e), the drift (+0x80, +0x84),
+/// its speed (+0xac) and its life (+0x50).
+const HOMING_HEADING: u32 = 0x8c;
+const HOMING_TO: u32 = 0x8e;
+const HOMING_DRIFT: u32 = 0x80;
+const HOMING_SPEED: u32 = 0xac;
+const HOMING_LIFE: u32 = 0x50;
+/// The head's place the shards come out at (x, y, and z, +0xdd8) and the counters of its two
+/// fire timers (+0xde4 the shot spacing set, +0xde8 the count it is taken mod).
+const BOSS_FIRE_AT: u32 = 0xdd8;
+const BOSS_FIRE_SPACING: u32 = 0xde4;
+const BOSS_FIRE_COUNT: u32 = 0xde8;
+/// The shot period by the difficulty (a byte table in the overlay).
+const HOMING_PERIODS: u32 = 0x060a_d4c8;
+const HOMING_SCRIPT: u32 = 0x060a_d4b6;
+const HOMING_STEP: u32 = 0x0609_7898;
+const HOMING_SOUND: u32 = 92;
+const HOMING_HIT_SOUND: u32 = 12;
+/// The ring an effect that dies in the air or on a wall makes: its colour (+0x20), width and height
+/// (+0x2c, +0x2e) and speed (+0x30).
+const RING_COLOUR: u32 = 0x20;
+const RING_WIDTH: u32 = 0x2c;
+const RING_HEIGHT: u32 = 0x2e;
+const RING_SPEED: u32 = 0x30;
+/// The sign of a 16-bit angle sum, its high word as a fixed-point whole part.
+fn high_word(v: u32) -> i32 {
+    let v = v as i32;
+    (v.wrapping_add(if v < 0 { 0xffff } else { 0 }) >> 16) as i16 as i32
+}
+
+/// A homing shard's step. It ends in a ring when it is on a wall (the ground check sets flags
+/// +0x56 to 0x400), below the screen's floor (y past 0xa00000) or out of life (+0x50): a ring
+/// (sound 12) when a hit flag (0x600) is set and the mode (+3) to 0x70. Otherwise its heading
+/// (+0x8c) turns a sixteenth of the way toward the target heading (+0x8e), the drift (+0x80, +0x84)
+/// eases toward the speed (+0xac) along the heading (by the heading's sine and cosine over 16),
+/// and the place moves by it.
+pub fn homing_step(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    let (x, y) = (cpu.read32(o + 20), cpu.read32(o + 24));
+    if nested!(cpu, 0x0605_ef90, bg::map_hit(cpu, x, y)) != 0 {
+        cpu.write16(o + O_ARMS, 0x400);
+    }
+    let flags = cpu.read16(o + O_ARMS) as i16 as i32 as u32;
+    let flying = flags & 0x400 == 0
+        && cpu.read32(o + 24) as i32 <= 0x00a0_0000
+        && cpu.read32(o + HOMING_LIFE) as i32 > 0;
+    if !flying {
+        let flags = cpu.read16(o + O_ARMS) as i16 as i32 as u32;
+        if flags & 0x600 != 0 {
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, HOMING_HIT_SOUND));
+            let v = cpu.read32(o + 20);
+            cpu.write32(d, v);
+            let v = cpu.read32(o + 24);
+            cpu.write32(d + 4, v);
+            let v = cpu.read32(o + 28);
+            cpu.write32(d + 8, v);
+            cpu.write16(d + RING_COLOUR, 1);
+            cpu.write16(d + RING_WIDTH, 0x2000);
+            cpu.write16(d + RING_HEIGHT, 0xc00);
+            cpu.write32(d + RING_SPEED, 0);
+            cpu.write32(d + RING_SPEED + 4, 0);
+            cpu.write32(d + RING_SPEED + 8, 0);
+            nested!(cpu, 0x0605_9144, explosions::ring_set(cpu, d));
+        }
+        cpu.write8(o + O_MODE, 0x70);
+        return;
+    }
+    let heading = cpu.read16(o + HOMING_HEADING) as i16 as i32 as u32;
+    let to = cpu.read16(o + HOMING_TO) as i16 as i32 as u32;
+    let diff = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, heading, to)) as i32;
+    let diff = diff.wrapping_add(if diff < 0 { 15 } else { 0 }) >> 4;
+    let turned = diff.wrapping_add(cpu.read16(o + HOMING_HEADING) as i16 as i32);
+    cpu.write16(o + HOMING_HEADING, turned as u16);
+    cpu.write16(o + O_ANGLE, turned as u16);
+    let a = cpu.read16(o + HOMING_HEADING) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a)) as i32;
+    let step = (sin.wrapping_add(if sin < 0 { 15 } else { 0 }) >> 4).wrapping_abs() as u32;
+    let a = cpu.read16(o + HOMING_HEADING) as i16 as i32 as u32;
+    let speed = cpu.read32(o + HOMING_SPEED);
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let want = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, sin, speed));
+    let from = cpu.read32(o + HOMING_DRIFT);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, from, want, step));
+    cpu.write32(o + HOMING_DRIFT, v);
+    let a = cpu.read16(o + HOMING_HEADING) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a)) as i32;
+    let up = cos.wrapping_neg();
+    let step = (up.wrapping_add(if up < 0 { 15 } else { 0 }) >> 4).wrapping_abs() as u32;
+    let speed = cpu.read32(o + HOMING_SPEED);
+    let a = cpu.read16(o + HOMING_HEADING) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let want = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, cos.wrapping_neg(), speed));
+    let from = cpu.read32(o + HOMING_DRIFT + 4);
+    let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, from, want, step));
+    cpu.write32(o + HOMING_DRIFT + 4, v);
+    let x = cpu.read32(o + 20).wrapping_add(cpu.read32(o + HOMING_DRIFT));
+    cpu.write32(o + 20, x);
+    let y = cpu.read32(o + 24).wrapping_add(cpu.read32(o + HOMING_DRIFT + 4));
+    cpu.write32(o + 24, y);
+}
+
+/// A homing shard made from the head `p`'s fire place (the world point at +0xdd8 turned to the
+/// screen by SGL with its z lowered by 0xb00000 meanwhile): an object of 0xbc bytes (exec
+/// 0x0604d780, step 0x06097898, flags 0x300400, kind 17 with the lift 8, colour the base plus
+/// 16, script 0x060ad4b6, life 0x320), thrown at a random heading (below 0x2000, the target
+/// 0x1800 random less 0x8000) at speed 0x28000 with the drift its sine and cosine; a jet behind
+/// it (reach 12, size 4) and the sound 92.
+pub fn homing_make(cpu: &mut Cpu, p: u32) {
+    let d = cpu.stack();
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, HEAD_SHARD_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, HEAD_SHARD_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + O_BEHAVIOUR, HOMING_STEP);
+    let n = cpu.read8(p + O_NUMBER);
+    cpu.write8(o + O_NUMBER, n);
+    cpu.write32(o + O_FLAGS, 0x30_0400);
+    let z = cpu.read32(p + BOSS_FIRE_AT + 8).wrapping_add(0xff50_0000);
+    cpu.write32(p + BOSS_FIRE_AT + 8, z);
+    nested!(cpu, 0x0606_750c, sgl::sl_convert(cpu, p + BOSS_FIRE_AT, o + O_POSITION));
+    let z = cpu.read32(p + BOSS_FIRE_AT + 8).wrapping_add(0x00b0_0000);
+    cpu.write32(p + BOSS_FIRE_AT + 8, z);
+    cpu.write32(o + O_POSITION + 8, 0);
+    cpu.write8(o + 51, 8);
+    cpu.write8(o + O_FRAME, 17);
+    cpu.write8(o + O_KIND, 12);
+    let c = (cpu.read16(KINDS + 0xcc) as i16 as i32 as u32).wrapping_add(16);
+    cpu.write16(o + 42, c as u16);
+    cpu.write16(o + 40, c as u16);
+    cpu.write32(o + O_SCRIPT, HOMING_SCRIPT);
+    cpu.write8(o + 84, 1);
+    cpu.write32(o + HOMING_LIFE, 0x320);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x2000));
+    cpu.write16(o + HOMING_HEADING, r as u16);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1800));
+    cpu.write16(o + HOMING_TO, r.wrapping_add(0xffff_8000) as u16);
+    cpu.write32(o + HOMING_SPEED, 0x2_8000);
+    let a = cpu.read16(o + HOMING_HEADING) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    cpu.write32(o + HOMING_DRIFT, sin);
+    let a = cpu.read16(o + HOMING_HEADING) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    cpu.write32(o + HOMING_DRIFT + 4, cos.wrapping_neg());
+    cpu.write32(d + 60, o);
+    cpu.write16(d + 44, 12);
+    cpu.write16(d + 46, 4);
+    nested!(cpu, 0x0605_7fe8, explosions::jet_set(cpu, d));
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, HOMING_SOUND));
+}
+
+/// The head's homing fire: each time its count (the halfword at +0xde8) is a multiple of the
+/// difficulty's period it sets the spacing (+0xde4) to 0xe000 and makes a homing shard.
+pub fn homing_fire(cpu: &mut Cpu, boss: u32) {
+    let level = cpu.read8(DIFFICULTY_AT) as i8 as i32 as u32;
+    let period = cpu.read8(HOMING_PERIODS.wrapping_add(level)) as u32;
+    let count = cpu.read16(boss + BOSS_FIRE_COUNT) as i16 as i32 as u32;
+    if nested!(cpu, 0x0600_6a6e, math::remainder(cpu, count, period)) == 0 {
+        cpu.write32(boss + BOSS_FIRE_SPACING, 0xe000);
+        nested!(cpu, 0x0609_7a58, homing_make(cpu, boss));
+    }
+}
+
+// ---- the worm ------------------------------------------------------------------------------------
+
+/// The worm's fields: twelve links' places (x at +0x74, y at +0xa4, a long each), three byte trails
+/// of 72 (the x and y offsets of a link from its neighbour at +0xd4 and +0x11c, the turn at +0x164),
+/// the byte step of the turn (+0x26e), the halfword kind (+0x26c, 0x150 the fast one), the delay
+/// (+0x26f), the turned total (+0x270) and the speed (+0x274); the dying count (+0x6e, a halfword)
+/// and the two bytes shifted into the trails (+0x70, +0x71).
+const WORM_LINKS_X: u32 = 0x74;
+const WORM_LINKS_Y: u32 = 0xa4;
+const WORM_TRAIL_X: u32 = 0xd4;
+const WORM_TRAIL_Y: u32 = 0x11c;
+const WORM_TRAIL_TURN: u32 = 0x164;
+const WORM_TURN_STEP: u32 = 0x26e;
+const WORM_KIND: u32 = 0x26c;
+const WORM_DELAY: u32 = 0x26f;
+const WORM_TURNED: u32 = 0x270;
+const WORM_SPEED: u32 = 0x274;
+const WORM_DYING: u32 = 0x6e;
+const WORM_SHIFT_X: u32 = 0x70;
+const WORM_SHIFT_Y: u32 = 0x71;
+const WORM_TOGGLE: u32 = 108;
+const WORM_FAST: u32 = 0x150;
+const WORM_TRAIL: u32 = 72;
+const WORM_STEP: u32 = 0x0609_7e6c;
+const WORM_DRAW: u32 = 0x0609_7f74;
+const WORM_SIZE: u32 = 0x278;
+const WORM_SPARK_STEP: u32 = 0x0609_7c40;
+const WORM_SPARK_SCRIPT: u32 = 0x060a_d4ce;
+
+/// A spark of the worm's (its fields: the count of frames left, a halfword at +0x6c, which half of
+/// the frames it shows on, a byte at +0x6e): the count runs down and at the end the mode (+3) is
+/// 0x70; its flag bit 0x80000 (hidden) is set unless the game frame's bit 0 is the byte at +0x6e.
+pub fn worm_spark_step(cpu: &mut Cpu, o: u32) {
+    let left = (cpu.read16(o + 108) as i16 as i32).wrapping_sub(1);
+    cpu.write16(o + 108, left as u16);
+    if (left as i16) < 0 {
+        cpu.write8(o + O_MODE, 0x70);
+    }
+    let frame = cpu.read32(GAME_FRAMES) & 1;
+    let half = cpu.read8(o + 110) as u32;
+    let flags = cpu.read32(o + O_FLAGS);
+    let flags = if frame == half { flags | 0x8_0000 } else { flags & 0xfff7_ffff };
+    cpu.write32(o + O_FLAGS, flags);
+}
+
+/// A spark made from the description `p` (the number a byte at +30, the place x and y, the count
+/// a halfword at +44, the half a byte at +47) for the owner `owner` (kept at +0x3c): an object of
+/// 0x70 bytes (exec 0x0604d780, step 0x06097c40, flags 0x80000400, the frames' hit boxes
+/// +0x54 = 1 and +0x55 = 5).
+pub fn worm_spark_make(cpu: &mut Cpu, p: u32, owner: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 0x70)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, HEAD_SHARD_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    cpu.write32(o + O_BEHAVIOUR, WORM_SPARK_STEP);
+    cpu.write32(o + O_FLAGS, 0x8000_0400);
+    let n = cpu.read8(p + 30);
+    cpu.write8(o + O_NUMBER, n);
+    let x = cpu.read32(p);
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(p + 4);
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    cpu.write32(o + O_SCRIPT, owner);
+    cpu.write8(o + 84, 1);
+    cpu.write8(o + 85, 5);
+    let count = cpu.read16(p + 44);
+    cpu.write16(o + 108, count);
+    let half = cpu.read8(p + 47);
+    cpu.write8(o + 110, half);
+}
+
+/// The worm's move: while its delay (+0x26f) counts down nothing, then (until the turned total
+/// +0x270 passes 0x7fff) its turn (+0x30) goes by the kind (+0x26c) times the step (+0x26e) and the
+/// total by the kind; past it the turn is 0x8000. The speed (+0x274) eases to 0x28000 by 0x4000
+/// and the place moves along the turn (x by the sine, y by minus the cosine, times the speed),
+/// the bytes +0x70 and +0x71 the whole steps moved.
+pub fn worm_move(cpu: &mut Cpu, o: u32) {
+    let delay = cpu.read8(o + WORM_DELAY);
+    if delay as i8 != 0 {
+        cpu.write8(o + WORM_DELAY, delay.wrapping_sub(1));
+    } else if cpu.read32(o + WORM_TURNED) as i32 > 0x7fff {
+        cpu.write16(o + O_ANGLE, 0x8000);
+    } else {
+        let step = cpu.read8(o + WORM_TURN_STEP) as i8 as i32 as u32;
+        let kind = cpu.read16(o + WORM_KIND) as u32;
+        let turn = (cpu.read16(o + O_ANGLE) as i16 as i32 as u32).wrapping_add(kind.wrapping_mul(step));
+        cpu.write16(o + O_ANGLE, turn as u16);
+        let kind = cpu.read16(o + WORM_KIND) as u32;
+        let total = cpu.read32(o + WORM_TURNED).wrapping_add(kind);
+        cpu.write32(o + WORM_TURNED, total);
+    }
+    let speed = cpu.read32(o + WORM_SPEED);
+    let speed = nested!(cpu, 0x0604_6168, actors::approach(cpu, speed, 0x2_8000, 0x4000));
+    cpu.write32(o + WORM_SPEED, speed);
+    let old_x = cpu.read32(o + 20);
+    let a = cpu.read16(o + O_ANGLE) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let dx = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, sin, speed));
+    let x = cpu.read32(o + 20).wrapping_add(dx);
+    cpu.write32(o + 20, x);
+    cpu.write8(o + WORM_SHIFT_X, (high_word(x) - high_word(old_x)) as u8);
+    let old_y = cpu.read32(o + 24);
+    let speed = cpu.read32(o + WORM_SPEED).wrapping_neg();
+    let a = cpu.read16(o + O_ANGLE) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let dy = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, cos, speed));
+    let y = cpu.read32(o + 24).wrapping_add(dy);
+    cpu.write32(o + 24, y);
+    cpu.write8(o + WORM_SHIFT_Y, (high_word(y) - high_word(old_y)) as u8);
+}
+
+/// The worm's step. Dying (the count +0x6e running): the count goes up and past 71 the mode (+3)
+/// is 0x70. Else below the floor (y past 0xa00000) the count starts at 1 and the shifts are 0;
+/// else it moves (`worm_move`) and every eighth game frame leaves a spark (the toggle +0x6c
+/// flipped, the description holding the number, the place, the count 48 and the toggle) at its
+/// place. Then the three trails take the shifts (+0x70, +0x71) and the turn over 256 as their
+/// newest byte, unless it was just done.
+pub fn worm_step(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    let dying = cpu.read16(o + WORM_DYING) as i16 as i32 as u32;
+    if dying as u16 != 0 {
+        let n = dying.wrapping_add(1);
+        cpu.write16(o + WORM_DYING, n as u16);
+        if n as u16 > 71 {
+            cpu.write8(o + O_MODE, 0x70);
+            return;
+        }
+    } else if cpu.read32(o + 24) as i32 > 0xa0_0000 {
+        cpu.write16(o + WORM_DYING, 1);
+        cpu.write8(o + WORM_SHIFT_X, 0);
+        cpu.write8(o + WORM_SHIFT_Y, 0);
+    } else {
+        nested!(cpu, 0x0609_7d38, worm_move(cpu, o));
+        if cpu.read32(GAME_FRAMES) & 7 == 0 {
+            let n = cpu.read8(o + O_NUMBER);
+            cpu.write8(d + 30, n);
+            let v = cpu.read32(o + 20);
+            cpu.write32(d, v);
+            let v = cpu.read32(o + 24);
+            cpu.write32(d + 4, v);
+            cpu.write16(d + 44, 48);
+            let toggle = cpu.read8(o + WORM_TOGGLE);
+            cpu.write16(d + 46, toggle as u16);
+            cpu.write8(o + WORM_TOGGLE, toggle ^ 1);
+            nested!(cpu, 0x0609_7c90, worm_spark_make(cpu, d, WORM_SPARK_SCRIPT));
+        }
+    }
+    let sx = cpu.read8(o + WORM_SHIFT_X) as i8 as i32 as u32;
+    nested!(cpu, 0x0605_62b4, actors::shift_in_bytes(cpu, o + WORM_TRAIL_X, sx, WORM_TRAIL));
+    let sy = cpu.read8(o + WORM_SHIFT_Y) as i8 as i32 as u32;
+    nested!(cpu, 0x0605_62b4, actors::shift_in_bytes(cpu, o + WORM_TRAIL_Y, sy, WORM_TRAIL));
+    let turn = cpu.read16(o + O_ANGLE) as i16 as i32 as u32;
+    let turn = turn.wrapping_add(if (turn as i32) < 0 { 0xff } else { 0 });
+    shift_8(cpu, turn);
+    let r4 = cpu.reg(4);
+    nested!(cpu, 0x0605_62b4, actors::shift_in_bytes(cpu, o + WORM_TRAIL_TURN, r4 as i8 as i32 as u32, WORM_TRAIL));
+}
+
+/// The worm's draw (its sprite `s`, the object 16 before it): the frame flags (+0x6e of the
+/// object) cleared of bit 1 and set again from bit 0; the twelve links' places advanced by the
+/// trails (a byte's whole step in the high word, unless the game is paused) and drawn, each a
+/// sprite at the link with the turn's byte times 256; the head link (the first, flags +0x20)
+/// and tail (the last) in their own colours.
+pub fn worm_draw(cpu: &mut Cpu, s: u32) {
+    let d = cpu.stack();
+    let o = s.wrapping_sub(0x10);
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, d));
+    cpu.write8(d + 30, 0);
+    let loops = cpu.read32(LOOPS);
+    cpu.write32(d + 16, ((loops & 3) << 12).wrapping_add(0x2_0000));
+    cpu.write32(d + 12, 0);
+    let fast = cpu.read16(o + WORM_KIND) == WORM_FAST as u16;
+    let colour = if fast && cpu.read16(o + O_ANGLE) as i16 != 0 { 0xb8 } else { 8 };
+    cpu.write8(d + 35, colour);
+    let base = cpu.read16(CHAR_BASE) as i16 as i32 as u32;
+    let odd = cpu.read32(LOOPS) & 1 != 0;
+    cpu.write16(d + 24, base.wrapping_add(if odd { 32 } else { 48 }) as u16);
+    if cpu.read32(GAME_FLAGS) & 0x8000_0000 == 0 {
+        for i in 0..12u32 {
+            let b = (cpu.read8(o + WORM_TRAIL_X + 5 * i) as i8 as i32 as u32) << 16;
+            let v = cpu.read32(o + WORM_LINKS_X + 4 * i).wrapping_add(b);
+            cpu.write32(o + WORM_LINKS_X + 4 * i, v);
+            let b = (cpu.read8(o + WORM_TRAIL_Y + 5 * i) as i8 as i32 as u32) << 16;
+            let v = cpu.read32(o + WORM_LINKS_Y + 4 * i).wrapping_add(b);
+            cpu.write32(o + WORM_LINKS_Y + 4 * i, v);
+        }
+    }
+    for i in 0..12u32 {
+        let v = cpu.read32(o + WORM_LINKS_X + 4 * i);
+        cpu.write32(d + 4, v);
+        let v = cpu.read32(o + WORM_LINKS_Y + 4 * i);
+        cpu.write32(d + 8, v);
+        let turn = (cpu.read8(o + WORM_TRAIL_TURN + 5 * i) as i8 as i32 as u32) << 8;
+        cpu.write16(d + 32, turn as u16);
+        let eyes = if cpu.read32(LOOPS) & 1 == 0 { 0xb4 } else { 0xb3 };
+        if i == 0 {
+            cpu.write32(d + 20, 0xc000);
+            let v = cpu.read32(d) | 0x20;
+            cpu.write32(d, v);
+            cpu.write8(d + 31, eyes);
+        } else if i == 11 {
+            cpu.write32(d + 20, 0xc000);
+            let v = cpu.read32(d) & 0xffff_ffdf;
+            cpu.write32(d, v);
+            cpu.write8(d + 31, eyes);
+        } else {
+            cpu.write8(d + 31, 0xaf);
+            cpu.write32(d + 20, 0x1_4000);
+        }
+        nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+    }
+}
+
+/// A worm made from `p` (its number copied): an object of 0x278 bytes (exec 0x0604d780, step
+/// 0x06097e6c, draw 0x06097f74, flags 0xc80400, colour the base plus 48), at x 0 and y 0x80000,
+/// the turn step `step` (a byte, +0x26e) and the kind `kind` (+0x26c; the delay 28 for the fast
+/// kind 0x150, else 48), the speed 0x8000, its three trails cleared (72 bytes each, the turn's
+/// from the turn over 256) and the twelve links all at the place.
+pub fn worm_make(cpu: &mut Cpu, p: u32, step: u32, kind: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, WORM_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, HEAD_SHARD_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    cpu.write32(o + O_BEHAVIOUR, WORM_STEP);
+    let n = cpu.read8(p + O_NUMBER);
+    cpu.write8(o + O_NUMBER, n);
+    cpu.write32(o + O_FLAGS, 0xc8_0400);
+    cpu.write32(o + O_DRAW, WORM_DRAW);
+    let c = (cpu.read16(CHAR_BASE) as i16 as i32 as u32).wrapping_add(48);
+    cpu.write16(o + 42, c as u16);
+    cpu.write32(o + 20, 0);
+    cpu.write32(o + 24, 0x8_0000);
+    cpu.write32(o + 28, 0);
+    cpu.write16(o + WORM_DYING, 0);
+    cpu.write8(o + WORM_TOGGLE, 0);
+    cpu.write8(o + WORM_TURN_STEP, step as u8);
+    cpu.write32(o + WORM_TURNED, 0);
+    cpu.write32(o + WORM_SPEED, 0x8000);
+    cpu.write8(o + WORM_SHIFT_X, 0);
+    cpu.write8(o + WORM_SHIFT_Y, 0);
+    nested!(cpu, 0x0605_6294, actors::fill_bytes(cpu, o + WORM_TRAIL_X, 0, WORM_TRAIL));
+    nested!(cpu, 0x0605_6294, actors::fill_bytes(cpu, o + WORM_TRAIL_Y, 0, WORM_TRAIL));
+    let turn = cpu.read16(o + O_ANGLE) as i16 as i32 as u32;
+    let turn = turn.wrapping_add(if (turn as i32) < 0 { 0xff } else { 0 });
+    shift_8(cpu, turn);
+    let r4 = cpu.reg(4);
+    nested!(cpu, 0x0605_6294, actors::fill_bytes(cpu, o + WORM_TRAIL_TURN, r4 as i8 as i32 as u32, WORM_TRAIL));
+    for i in 0..12u32 {
+        let x = cpu.read32(o + 20);
+        cpu.write32(o + WORM_LINKS_X + 4 * i, x);
+        let y = cpu.read32(o + 24);
+        cpu.write32(o + WORM_LINKS_Y + 4 * i, y);
+    }
+    cpu.write16(o + WORM_KIND, kind as u16);
+    cpu.write8(o + WORM_DELAY, if kind as u16 == WORM_FAST as u16 { 28 } else { 48 });
+}
+
+// ---- the scatter, the orbiters, the fans and the rocks ---------------------------------------------
+
+/// The scatter shots' fields: the count (+0x8c), the drift speeds (+0x8e, +0x90), the drift
+/// (+0x80, +0x84), the frame counter (+0x88); the ring counter in the head (+0xdea, a byte) and
+/// the base of the sixty degree steps.
+const SCATTER_COUNT: u32 = 0x8c;
+const SCATTER_SPEED: u32 = 0x8e;
+const SCATTER_DRIFT: u32 = 0x80;
+const SCATTER_FRAME: u32 = 0x88;
+const SCATTER_STEP: u32 = 0x0609_8340;
+const SCATTER_SCRIPT: u32 = 0x060a_d4d6;
+const SCATTER_MAKE: u32 = 0x0609_8414;
+const BOSS_RING_COUNT: u32 = 0xdea;
+const BOSS_RING_SOUND: u32 = 94;
+
+/// The head's scatter: six bullets (`bullet_set`) from the head's middle (`head_centre`, into
+/// the stack at +0xb0), the angle toward the target (`angle_to_target`, 30 frames ahead) in the
+/// description at +44, the speed 0x18000, and the extra turn (+54) going up by 60 degrees a bullet;
+/// then a spark.
+pub fn scatter_fire(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    let centre = d + 0xb0;
+    nested!(cpu, 0x0609_731c, head_centre(cpu, o, centre));
+    let n = cpu.read8(o + O_NUMBER);
+    cpu.write8(d + 30, n);
+    cpu.write32(d + 8, 0);
+    let aim = d + 64;
+    let v = cpu.read32(centre);
+    cpu.write32(aim + 20, v);
+    let v = cpu.read32(centre + 4);
+    cpu.write32(aim + 24, v);
+    let angle = nested!(cpu, 0x0605_6ad4, aim::angle_to_target(cpu, aim, 30));
+    cpu.write16(d + 44, angle as u16);
+    cpu.write16(d + 46, 1);
+    cpu.write32(d + 48, 0x1_8000);
+    cpu.write16(d + 54, 0);
+    cpu.write16(d + 56, 0xfe00);
+    cpu.write16(d + 58, 16);
+    for _ in 0..6 {
+        let v = cpu.read32(centre);
+        cpu.write32(d, v);
+        let v = cpu.read32(centre + 4);
+        cpu.write32(d + 4, v);
+        nested!(cpu, 0x0605_3db0, bullets::bullet_set(cpu, d));
+        let a = cpu.read16(d + 54).wrapping_add(0x2aaa);
+        cpu.write16(d + 54, a);
+    }
+    nested!(cpu, 0x0609_7644, head_spark_make(cpu, d));
+}
+
+/// A scatter shot's step: as the head's shard (`head_shard_step`) but the bullet check is the
+/// one that turns it back (`bullet_ends` 1), the count (+0x8c) runs down while it adds the speeds
+/// (+0x8e, +0x90) to the drift, and its frame (the sprite's byte +0x2f) is 91 plus the counter
+/// (+0x88) over 4 mod 3.
+pub fn scatter_step(cpu: &mut Cpu, o: u32) {
+    let ended = nested!(cpu, 0x0605_3b10, bullets::bullet_ends(cpu, o, 1)) as u8;
+    if ended != 0 {
+        return;
+    }
+    let count = cpu.read16(o + SCATTER_COUNT) as i16 as i32;
+    if count > 0 {
+        cpu.write16(o + SCATTER_COUNT, (count - 1) as u16);
+        let v = cpu.read32(o + SCATTER_DRIFT).wrapping_add(cpu.read16(o + SCATTER_SPEED) as i16 as i32 as u32);
+        cpu.write32(o + SCATTER_DRIFT, v);
+        let v = cpu.read32(o + SCATTER_DRIFT + 4).wrapping_add(cpu.read16(o + SCATTER_SPEED + 2) as i16 as i32 as u32);
+        cpu.write32(o + SCATTER_DRIFT + 4, v);
+    }
+    let x = cpu.read32(o + 20).wrapping_add(cpu.read32(o + SCATTER_DRIFT));
+    cpu.write32(o + 20, x);
+    let y = cpu.read32(o + 24).wrapping_add(cpu.read32(o + SCATTER_DRIFT + 4));
+    cpu.write32(o + 24, y);
+    let a = cpu.read32(o + 32);
+    let a = nested!(cpu, 0x0604_6168, actors::approach(cpu, a, 0x1_0000, 0x1800));
+    cpu.write32(o + 32, a);
+    let b = cpu.read32(o + 36);
+    let b = nested!(cpu, 0x0604_6168, actors::approach(cpu, b, 0x1_0000, 0x1800));
+    cpu.write32(o + 36, b);
+    let k = cpu.read8(o + SCATTER_FRAME) as i8 as i32;
+    let k = (k.wrapping_add(if k < 0 { 3 } else { 0 }) >> 2) as i8 as i32 as u32;
+    let r = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, k, 3));
+    cpu.write8(o + O_FRAME, r.wrapping_add(91) as u8);
+    let n = cpu.read8(o + SCATTER_FRAME).wrapping_add(1);
+    cpu.write8(o + SCATTER_FRAME, n);
+}
+
+/// A scatter shot made at the place `p` (x, y; its number a byte at +30) heading `angle`: an
+/// object of 0xbc bytes (exec 0x0604d780, step 0x06098340, flags 0x400, sprite kind 0 and
+/// frame 91 with the lift 8, colour the base plus 0x90, script 0x060ad4d6), the count 18, the
+/// drift speeds the heading's sine and minus the cosine over 8, scales 0x18000 and 0x2000.
+pub fn scatter_make(cpu: &mut Cpu, p: u32, angle: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, HEAD_SHARD_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, HEAD_SHARD_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    let n = cpu.read8(p + 30);
+    cpu.write8(o + O_NUMBER, n);
+    cpu.write32(o + O_BEHAVIOUR, SCATTER_STEP);
+    cpu.write32(o + O_FLAGS, 0x400);
+    let x = cpu.read32(p);
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(p + 4);
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    cpu.write8(o + 51, 8);
+    cpu.write8(o + O_FRAME, 91);
+    cpu.write8(o + O_KIND, 0);
+    let c = (cpu.read16(CHAR_BASE) as i16 as i32 as u32).wrapping_add(0x90);
+    cpu.write16(o + 42, c as u16);
+    cpu.write16(o + 40, c as u16);
+    cpu.write32(o + O_SCRIPT, SCATTER_SCRIPT);
+    cpu.write8(o + 84, 1);
+    cpu.write8(o + 85, 5);
+    cpu.write16(o + O_ANGLE, angle as u16);
+    cpu.write16(o + SCATTER_COUNT, 18);
+    let a = cpu.read16(o + O_ANGLE) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let v = nested!(cpu, 0x0600_6a78, math::quotient(cpu, sin, 8));
+    cpu.write16(o + SCATTER_SPEED, v as u16);
+    let a = cpu.read16(o + O_ANGLE) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let v = nested!(cpu, 0x0600_6a78, math::quotient(cpu, cos.wrapping_neg(), 8));
+    cpu.write16(o + SCATTER_SPEED + 2, v as u16);
+    cpu.write32(o + 32, 0x1_8000);
+    cpu.write32(o + 36, 0x2000);
+}
+
+/// A ring of scatter shots from the description `d` (the number at +30), the place already in it;
+/// the head's counter (+0xdea) goes up and the shots go out at the head's turn (+0x30) plus the
+/// offsets of the even set when the counter is even, else the odd.
+fn scatter_ring(cpu: &mut Cpu, o: u32, d: u32, even: &[u32], odd: &[u32]) {
+    let n = cpu.read8(o + BOSS_RING_COUNT).wrapping_add(1);
+    cpu.write8(o + BOSS_RING_COUNT, n);
+    let set = if n & 1 == 0 { even } else { odd };
+    for &k in set {
+        let turn = (cpu.read16(o + O_ANGLE) as i16 as i32 as u32).wrapping_add(k) & 0xffff;
+        nested!(cpu, SCATTER_MAKE, scatter_make(cpu, d, turn));
+    }
+}
+
+/// The scatter ring at the head's middle (`head_centre`, number from the head), the sound 94.
+pub fn scatter_centre(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    nested!(cpu, 0x0609_731c, head_centre(cpu, o, d));
+    let n = cpu.read8(o + O_NUMBER);
+    cpu.write8(d + 30, n);
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, BOSS_RING_SOUND));
+    scatter_ring(cpu, o, d, &[0x6000, 0x7000, 0x8000, 0x9000, 0xa000], &[0x6800, 0x7800, 0x8800, 0x9800]);
+}
+
+/// The scatter ring at the head's fire place (+0xdd8, +0xddc), the sound 94, the spacing
+/// (+0xde4) 0xa000.
+pub fn scatter_boss(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    let x = cpu.read32(o + BOSS_FIRE_AT);
+    cpu.write32(d, x);
+    let y = cpu.read32(o + BOSS_FIRE_AT + 4);
+    cpu.write32(d + 4, y);
+    let n = cpu.read8(o + O_NUMBER);
+    cpu.write8(d + 30, n);
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, BOSS_RING_SOUND));
+    scatter_ring(cpu, o, d, &[0xe000, 0xf000, 0, 0x1000, 0x2000], &[0xe800, 0xf800, 0x0800, 0x1800]);
+    cpu.write32(o + BOSS_FIRE_SPACING, 0xa000);
+}
+
+/// An orbiter's fields: the owner (+0x6c), its angle around the owner (+0x8a), the spin it turns
+/// by a step (a byte, +0x88), the distance (+0xac), the distance it eases to (+0xb4) and the
+/// radial speed (+0xb0).
+const ORBIT_OWNER: u32 = 108;
+const ORBIT_SPIN: u32 = 0x88;
+const ORBIT_ANGLE: u32 = 0x8a;
+const ORBIT_DIST: u32 = 0xac;
+const ORBIT_SPEED: u32 = 0xb0;
+const ORBIT_TO: u32 = 0xb4;
+const ORBIT_STEP: u32 = 0x0609_8708;
+const ORBIT_DRAW: u32 = 0x0609_8948;
+const ORBIT_SPEEDS: u32 = 0x060a_d520;
+const ORBIT_SCRIPTS: [u32; 2] = [0x060a_d4de, 0x060a_d4fe];
+const ORBIT_CHAR: u32 = KINDS + 0x45c;
+const ORBIT_SOUND: u32 = 17;
+const ORBIT_EFFECT: u32 = 0x0607_3044;
+
+/// An orbiter's step. It ends when its owner (+0x6c) is past mode 111; or on a hit (0x400) or out of
+/// life (+0x50): the sound 17 and an effect (drift_effect, the place, its turn, scale 2). Else once
+/// its distance is within 4 of the one it eases to it turns toward the owner's side (the spin
+/// times a difficulty's factor taken from the turn target +0x8a, the heading by a sixteenth of the
+/// difference toward the turn plus or minus a quarter); then it sits at the owner's place plus its
+/// distance along the angle (+0x8a), the distance easing to its aim by a share of the difference.
+/// Its script alternates with the game frame, the hit flag 0x200 sets bit 0 of +0x7e, and every
+/// fourth frame its frame (+0x2f) steps from 11 to 14 and back.
+pub fn orbit_step(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    let owner = cpu.read32(o + ORBIT_OWNER);
+    if cpu.read8(owner + O_MODE) as i8 > 111 {
+        cpu.write8(o + O_MODE, 0x70);
+        return;
+    }
+    let flags = cpu.read16(o + O_ARMS) as i16 as i32 as u32;
+    if flags & 0x400 != 0 || cpu.read32(o + 80) as i32 <= 0 {
+        cpu.write8(o + O_MODE, 0x70);
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, ORBIT_SOUND));
+        cpu.write32(d + 60, ORBIT_EFFECT);
+        cpu.write16(d + 32, 0x90);
+        let v = cpu.read32(o + 20);
+        cpu.write32(d, v);
+        let v = cpu.read32(o + 24);
+        cpu.write32(d + 4, v);
+        let v = cpu.read32(o + 28);
+        cpu.write32(d + 8, v);
+        let turn = cpu.read16(o + O_ANGLE);
+        cpu.write16(d + 24, turn);
+        cpu.write32(d + 20, 0x2_0000);
+        cpu.write32(d + 12, 0xa000);
+        cpu.write32(d + 16, 0xe000);
+        nested!(cpu, 0x0605_7454, actors::drift_effect(cpu, d));
+        return;
+    }
+    if cpu.read32(o + ORBIT_DIST) as i32 >= cpu.read32(o + ORBIT_TO).wrapping_add(0xfffc_0000) as i32 {
+        let level = cpu.read8(DIFFICULTY_AT) as i8 as i32 as u32;
+        let factor = cpu.read8(ORBIT_SPEEDS.wrapping_add(level)) as u32;
+        let spin = cpu.read8(o + ORBIT_SPIN) as i8 as i32 as u32;
+        let angle = (cpu.read16(o + ORBIT_ANGLE) as i16 as i32 as u32).wrapping_sub(factor.wrapping_mul(spin));
+        cpu.write16(o + ORBIT_ANGLE, angle as u16);
+        let side = if cpu.read8(o + ORBIT_SPIN) as i8 > 0 { 0x4000 } else { 0xffff_c000 };
+        let heading = (cpu.read16(o + O_ANGLE) as i16 as i32 as u32).wrapping_add(side);
+        let at = cpu.read16(o + ORBIT_ANGLE) as i16 as i32 as u32;
+        let diff = nested!(cpu, 0x0604_6194, camera::angle_diff(cpu, heading, at)) as i32;
+        let diff = diff.wrapping_add(if diff < 0 { 15 } else { 0 }) >> 4;
+        let turn = diff.wrapping_add(cpu.read16(o + O_ANGLE) as i16 as i32);
+        cpu.write16(o + O_ANGLE, turn as u16);
+    }
+    let dist = cpu.read32(o + ORBIT_DIST);
+    let a = cpu.read16(o + ORBIT_ANGLE) as i16 as i32 as u32;
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let v = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, sin, dist));
+    let x = cpu.read32(owner + 20).wrapping_add(v);
+    cpu.write32(o + 20, x);
+    let dist = cpu.read32(o + ORBIT_DIST).wrapping_neg();
+    let a = cpu.read16(o + ORBIT_ANGLE) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let v = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, cos, dist));
+    let y = cpu.read32(owner + 24).wrapping_add(v);
+    cpu.write32(o + 24, y);
+    let gap = cpu.read32(o + ORBIT_DIST).wrapping_sub(cpu.read32(o + ORBIT_TO));
+    let step = nested!(cpu, 0x0600_6a78, math::quotient(cpu, gap, 0x100)) as i32;
+    let step = step.wrapping_abs() as u32;
+    let want = nested!(cpu, 0x0600_6a78, math::quotient(cpu, gap.wrapping_neg(), 16));
+    let from = cpu.read32(o + ORBIT_SPEED);
+    let speed = nested!(cpu, 0x0604_6168, actors::approach(cpu, from, want, step));
+    cpu.write32(o + ORBIT_SPEED, speed);
+    let dist = cpu.read32(o + ORBIT_DIST).wrapping_add(speed);
+    cpu.write32(o + ORBIT_DIST, dist);
+    let script = ORBIT_SCRIPTS[(cpu.read32(GAME_FRAMES) & 1 == 0) as usize];
+    cpu.write32(o + O_SCRIPT, script);
+    if cpu.read16(o + O_ARMS) as i16 as i32 as u32 & 0x200 != 0 {
+        let f = cpu.read16(o + 126) as i16 as i32 as u32;
+        cpu.write16(o + 126, (f | 1) as u16);
+    }
+    if cpu.read32(GAME_FRAMES) & 3 == 0 {
+        let f = cpu.read8(o + O_FRAME).wrapping_add(1);
+        cpu.write8(o + O_FRAME, f);
+        if f > 13 {
+            cpu.write8(o + O_FRAME, 11);
+        }
+    }
+}
+
+/// An orbiter's draw (its sprite `s`): the frame flags (+0x7e of the object) cleared of bit 1
+/// and set again from bit 0; the sprite copied to a description (place, the sprite's bytes +31,
+/// +30 and +35, the halfword +32), its halfword +24 the colour base plus 0xe0 when the flag bit
+/// 0 is set, else the sprite's; drawn; then a flame at a random turn (a random 0x100 flag, the
+/// frame 0x70 plus the frame counter mod 3, spread 0x7000 plus a random 0x1000, size 0x15800)
+/// 16 times the unit vector of the turn (less 0x8000) from the object's place, in the colour
+/// base plus 48.
+pub fn orbit_draw(cpu: &mut Cpu, s: u32) {
+    let d = cpu.stack();
+    let o = s.wrapping_sub(0x10);
+    let flags = s + 110;
+    let f = cpu.read16(flags) as i16 as i32 as u32;
+    if f & 2 != 0 {
+        cpu.write16(flags, (f & 0xffff_fffc) as u16);
+    }
+    let f = cpu.read16(flags) as i16 as i32 as u32;
+    if f & 1 != 0 {
+        cpu.write16(flags, (f | 2) as u16);
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, d));
+    let v = cpu.read32(o + 20);
+    cpu.write32(d + 4, v);
+    let v = cpu.read32(o + 24);
+    cpu.write32(d + 8, v);
+    let v = cpu.read32(o + 28);
+    cpu.write32(d + 12, v);
+    let v = cpu.read8(s + 31);
+    cpu.write8(d + 31, v);
+    let v = cpu.read8(s + 30);
+    cpu.write8(d + 30, v);
+    let v = cpu.read8(s + 35);
+    cpu.write8(d + 35, v);
+    let v = cpu.read16(s + 32);
+    cpu.write16(d + 32, v);
+    if cpu.read16(flags) & 1 != 0 {
+        let c = (cpu.read16(CHAR_BASE) as i16 as i32 as u32).wrapping_add(0xe0);
+        cpu.write16(d + 24, c as u16);
+    } else {
+        let v = cpu.read16(s + 24);
+        cpu.write16(d + 24, v);
+    }
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    cpu.write32(d, r & 0x100);
+    let loops = cpu.read32(LOOPS);
+    let r = nested!(cpu, 0x0600_6a6e, math::remainder(cpu, loops, 3));
+    cpu.write8(d + 31, r.wrapping_add(0x70) as u8);
+    cpu.write8(d + 30, 0);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1000));
+    cpu.write32(d + 16, r.wrapping_add(0x7000));
+    cpu.write32(d + 20, 0x1_5800);
+    let turn = cpu.read16(d + 32).wrapping_add(0x8000);
+    cpu.write16(d + 32, turn);
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, turn as i16 as i32 as u32));
+    let x = cpu.read32(o + 20).wrapping_add(sin << 4);
+    cpu.write32(d + 4, x);
+    let turn = cpu.read16(d + 32) as i16 as i32 as u32;
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, turn));
+    let y = cpu.read32(o + 24).wrapping_sub(cos << 4);
+    cpu.write32(d + 8, y);
+    let c = (cpu.read16(CHAR_BASE) as i16 as i32 as u32).wrapping_add(48);
+    cpu.write16(d + 24, c as u16);
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+}
+
+/// An orbiter made around the owner `p` at the angle `angle`, the distance `dist` and the spin
+/// `spin` (a byte): an object of 0xbc bytes (exec 0x0604d780, step 0x06098708, draw 0x06098948,
+/// flags 0xf00400, kind 69 with the frame 11 and the lift 7, colour the kind table's +0x45c,
+/// script 0x060ad4de, life 10000) at the owner's place; the owner kept at +0x6c.
+pub fn orbit_make(cpu: &mut Cpu, p: u32, angle: u32, dist: u32, spin: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, HEAD_SHARD_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, HEAD_SHARD_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    nested!(cpu, 0x0605_681c, actors::enemy_clear(cpu, o));
+    cpu.write32(o + O_BEHAVIOUR, ORBIT_STEP);
+    let n = cpu.read8(p + O_NUMBER);
+    cpu.write8(o + O_NUMBER, n);
+    cpu.write32(o + O_FLAGS, 0xf0_0400);
+    cpu.write32(o + O_DRAW, ORBIT_DRAW);
+    let x = cpu.read32(p + 20);
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(p + 24);
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    cpu.write8(o + 51, 7);
+    cpu.write8(o + O_FRAME, 11);
+    cpu.write8(o + O_KIND, 69);
+    let c = cpu.read16(ORBIT_CHAR);
+    cpu.write16(o + 42, c);
+    cpu.write16(o + 40, c);
+    cpu.write32(o + O_SCRIPT, ORBIT_SCRIPTS[0]);
+    cpu.write8(o + 84, 1);
+    cpu.write32(o + 80, 10000);
+    cpu.write16(o + O_ANGLE, angle as u16);
+    cpu.write16(o + ORBIT_ANGLE, angle as u16);
+    cpu.write32(o + ORBIT_OWNER, p);
+    cpu.write8(o + ORBIT_SPIN, spin as u8);
+    cpu.write32(o + ORBIT_TO, dist);
+}
+
+/// A fan's fields: its radius (+0x6c, a long; negative until it is told to), the head it spreads
+/// from (+0x70).
+const SPREAD_RADIUS: u32 = 108;
+const SPREAD_HEAD: u32 = 112;
+const SPREAD_STEP: u32 = 0x0609_8bac;
+const ORBIT_MAKE: u32 = 0x0609_8aa0;
+const SPREAD_COUNTS: u32 = 0x060a_d528;
+const SPREAD_SOUND: u32 = 95;
+
+/// A fan's step. With a radius it goes out along its turn (the sine and cosine times the radius
+/// added to the place, as `orbit_step` does) while the radius eases to 0xc000 by 0x1000; with a
+/// negative one it sits at the head's middle (`head_centre`) and the radius eases to 0 by 0x300.
+/// Past |x| 0xf80000 or |y| 0xc00000 the mode (+3) is 0x70.
+pub fn fan_step(cpu: &mut Cpu, o: u32) {
+    let radius = cpu.read32(o + SPREAD_RADIUS);
+    let next = if radius as i32 >= 0 {
+        let a = cpu.read16(o + O_ANGLE) as i16 as i32 as u32;
+        let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+        let v = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, sin, radius));
+        let x = cpu.read32(o + 20).wrapping_add(v);
+        cpu.write32(o + 20, x);
+        let radius = cpu.read32(o + SPREAD_RADIUS);
+        let a = cpu.read16(o + O_ANGLE) as i16 as i32 as u32;
+        let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+        let v = nested!(cpu, 0x0600_6a58, math::fixed_mul(cpu, cos, radius));
+        let y = cpu.read32(o + 24).wrapping_sub(v);
+        cpu.write32(o + 24, y);
+        let from = cpu.read32(o + SPREAD_RADIUS);
+        nested!(cpu, 0x0604_6168, actors::approach(cpu, from, 0xc000, 0x1000))
+    } else {
+        let head = cpu.read32(o + SPREAD_HEAD);
+        nested!(cpu, 0x0609_731c, head_centre(cpu, head, o + 20));
+        let from = cpu.read32(o + SPREAD_RADIUS);
+        nested!(cpu, 0x0604_6168, actors::approach(cpu, from, 0, 0x300))
+    };
+    cpu.write32(o + SPREAD_RADIUS, next);
+    let x = cpu.read32(o + 20) as i32;
+    let y = cpu.read32(o + 24) as i32;
+    if x.wrapping_abs() > 0xf8_0000 || y.wrapping_abs() > 0xc0_0000 {
+        cpu.write8(o + O_MODE, 0x70);
+    }
+}
+
+/// A fan made at the head `p` with the spin `spin` (a byte): an object of 0x74 bytes (exec
+/// 0x0604d780, step 0x06098bac, flags 0x80080400) at the head's middle, its turn the angle toward
+/// the target, the radius -0x10000; and orbiters made around it (`orbit_make`) by a draw of four:
+/// as many as the difficulty's count (0x060ad528) at steps of 0x2000 and the distance 0x380000;
+/// four at 0x4000 steps, 0x300000 and twice the spin; six at fixed angles, 0x380000; or three at
+/// 0x5555 steps, 0x200000 and three times the spin. The sound 95 at the end.
+pub fn fan_make(cpu: &mut Cpu, p: u32, spin: u32) {
+    let spin = spin as i8 as i32 as u32;
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, 0x74)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, HEAD_SHARD_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    cpu.write32(o + O_BEHAVIOUR, SPREAD_STEP);
+    let n = cpu.read8(p + O_NUMBER);
+    cpu.write8(o + O_NUMBER, n);
+    cpu.write32(o + O_FLAGS, 0x8008_0400);
+    cpu.write32(o + SPREAD_HEAD, p);
+    nested!(cpu, 0x0609_731c, head_centre(cpu, p, o + 20));
+    cpu.write32(o + 28, 0);
+    let a = nested!(cpu, 0x0605_6ad4, aim::angle_to_target(cpu, o, 30));
+    cpu.write16(o + O_ANGLE, a as u16);
+    cpu.write32(o + SPREAD_RADIUS, 0xffff_0000);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+    match r & 3 {
+        0 => {
+            let level = cpu.read8(DIFFICULTY_AT) as i8 as i32 as u32;
+            let count = cpu.read8(SPREAD_COUNTS.wrapping_add(level));
+            let mut i = 0u8;
+            while i < count {
+                let angle = (u32::from(i) << 13) & 0xffff;
+                nested!(cpu, ORBIT_MAKE, orbit_make(cpu, o, angle, 0x38_0000, spin));
+                i = i.wrapping_add(1);
+            }
+        }
+        1 => {
+            for i in 0..4u32 {
+                let angle = (i << 14) & 0xffff;
+                let twice = spin.wrapping_add(spin) as i8 as i32 as u32;
+                nested!(cpu, ORBIT_MAKE, orbit_make(cpu, o, angle, 0x30_0000, twice));
+            }
+        }
+        2 => {
+            for angle in [0, 0x2000, 0x4000, 0x8000, 0xa000, 0xc000] {
+                nested!(cpu, ORBIT_MAKE, orbit_make(cpu, o, angle, 0x38_0000, spin));
+            }
+        }
+        _ => {
+            let triple = spin.wrapping_mul(3) as i8 as i32 as u32;
+            for i in 0..3u32 {
+                let angle = i.wrapping_mul(0x5555) & 0xffff;
+                nested!(cpu, ORBIT_MAKE, orbit_make(cpu, o, angle, 0x20_0000, triple));
+            }
+        }
+    }
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, SPREAD_SOUND));
+}
+
+/// A rock's fields: its state (a byte, +0x6c), the speeds x and y (+0x70, +0x74), the length of
+/// its trail (+0x78, grows to 0x10000 and fades) and the hit boxes copied from the overlay's
+/// table (from +0x7c; the trail's length goes into the first box's halfword +4 and bytes +6, +7).
+const ROCK_STATE: u32 = 108;
+const ROCK_SPEED: u32 = 112;
+const ROCK_TAIL: u32 = 120;
+const ROCK_BOXES_AT: u32 = 124;
+const ROCK_BOXES: u32 = 0x060a_d52e;
+const ROCK_STEP: u32 = 0x0609_8e5c;
+const ROCK_DRAW: u32 = 0x0609_9068;
+const ROCK_MAKE: u32 = 0x0609_924c;
+const ROCK_SIZE: u32 = 0x94;
+const ROCK_SOUND: u32 = 17;
+const ROCK_BURST_SOUND: u32 = 93;
+
+/// A rock's step. Past |x| 0xc00000 it ends (mode +3 to 0x70); out of life (+0x50) it ends in an
+/// effect (the sound 17, `drift_effect`). Else by its state: 0, the x speed eases to 0 and the y
+/// speed to 0x40000 by 0x1000, state 1 when that reaches 0; 1, the tail (+0x78) eases to 0x10000
+/// as well and once the rock is past y 0x900000 the speeds are 0 and the state 2; 2, after 62
+/// frames the tail eases to 0 by 0x200 and when it is 0 the rock ends. Then the place moves by
+/// the speeds; the first hit box takes the trail's length over 0x8000 (as bytes, past that;
+/// else 0); the hit flag 0x200 sets bit 0 of +0x6e.
+pub fn rock_step(cpu: &mut Cpu, o: u32) {
+    let d = cpu.stack();
+    let x = cpu.read32(o + 20) as i32;
+    if x.wrapping_abs() > 0xc0_0000 {
+        cpu.write8(o + O_MODE, 0x70);
+        return;
+    }
+    if cpu.read32(o + 80) as i32 <= 0 {
+        cpu.write8(o + O_MODE, 0x70);
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, ROCK_SOUND));
+        cpu.write32(d + 60, ORBIT_EFFECT);
+        cpu.write16(d + 32, 0x90);
+        let v = cpu.read32(o + 20);
+        cpu.write32(d, v);
+        let v = cpu.read32(o + 24);
+        cpu.write32(d + 4, v);
+        let v = cpu.read32(o + 28).wrapping_add(0xfff0_0000);
+        cpu.write32(d + 8, v);
+        let turn = cpu.read16(o + O_ANGLE);
+        cpu.write16(d + 24, turn);
+        cpu.write32(d + 20, 0x2_0000);
+        cpu.write32(d + 12, 0xa000);
+        cpu.write32(d + 16, 0xe000);
+        nested!(cpu, 0x0605_7454, actors::drift_effect(cpu, d));
+        return;
+    }
+    let state = cpu.read8(o + ROCK_STATE);
+    match state {
+        0 => {
+            let from = cpu.read32(o + ROCK_SPEED);
+            let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, from, 0, 0x1000));
+            cpu.write32(o + ROCK_SPEED, v);
+            let from = cpu.read32(o + ROCK_SPEED + 4);
+            let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, from, 0x4_0000, 0x1000));
+            cpu.write32(o + ROCK_SPEED + 4, v);
+            if v == 0 {
+                cpu.write8(o + ROCK_STATE, state.wrapping_add(1));
+            }
+        }
+        1 => {
+            let from = cpu.read32(o + ROCK_TAIL);
+            let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, from, 0x1_0000, 0x1000));
+            cpu.write32(o + ROCK_TAIL, v);
+            let from = cpu.read32(o + ROCK_SPEED);
+            let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, from, 0, 0x1000));
+            cpu.write32(o + ROCK_SPEED, v);
+            let from = cpu.read32(o + ROCK_SPEED + 4);
+            let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, from, 0x4_0000, 0x1000));
+            cpu.write32(o + ROCK_SPEED + 4, v);
+            if cpu.read32(o + 24) as i32 > 0x90_0000 {
+                cpu.write8(o + ROCK_STATE, state.wrapping_add(1));
+                cpu.write32(o + ROCK_SPEED, 0);
+                cpu.write32(o + ROCK_SPEED + 4, 0);
+            }
+        }
+        _ => {
+            let n = state.wrapping_add(1);
+            cpu.write8(o + ROCK_STATE, n);
+            if n > 62 {
+                let from = cpu.read32(o + ROCK_TAIL);
+                let v = nested!(cpu, 0x0604_6168, actors::approach(cpu, from, 0, 0x200));
+                cpu.write32(o + ROCK_TAIL, v);
+            }
+            if cpu.read32(o + ROCK_TAIL) == 0 {
+                cpu.write8(o + O_MODE, 0x70);
+                return;
+            }
+        }
+    }
+    let x = cpu.read32(o + 20).wrapping_add(cpu.read32(o + ROCK_SPEED));
+    cpu.write32(o + 20, x);
+    let y = cpu.read32(o + 24).wrapping_add(cpu.read32(o + ROCK_SPEED + 4));
+    cpu.write32(o + 24, y);
+    let tail = cpu.read32(o + ROCK_TAIL);
+    let at = o + ROCK_BOXES_AT;
+    if tail as i32 > 0x8000 {
+        cpu.write16(at + 4, 0xff60);
+        cpu.write8(at + 7, 0x90);
+        let v = tail.wrapping_add(if (tail as i32) < 0 { 0x7fff } else { 0 });
+        cpu.call(0x0600_8156, &[v]);
+        let r4 = cpu.reg(4);
+        cpu.write8(at + 6, r4 as u8);
+    } else {
+        cpu.write16(at + 4, 0);
+        cpu.write8(at + 7, 0);
+        cpu.write8(at + 6, 0);
+    }
+    if cpu.read16(o + O_ARMS) as i16 as i32 as u32 & 0x200 != 0 {
+        let f = cpu.read16(o + 110) as i16 as i32 as u32;
+        cpu.write16(o + 110, (f | 1) as u16);
+    }
+}
+
+/// A rock's draw (its sprite `s`): the frame flags (+0x6e of the object) cleared of bit 1 and set
+/// again from bit 0; a description from sprite_init with the place (x of the object, y below it),
+/// the colour 24. With a trail (+0x78) a sprite for each step down it (the frame 94 plus the
+/// counter's low bits, going up by 0x400000 a step, the speed the trail less a fraction by the
+/// frame counter); then a dust at a random side, the rock's own picture.
+pub fn rock_draw(cpu: &mut Cpu, s: u32) {
+    let d = cpu.stack();
+    let o = s.wrapping_sub(0x10);
+    let flags = s + 94;
+    let f = cpu.read16(flags) as i16 as i32 as u32;
+    if f & 2 != 0 {
+        cpu.write16(flags, (f & 0xffff_fffc) as u16);
+    }
+    let f = cpu.read16(flags) as i16 as i32 as u32;
+    if f & 1 != 0 {
+        cpu.write16(flags, (f | 2) as u16);
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, d));
+    cpu.write8(d + 30, 0);
+    let v = cpu.read32(o + 20);
+    cpu.write32(d + 4, v);
+    cpu.write32(d + 12, 0);
+    cpu.write8(d + 35, 24);
+    let tail = cpu.read32(o + ROCK_TAIL);
+    if tail != 0 {
+        cpu.write32(d, if tail as i32 > 0x7fff { 32 } else { 0x120 });
+        let y = cpu.read32(o + 24).wrapping_add(0xffd8_0000);
+        cpu.write32(d + 8, y);
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+        let base = cpu.read16(CHAR_BASE) as i16 as i32 as u32;
+        cpu.write16(d + 24, base.wrapping_add(if r & 1 != 0 { 48 } else { 32 }) as u16);
+        let loops = cpu.read32(LOOPS);
+        let tail = cpu.read32(o + ROCK_TAIL);
+        let cut = (loops & 3).wrapping_mul(tail) >> 4;
+        cpu.write32(d + 16, tail.wrapping_sub(cut));
+        cpu.write32(d + 20, 0x2_0000);
+        let mut k = (loops >> 1) as u8;
+        if cpu.read32(d + 8) as i32 > 0xff40_0000u32 as i32 {
+            loop {
+                cpu.write8(d + 31, 94 + (k & 3));
+                nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+                let y = cpu.read32(d + 8).wrapping_add(0xffc0_0000);
+                k = k.wrapping_add(1);
+                cpu.write32(d + 8, y);
+                if y as i32 <= 0xff40_0000u32 as i32 {
+                    break;
+                }
+            }
+        }
+        let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0x1_0000));
+        cpu.write32(d, r & 0x100);
+        let low = cpu.read8(LOOPS + 3) as u32 & 1;
+        cpu.write8(d + 31, low.wrapping_sub(61) as u8);
+        let tail = cpu.read32(o + ROCK_TAIL);
+        let half = tail.wrapping_add(if (tail as i32) < 0 { 3 } else { 0 }) as i32 >> 2;
+        let loops = cpu.read32(LOOPS);
+        let more = (loops & 3).wrapping_mul(tail) >> 4;
+        cpu.write32(d + 16, (half as u32).wrapping_add(more));
+        cpu.write32(d + 20, 0x8000);
+        let y = cpu.read32(o + 24).wrapping_add(0xffe8_0000);
+        cpu.write32(d + 8, y);
+        nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+    }
+    cpu.write32(d, 32);
+    let y = cpu.read32(o + 24);
+    cpu.write32(d + 8, y);
+    cpu.write8(d + 31, 14);
+    cpu.write8(d + 30, 69);
+    if cpu.read16(o + 110) & 1 != 0 {
+        let c = (cpu.read16(CHAR_BASE) as i16 as i32 as u32).wrapping_add(0xe0);
+        cpu.write16(d + 24, c as u16);
+    } else {
+        let c = cpu.read16(ORBIT_CHAR);
+        cpu.write16(d + 24, c);
+    }
+    cpu.write32(d + 16, 0x1_0000);
+    cpu.write32(d + 20, 0x1_0000);
+    nested!(cpu, 0x0604_0960, sprites::draw(cpu, d));
+}
+
+/// A rock made at the head `p`'s fire place (+0xdd8, +0xddc) with the speeds `dx` and `dy`: an
+/// object of 0x94 bytes (exec 0x0604d780, step 0x06098e5c, draw 0x06099068, flags 0xf00400,
+/// kind 0, life 5000, the hit boxes at +0x7c from the overlay's table 0x060ad52e).
+pub fn rock_make(cpu: &mut Cpu, p: u32, dx: u32, dy: u32) {
+    let blocks = nested!(cpu, 0x0600_57f8, objects::obj_size(cpu, ROCK_SIZE)) as i8 as i32 as u32;
+    let o = nested!(cpu, 0x0600_6b00, objects::obj_set(cpu, 2, blocks, HEAD_SHARD_EXEC));
+    if o == 0 {
+        return;
+    }
+    nested!(cpu, 0x0604_6264, sprites::sprite_init(cpu, o + O_FLAGS));
+    nested!(cpu, 0x0604_6284, hits::hit_init(cpu, o + O_SCRIPT));
+    cpu.write32(o + O_BEHAVIOUR, ROCK_STEP);
+    let n = cpu.read8(p + O_NUMBER);
+    cpu.write8(o + O_NUMBER, n);
+    cpu.write32(o + O_FLAGS, 0xf0_0400);
+    cpu.write32(o + O_DRAW, ROCK_DRAW);
+    cpu.write8(o + O_KIND, 0);
+    let x = cpu.read32(p + BOSS_FIRE_AT);
+    cpu.write32(o + O_POSITION, x);
+    let y = cpu.read32(p + BOSS_FIRE_AT + 4);
+    cpu.write32(o + O_POSITION + 4, y);
+    cpu.write32(o + O_POSITION + 8, 0);
+    cpu.write8(o + 84, 1);
+    cpu.write32(o + 80, 5000);
+    cpu.write8(o + ROCK_STATE, 0);
+    cpu.write16(o + 110, 0);
+    cpu.write32(o + ROCK_SPEED, dx);
+    cpu.write32(o + ROCK_SPEED + 4, dy);
+    cpu.write32(o + ROCK_TAIL, 0);
+    cpu.write32(o + O_SCRIPT, o + ROCK_BOXES_AT);
+    nested!(cpu, 0x0605_6440, hits::boxes_copy(cpu, o + ROCK_BOXES_AT, ROCK_BOXES));
+}
+
+/// A burst of rocks from the head `o`, the set by the low two bits of its byte +0xdeb (1 or 2:
+/// four rocks; else three): the spacing (+0xde4) set to 0xe000 first, the byte stepped and the
+/// sound 93 at the end. Each rock's speeds are `(dx, dy)`.
+pub fn rock_burst(cpu: &mut Cpu, o: u32) {
+    cpu.write32(o + BOSS_FIRE_SPACING, 0xe000);
+    let rocks: &[(u32, u32)] = match cpu.read8(o + 0xdeb) & 3 {
+        1 => &[(0x3_2000, 0xfffe_0000), (0x2_4000, 0xfffe_c000), (0xfffd_c000, 0xfffe_c000), (0xfffc_e000, 0xfffe_0000)],
+        2 => &[(0x3_2000, 0xffff_0000), (0x1_8000, 0xfffd_8000), (0xfffe_8000, 0xfffd_8000), (0xfffc_e000, 0xffff_0000)],
+        _ => &[(0x2_8000, 0xfffe_8000), (0, 0xfffd_e000), (0xfffd_8000, 0xfffe_8000)],
+    };
+    for &(dx, dy) in rocks {
+        nested!(cpu, ROCK_MAKE, rock_make(cpu, o, dx, dy));
+    }
+    let n = cpu.read8(o + 0xdeb).wrapping_add(1);
+    cpu.write8(o + 0xdeb, n);
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, ROCK_BURST_SOUND));
+}
+
+// ---- the head's parts moved with the view ----------------------------------------------------------
+
+/// The head's parts moved by `d` in y: its place (+24), the nine parts' (the longs from +0x668), the
+/// ten shots' (from +0xa54, where the halfword at +0xa18 + 2 n is not 0), and the limit at +0x9f8 less `d`.
+pub fn parts_shift_y(cpu: &mut Cpu, o: u32, d: u32) {
+    let y = cpu.read32(o + 24).wrapping_add(d);
+    cpu.write32(o + 24, y);
+    for i in 0..9u32 {
+        let v = cpu.read32(o + 0x668 + 4 * i).wrapping_add(d);
+        cpu.write32(o + 0x668 + 4 * i, v);
+    }
+    for i in 0..10u32 {
+        if cpu.read16(o + 0xa18 + 2 * i) != 0 {
+            let v = cpu.read32(o + 0xa54 + 4 * i).wrapping_add(d);
+            cpu.write32(o + 0xa54 + 4 * i, v);
+        }
+    }
+    let v = cpu.read32(o + 0x9f8).wrapping_sub(d);
+    cpu.write32(o + 0x9f8, v);
+}
+
+/// The head's world kept near the middle: when its x passes 0x20000000 everything is moved by
+/// -0x40000000 (0x06099420, the same as `parts_shift_y` in x), below -0x20000000 by 0x40000000;
+/// when its y passes 0x04000000 by -0x08000000, below -0x04000000 by 0x08000000.
+pub fn parts_wrap(cpu: &mut Cpu, o: u32) {
+    if cpu.read32(o + 20) as i32 > 0x2000_0000 {
+        cpu.call_returning(0x0609_9518, 0x0609_9420, &[o, 0xc000_0000]);
+    }
+    if (cpu.read32(o + 20) as i32) < -0x2000_0000 {
+        cpu.call_returning(0x0609_9528, 0x0609_9420, &[o, 0x4000_0000]);
+    }
+    if cpu.read32(o + 24) as i32 > 0x0400_0000 {
+        nested!(cpu, 0x0609_9490, parts_shift_y(cpu, o, 0xf800_0000));
+    }
+    if (cpu.read32(o + 24) as i32) < -0x0400_0000 {
+        nested!(cpu, 0x0609_9490, parts_shift_y(cpu, o, 0x0800_0000));
+    }
+}
