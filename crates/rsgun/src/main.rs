@@ -37,6 +37,7 @@ mod audio;
 mod boot;
 mod controls;
 mod game;
+mod native_boot;
 
 // the port's generated code (crates/rsgun/build.rs)
 include!(concat!(env!("OUT_DIR"), "/port.rs"));
@@ -93,6 +94,12 @@ struct Options {
     states: Vec<u64>,
     /// `--reach ADDR`: the frame the master first reaches ADDR is printed (development).
     reach: Option<u32>,
+    /// `--native-boot-check DIR` (development): compares the native boot's state with the reference
+    /// DIR/entry.state (tools/boot/reach); `--boot-eeprom` and `--boot-backup` name the EEPROM and
+    /// backup RAM files the reference run had (else the images' own EEPROM and a blank backup).
+    boot_check: Option<PathBuf>,
+    boot_eeprom: Option<PathBuf>,
+    boot_backup: Option<PathBuf>,
 }
 
 fn default_save_dir() -> PathBuf {
@@ -130,6 +137,9 @@ fn parse_args() -> Result<Options, String> {
         save_state: None,
         states: Vec::new(),
         reach: None,
+        boot_check: None,
+        boot_eeprom: None,
+        boot_backup: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut it = args.iter();
@@ -165,6 +175,9 @@ fn parse_args() -> Result<Options, String> {
             "--states" => o.states = value()?.split(',').filter_map(|f| f.parse().ok()).collect(),
             "--reach" => o.reach = Some(u32::from_str_radix(value()?.trim_start_matches("0x"), 16).map_err(|_| "--reach: a hex address")?),
             "--cpu-speed" => o.cpu_speed = value()?.parse().map_err(|_| "--cpu-speed: a number")?,
+            "--native-boot-check" => o.boot_check = Some(PathBuf::from(value()?)),
+            "--boot-eeprom" => o.boot_eeprom = Some(PathBuf::from(value()?)),
+            "--boot-backup" => o.boot_backup = Some(PathBuf::from(value()?)),
             "--mute" => o.mute = true,
             "-h" | "--help" => return Err(String::new()),
             _ => return Err(format!("unknown option {a}")),
@@ -579,6 +592,18 @@ fn windowed(o: &Options, script: Option<&Script>) -> Result<(), String> {
     save(&m, &o.save)
 }
 
+/// `--native-boot-check`: the native boot state against the reference run's (native_boot.rs).
+fn native_boot_check(o: &Options, dir: &Path) -> Result<usize, String> {
+    let read = |p: PathBuf| fs::read(&p).map_err(|e| format!("{}: {e}", p.display()));
+    let bios = read(o.rom.join("bios-epr20091.bin"))?;
+    let cart = read(o.rom.join("rsgun-cart.bin"))?;
+    let eeprom = read(o.boot_eeprom.clone().unwrap_or_else(|| o.rom.join("eeprom.bin")))?;
+    let backup = o.boot_backup.clone().map(read).transpose()?;
+    let state = read(dir.join("entry.state"))?;
+    let img = native_boot::Inputs { bios: &bios, cart: &cart, eeprom: Some(&eeprom), backup: backup.as_deref(), area: 1 };
+    native_boot::check(&state, &img, 40)
+}
+
 fn main() -> ExitCode {
     let o = match parse_args() {
         Ok(o) => o,
@@ -591,6 +616,16 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if let Some(dir) = &o.boot_check {
+        return match native_boot_check(&o, dir) {
+            Ok(0) => ExitCode::SUCCESS,
+            Ok(_) => ExitCode::FAILURE,
+            Err(e) => {
+                eprintln!("rsgun: {e}");
+                ExitCode::from(2)
+            }
+        };
+    }
     let script = match &o.script {
         Some(p) => match fs::read_to_string(p).map_err(|e| e.to_string()).and_then(|t| Script::parse(&t)) {
             Ok(s) => Some(s),
