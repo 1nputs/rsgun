@@ -194,7 +194,7 @@ impl Sys {
         self.m68k.reset(&mut bus);
     }
 
-    fn cycles_per_line(&self) -> u32 {
+    pub fn cycles_per_line(&self) -> u32 {
         if self.clock352 { 1820 } else { 1708 }
     }
 
@@ -207,8 +207,17 @@ impl Sys {
         if self.clock352 { 28_636_363 } else { 26_846_590 }
     }
 
-    /// Runs the sound CPU and the SCSP for `sh2_cycles` of the main clock.
-    fn run_sound(&mut self, sh2_cycles: u32) {
+    /// Sets where the sound clock is: the fraction of a sound cycle owed to the main clock (in units
+    /// of 1/`sh2_hz` cycle) and the 68000 cycles already into the SCSP's current sample. A client
+    /// that sets a machine up without running the boot gives the phase the run it stands for had.
+    pub fn set_sound_phase(&mut self, owed: u64, in_sample: u32) {
+        self.sound_owed = owed;
+        self.sound_in_sample = in_sample;
+    }
+
+    /// Runs the sound CPU and the SCSP for `sh2_cycles` of the main clock (the machine does it once a
+    /// line, with the cycles of a line, `cycles_per_line`).
+    pub fn run_sound(&mut self, sh2_cycles: u32) {
         let started = std::time::Instant::now();
         self.sound_owed += sh2_cycles as u64 * SOUND_HZ;
         let cycles = (self.sound_owed / self.sh2_hz()) as u32;
