@@ -775,6 +775,24 @@ pub fn state_stage(cpu: &mut Cpu, game: u32) {
     for p in 0..2 {
         stage_player(cpu, game, p);
     }
+    // The SH-2 loop keeps its induction variables in the frame; code that runs later in the same
+    // stack (a stage's enemy maker reading a field its caller never set) reads them as left.
+    let frame = cpu.stack();
+    // the locals start 0x40 above the frame's bottom
+    let frame = frame + 0x40;
+    for (at, v) in [
+        (0x4, 0x0600_ee7c),
+        (0x8, 0x0600_ee78),
+        (0xc, 0x0607_4064),
+        (0x10, 8),
+        (0x14, 0x190),
+        (0x18, 16),
+        (0x1c, 0x0600_ee20),
+    ] {
+        cpu.write32(frame + at, v);
+    }
+    let frames = cpu.read32(game + PLAYER_FRAMES + 4);
+    cpu.write32(frame + 0x20, frames);
     stage_continue(cpu, game);
 }
 
