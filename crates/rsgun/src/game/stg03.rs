@@ -21065,3 +21065,1039 @@ pub fn floor2_step(cpu: &mut Cpu, s: u32) {
     let speed = cpu.read32(s + SCN_SPEED).wrapping_neg();
     nested!(cpu, 0x0605_eff8, bg::plane_b_speed(cpu, 0, ((speed as i32) >> 1) as u32));
 }
+
+// ---- the stage's boss, its swings and its entrance (0x060a32e4-0x060a4cfc) -----------------------
+
+/// The boss's object: its flags (+0x10), the shot sound's argument (+0x14), the angle its draw keeps
+/// (+0x30), the record of who made it (+0x40: the player at +0x32, the weapon at +0x55) and its life
+/// (+0x50).
+const QB_FLAGS: u32 = 0x10;
+const QB_SHOT: u32 = 0x14;
+const QB_DRAW_ANGLE: u32 = 0x30;
+const QB_KILLER: u32 = 0x40;
+const QB_LIFE: u32 = 0x50;
+/// Its mode byte (+0x6c; the routine run each frame comes from a table by it), its step (+0x6d),
+/// its place in the script (+0x6e), its flag byte (+0x6f), the counter of its sounds (+0x70) and
+/// the word the arms' set-up gives 0x80 (+0x72).
+const QB_MODE: u32 = 0x6c;
+const QB_STEP: u32 = 0x6d;
+const QB_SCRIPT_AT: u32 = 0x6e;
+const QB_BITS: u32 = 0x6f;
+const QB_PULSE: u32 = 0x70;
+const QB_CONTACT: u32 = 0x72;
+/// The words it sways by (+0x76, +0x78 and what it adds to its turn, +0x7a), the angle its shots
+/// go by (+0x7c), its turn's speed (+0x7e) and its turns (+0x80, +0x82, +0x84).
+const QB_SWAY: u32 = 0x76;
+const QB_BOB: u32 = 0x78;
+const QB_BOB_OUT: u32 = 0x7a;
+const QB_FIRE: u32 = 0x7c;
+const QB_TURN_SPEED: u32 = 0x7e;
+const QB_ROT_X: u32 = 0x80;
+const QB_ROT_Y: u32 = 0x82;
+const QB_ROT_Z: u32 = 0x84;
+/// Its clocks (+0x88, +0x8c: a 16.16 progress through a move; +0x90) and place (+0x94, +0x98, +0x9c).
+const QB_CLOCK: u32 = 0x88;
+const QB_PHASE: u32 = 0x8c;
+const QB_CLOCK_B: u32 = 0x90;
+const QB_POS: u32 = 0x94;
+/// The two wings (+0xa0, +0xa4: objects, or 0 once lost), the object its end starts (+0xa8), the two
+/// arms (+0xac, +0xb0), their script (+0xb4: 8-byte entries) and where its draw puts its matrices.
+const QB_WING_A: u32 = 0xa0;
+const QB_WING_B: u32 = 0xa4;
+const QB_CHILD: u32 = 0xa8;
+const QB_ARM_A: u32 = 0xac;
+const QB_ARM_B: u32 = 0xb0;
+const QB_SCRIPT: u32 = 0xb4;
+const QB_MATRIX: u32 = 0xb8;
+const QB_WING_MATRIX: u32 = 0xe8;
+/// An arm's object keeps its part at +0xd4 (its mode byte at the part's +0x6c).
+const QB_ARM_PART: u32 = 0xd4;
+/// The arms' pose (+0x118: 0 set up, 1 moving, 2 swinging), their two angles (+0x11e, +0x120), the
+/// ones the move starts from (+0x122, +0x124) and ends at (+0x126, +0x128), the counters of the key
+/// swings (+0x12c, +0x130), the two reaches (+0x134, +0x138), their starts (+0x13c, +0x140) and ends
+/// (+0x144, +0x148).
+const QB_POSE: u32 = 0x118;
+const QB_SWING: u32 = 0x11e;
+const QB_SWING_FROM: u32 = 0x122;
+const QB_SWING_TO: u32 = 0x126;
+const QB_COUNT: u32 = 0x12c;
+const QB_REACH: u32 = 0x134;
+const QB_REACH_FROM: u32 = 0x13c;
+const QB_REACH_TO: u32 = 0x144;
+/// The stage's level (1-4: how many shots the arms fire), the byte (0x060b3b80) the entrance keeps
+/// which side it came from in, the key table of the sweep's two arms (0x060b0bc4), the two the last
+/// move keeps its swings by (0x060b0be4, 0x060b0c24), the boss's motion's keys (0x060b0b58), the
+/// table of sounds (0x060b0bb8, ten bytes) and the mode table.
+const QB_LEVEL: u32 = 0x060b_2050;
+const QB_SIDE: u32 = 0x060b_3b80;
+const QB_KEYS_RISE: u32 = 0x060b_0b58;
+const QB_PULSE_SOUNDS: u32 = 0x060b_0bb8;
+const QB_MODES: u32 = 0x060b_0f78;
+const QB_SWEEP_KEYS: [u32; 2] = [0x060b_0be4, 0x060b_0c24];
+const QB_ARM_KEYS: u32 = 0x060b_0bc4;
+/// The wings' shot patterns (0x060b0ae0, 0x060b0aec) and the matrix source of the draw (0x060b0ad4).
+const QB_WING_SHOTS: [u32; 2] = [0x060b_0ae0, 0x060b_0aec];
+const QB_DRAW_SOURCE: u32 = 0x060b_0ad4;
+/// The stage's kill rate and score (0x060746f0, 0x060746f4), set when the boss dies.
+const QB_RATE: u32 = 0x0607_46f0;
+const QB_SCORE: u32 = 0x0607_46f4;
+/// The overlay's own routines (data past the image): what the boss does when it dies, a wing's shots,
+/// the wing's angle, an arm's aim, a shot at an angle and a power, a burst of shots (which of the
+/// arms, how), an arm part's move, a hit's sound, an arm's set-up and the start of the object at +0xa8.
+const QB_DIE: u32 = 0x060a_63f0;
+const QB_WING_SHOOT: u32 = 0x060a_aae8;
+const QB_WING_ANGLE: u32 = 0x060a_aebc;
+const QB_AIM: u32 = 0x060a_aef8;
+const QB_FIRE_SHOT: u32 = 0x060a_5464;
+const QB_BURST: u32 = 0x060a_59b8;
+const QB_PART_MOVE: u32 = 0x060a_6170;
+const QB_HIT_SOUND: u32 = 0x060a_6f48;
+const QB_ARM_SET: u32 = 0x060a_99d4;
+const QB_CHILD_START: u32 = 0x060a_a77c;
+
+/// The boss's frame (the object `s`): its gauge given its life (once its mode is past 0); at no life
+/// the kill scored (10000 for the player and weapon of its maker), the rate set and what the
+/// overlay does at its death run; otherwise the sway and the bobbing turned, the wings' shots made
+/// for each wing gone, the flag (+0x10 bit 19) by how far out it is (0x580000), its draw, and the
+/// routine its mode gives run.
+pub fn qb_exec(cpu: &mut Cpu, s: u32) {
+    if cpu.read8(s + QB_MODE) as i8 > 0 {
+        let life = cpu.read32(s + QB_LIFE);
+        nested!(cpu, 0x0604_64b8, hud::boss_gauge_life(cpu, life));
+    }
+    let routine = if cpu.read32(s + QB_LIFE) as i32 <= 0 {
+        cpu.write32(QB_SCORE, 50000);
+        let rate = cpu.read32(QB_RATE).wrapping_add(0x28);
+        cpu.write32(QB_RATE, rate);
+        let killer = cpu.read32(s + QB_KILLER);
+        let weapon = cpu.read8(killer + 0x55) as i8 as i32 as u32;
+        let player = cpu.read8(killer + 0x32) as i8 as i32 as u32;
+        nested!(cpu, 0x0604_3108, hits::score_kill(cpu, player, weapon, s, 10000));
+        QB_DIE
+    } else {
+        let sway = cpu.read16(s + QB_SWAY).wrapping_add(0xc0);
+        cpu.write16(s + QB_SWAY, sway);
+        let skip = cpu.read32(s + QB_WING_A) != 0 && cpu.read32(s + QB_WING_B) != 0;
+        if !skip {
+            let bob = cpu.read16(s + QB_BOB).wrapping_add(0x180);
+            cpu.write16(s + QB_BOB, bob);
+            let mut out: u32;
+            let amount: u32;
+            if cpu.read32(s + QB_WING_A) == 0 && cpu.read32(s + QB_WING_B) == 0 {
+                out = 0;
+                amount = 0x400;
+            } else {
+                out = if cpu.read32(s + QB_WING_A) == 0 { 0xffff_fe00 } else { 0x200 };
+                amount = 0x200;
+            }
+            let a = signed_word(cpu, s + QB_BOB);
+            let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+            let m = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, sin, amount));
+            out = out.wrapping_add(m);
+            cpu.write16(s + QB_BOB_OUT, out as u16);
+            if cpu.read32(s + QB_WING_A) == 0 {
+                cpu.call(QB_WING_SHOOT, &[s, QB_WING_SHOTS[0]]);
+            }
+            if cpu.read32(s + QB_WING_B) == 0 {
+                cpu.call(QB_WING_SHOOT, &[s, QB_WING_SHOTS[1]]);
+            }
+        }
+        if cpu.read8(s + QB_MODE) != 0 {
+            let mut z = cpu.read32(s + QB_POS + 8) as i32;
+            if z < 0 {
+                z = z.wrapping_neg();
+            }
+            let flags = cpu.read32(s + QB_FLAGS);
+            let flags = if z > 0x57_ffff { flags | 0x8_0000 } else { flags & 0xfff7_ffff };
+            cpu.write32(s + QB_FLAGS, flags);
+        }
+        nested!(cpu, 0x060a_3470, qb_draw(cpu, s));
+        let mode = cpu.read8(s + QB_MODE) as i8 as i32 as u32;
+        cpu.read32(QB_MODES.wrapping_add(mode << 2))
+    };
+    cpu.call_returning(0x060a_3410, routine, &[s]);
+}
+
+/// The boss's draw (the object `s`): the matrix stack pushed, moved to its place (the z less
+/// 0x80000 by the sway's sine), turned (z, x, y by its turn and what the bobbing adds), its matrix
+/// kept at +0xb8, the place converted into +0x14 and the draw's angle (+0x30) the z turn; popped.
+pub fn qb_draw(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let a = signed_word(cpu, s + QB_SWAY);
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let lift = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x8_0000, sin));
+    let z = cpu.read32(s + QB_POS + 8).wrapping_add(lift);
+    let y = cpu.read32(s + QB_POS + 4);
+    let x = cpu.read32(s + QB_POS);
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, z));
+    let a = signed_word(cpu, s + QB_ROT_Z);
+    nested!(cpu, 0x0606_726c, sgl::sl_rot_z(cpu, a));
+    let a = signed_word(cpu, s + QB_ROT_X);
+    nested!(cpu, 0x0606_72ec, sgl::sl_rot_x(cpu, a));
+    let a = signed_word(cpu, s + QB_ROT_Y).wrapping_add(signed_word(cpu, s + QB_BOB_OUT)) as i16 as i32 as u32;
+    nested!(cpu, 0x0606_736c, sgl::sl_rot_y(cpu, a));
+    nested!(cpu, 0x0606_db9c, sgl::sl_get_matrix(cpu, s + QB_MATRIX));
+    nested!(cpu, 0x0606_750c, sgl::sl_convert(cpu, QB_DRAW_SOURCE, s + QB_SHOT));
+    let z = cpu.read16(s + QB_ROT_Z);
+    cpu.write16(s + QB_DRAW_ANGLE, z);
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+}
+
+/// A wing's draw (the object `s`): as the boss's draw, moved the same way, turned about x and y
+/// only, its matrix kept at +0xe8.
+pub fn qb_wing_draw(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x0606_71cc, sgl::sl_push_matrix(cpu));
+    let a = signed_word(cpu, s + QB_SWAY);
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let lift = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, 0x8_0000, sin));
+    let z = cpu.read32(s + QB_POS + 8).wrapping_add(lift);
+    let y = cpu.read32(s + QB_POS + 4);
+    let x = cpu.read32(s + QB_POS);
+    nested!(cpu, 0x0606_721c, sgl::sl_translate(cpu, x, y, z));
+    let a = signed_word(cpu, s + QB_ROT_X);
+    nested!(cpu, 0x0606_72ec, sgl::sl_rot_x(cpu, a));
+    let a = signed_word(cpu, s + QB_ROT_Y);
+    nested!(cpu, 0x0606_736c, sgl::sl_rot_y(cpu, a));
+    nested!(cpu, 0x0606_db9c, sgl::sl_get_matrix(cpu, s + QB_WING_MATRIX));
+    nested!(cpu, 0x0606_7200, sgl::sl_pop_matrix(cpu));
+}
+
+/// A wing's turn about x (the object `s`, `still`: the angle's own limit not used when set): the
+/// angle the overlay gives (0x060aaebc; limited to +-0x1000 unless `still`) taken from the wing's
+/// (+0x84); its speed (+0x7e) one more or less (to +-16) by which way, halved when it would carry
+/// the angle past; the speed added to the angle.
+pub fn qb_turn(cpu: &mut Cpu, s: u32, still: u32) {
+    let given = cpu.call(QB_WING_ANGLE, &[s, still]) as i16 as i32;
+    let mut aim = given;
+    if still == 0 {
+        aim = aim.clamp(-0x1000, 0x1000);
+    }
+    let diff = (signed_word(cpu, s + QB_ROT_Z) as i32).wrapping_sub(aim) as i16 as i32;
+    if diff > 0 {
+        let mut v = (cpu.read16(s + QB_TURN_SPEED) as i16).wrapping_sub(1);
+        cpu.write16(s + QB_TURN_SPEED, v as u16);
+        if (v as i32) < -16 {
+            cpu.write16(s + QB_TURN_SPEED, 0xfff0);
+        }
+        v = cpu.read16(s + QB_TURN_SPEED) as i16;
+        if diff + (v as i32) < 0 {
+            cpu.write16(s + QB_TURN_SPEED, (v as i32 >> 1) as u16);
+        }
+    } else if diff < 0 {
+        let mut v = (cpu.read16(s + QB_TURN_SPEED) as i16).wrapping_add(1);
+        cpu.write16(s + QB_TURN_SPEED, v as u16);
+        if v as i32 > 16 {
+            cpu.write16(s + QB_TURN_SPEED, 16);
+        }
+        v = cpu.read16(s + QB_TURN_SPEED) as i16;
+        if diff + (v as i32) > 0 {
+            cpu.write16(s + QB_TURN_SPEED, (v as i32 >> 1) as u16);
+        }
+    }
+    let angle = cpu.read16(s + QB_ROT_Z).wrapping_add(cpu.read16(s + QB_TURN_SPEED));
+    cpu.write16(s + QB_ROT_Z, angle);
+}
+
+/// The boss moved through a table of keys (`keys`, 24-byte entries: a place, three turns), the
+/// entry in the high half of `t` and the fraction in the low: each of its place and turns eased
+/// between this entry's and the next's.
+pub fn qb_keys_ease(cpu: &mut Cpu, s: u32, keys: u32, t: u32) {
+    cpu.write32(cpu.stack(), s);
+    let i = ((t as i32) >> 16) as i16 as i32;
+    let frac = t & 0xffff;
+    let this = keys.wrapping_add((i * 24) as u32);
+    let next = this.wrapping_add(24);
+    for (k, at) in [QB_POS, QB_POS + 4, QB_POS + 8].into_iter().enumerate() {
+        let b = cpu.read32(next + 4 * k as u32);
+        let a = cpu.read32(this + 4 * k as u32);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, a, b, frac));
+        cpu.write32(s + at, v);
+    }
+    for (k, at) in [QB_ROT_X, QB_ROT_Y, QB_ROT_Z].into_iter().enumerate() {
+        let b = cpu.read32(next + 12 + 4 * k as u32);
+        let a = cpu.read32(this + 12 + 4 * k as u32);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, a, b, frac));
+        cpu.write16(s + at, v as u16);
+    }
+}
+
+/// The boss's rise (the object `s`, step +0x6d): 0 gives both wings' arms their first pushes and
+/// the sound 0x65; 1 moves it in along two eased paths (its clock +0x8c 0x100 a frame, the second
+/// half 0x8000 on) and its turn about y, then gives the gauge its most (380000) at 0x10000 and the
+/// next step; 2 eases the turn back, and past 0x10000 the mode is 1 and the step 0.
+pub fn qb_rise(cpu: &mut Cpu, s: u32) {
+    cpu.write32(cpu.stack(), s + QB_STEP);
+    let step = cpu.read8(s + QB_STEP) as i8;
+    if step == 2 {
+        let t = cpu.read32(s + QB_PHASE).wrapping_add(0x200);
+        cpu.write32(s + QB_PHASE, t);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0xffff_f800, 0, t));
+        cpu.write16(s + QB_ROT_Y, v as u16);
+        if cpu.read32(s + QB_PHASE) as i32 > 0xffff {
+            cpu.write8(s + QB_MODE, 1);
+            cpu.write8(s + QB_STEP, 0);
+        }
+        return;
+    }
+    if step != 0 && step != 1 {
+        return;
+    }
+    if step == 0 {
+        for wing in [QB_WING_A, QB_WING_B] {
+            let first = if wing == QB_WING_A { 0xc1 } else { 0xc0 };
+            for (k, at) in [0x18_0000u32, 0x8_0000, 0xfff8_0000, 0xffe8_0000].into_iter().enumerate() {
+                let w = cpu.read32(s + wing);
+                cpu.call(QB_PART_MOVE, &[w, at, 0xffd0_0000, if k == 0 { first } else { 0x80 }]);
+            }
+        }
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 0x65));
+        let n = cpu.read8(s + QB_STEP).wrapping_add(1);
+        cpu.write8(s + QB_STEP, n);
+    }
+    let t = cpu.read32(s + QB_PHASE).wrapping_add(0x100);
+    cpu.write32(s + QB_PHASE, t);
+    let (x, y, z);
+    if t as i32 <= 0x7fff {
+        x = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x00f8_0000, 0xffc0_0000, t.wrapping_mul(2)));
+        cpu.write32(s + QB_POS, x);
+        let t = cpu.read32(s + QB_PHASE);
+        y = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0xff43_8000, 0x20_0000, t.wrapping_mul(2)));
+        cpu.write32(s + QB_POS + 4, y);
+        let t = cpu.read32(s + QB_PHASE);
+        z = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0xffa6_0000, 0x100_0000, t.wrapping_mul(2)));
+    } else {
+        let t2 = t.wrapping_add(0xffff_8000).wrapping_mul(2);
+        x = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0xffc0_0000, 0, t2));
+        cpu.write32(s + QB_POS, x);
+        let t2 = cpu.read32(s + QB_PHASE).wrapping_add(0xffff_8000).wrapping_mul(2);
+        y = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x20_0000, 0xffc0_0000, t2));
+        cpu.write32(s + QB_POS + 4, y);
+        let t2 = cpu.read32(s + QB_PHASE).wrapping_add(0xffff_8000).wrapping_mul(2);
+        z = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x100_0000, 0x100_0000, t2));
+    }
+    cpu.write32(s + QB_POS + 8, z);
+    let t = ((cpu.read32(s + QB_PHASE) as i32) >> 1) as u32;
+    let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x4_0000, 0xffff_f800, t.wrapping_add(0x8000)));
+    cpu.write16(s + QB_ROT_Y, v as u16);
+    if cpu.read32(s + QB_PHASE) == 0x1_0000 {
+        cpu.write32(s + QB_PHASE, 0);
+        nested!(cpu, 0x0604_64d8, hud::boss_gauge_set(cpu, 380000));
+        let n = cpu.read8(s + QB_STEP).wrapping_add(1);
+        cpu.write8(s + QB_STEP, n);
+    }
+}
+
+/// The step byte (+0x6d) one more.
+fn qb_step_on(cpu: &mut Cpu, s: u32) {
+    let n = cpu.read8(s + QB_STEP).wrapping_add(1);
+    cpu.write8(s + QB_STEP, n);
+}
+
+/// A burst of the arm's shots by `v` (`at`: the six values that start one, the arms' and the way
+/// in order: the first arm's three ways, then the second's).
+fn qb_burst(cpu: &mut Cpu, s: u32, v: u32, at: [u32; 6]) {
+    const WAYS: [(u32, u32); 6] = [(0, 2), (0, 1), (0, 0), (1, 2), (1, 1), (1, 0)];
+    for (i, &x) in at.iter().enumerate() {
+        if v == x {
+            cpu.call(QB_BURST, &[s, WAYS[i].0, WAYS[i].1]);
+            return;
+        }
+    }
+}
+
+/// The boss's entrance (the object `s`, step +0x6d 0-8): 0 sets the flag bit, the arm angle 0x1000,
+/// picks the side it comes from by chance (the byte 0x060b3b80), starts the stage's next part and
+/// the sound 0x66, and goes on; 1 and 2 ease it and its turn along the side's reach; 3 swings
+/// it round in a circle, firing arms' shots every 8 frames and bursts by the clock, 4 and 5 ease
+/// the place, 6 waits a frame, 7 runs the rise's keys (sounds 0x67, 0x68), and 8 the last ease,
+/// then mode 2 with the object at +0xa8 started.
+pub fn qb_entrance(cpu: &mut Cpu, s: u32) {
+    let step = cpu.read8(s + QB_STEP) as i8 as i32 as u32;
+    if step > 8 {
+        return;
+    }
+    if step == 0 {
+        let b = cpu.read8(s + QB_BITS) | 1;
+        cpu.write8(s + QB_BITS, b);
+        cpu.write16(s + QB_FIRE, 0x1000);
+        cpu.write32(s + QB_CLOCK, 0);
+        let side = nested!(cpu, 0x0604_5d90, math::random(cpu, 0)) & 1;
+        if side == 0 {
+            cpu.write32(s + QB_REACH, 0xff80_0000);
+            cpu.write32(s + QB_REACH + 4, 0x1_1000);
+            cpu.write16(s + QB_SWING, 0xd780);
+        } else {
+            cpu.write32(s + QB_REACH, 0x80_0000);
+            cpu.write32(s + QB_REACH + 4, 0xfffe_f000);
+            cpu.write16(s + QB_SWING, 0x2880);
+        }
+        cpu.write8(QB_SIDE, side as u8);
+        nested!(cpu, 0x0605_e648, screen::scroll_next(cpu));
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 0x66));
+        qb_step_on(cpu, s);
+    }
+    if step <= 1 {
+        let t = cpu.read32(s + QB_CLOCK).wrapping_add(0x100);
+        cpu.write32(s + QB_CLOCK, t);
+        let reach = cpu.read32(s + QB_REACH);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0, reach, t));
+        cpu.write32(s + QB_POS, v);
+        let t = cpu.read32(s + QB_CLOCK);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0xffc0_0000, 0, t));
+        cpu.write32(s + QB_POS + 4, v);
+        let t = cpu.read32(s + QB_CLOCK);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x100_0000, 0, t));
+        cpu.write32(s + QB_POS + 8, v);
+        let t = cpu.read32(s + QB_CLOCK);
+        let reach = cpu.read32(s + QB_REACH + 4);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0, reach, t));
+        cpu.write16(s + QB_ROT_Y, v as u16);
+        if (cpu.read32(s + QB_CLOCK) as i32) < 0x1_0000 {
+            return;
+        }
+        let low = signed_word(cpu, s + QB_REACH + 6);
+        cpu.write32(s + QB_REACH + 4, low);
+        cpu.write32(s + QB_CLOCK, 0);
+        qb_step_on(cpu, s);
+        return;
+    }
+    match step {
+        2 => {
+            let t = cpu.read32(s + QB_CLOCK).wrapping_add(0x300);
+            cpu.write32(s + QB_CLOCK, t);
+            let reach = cpu.read32(s + QB_REACH + 4);
+            let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, reach, 0, t));
+            cpu.write16(s + QB_ROT_Y, v as u16);
+            if (cpu.read32(s + QB_CLOCK) as i32) < 0x1_0000 {
+                return;
+            }
+            cpu.write32(s + QB_CLOCK, 0x4000);
+            qb_step_on(cpu, s);
+        }
+        3 => qb_entrance_circle(cpu, s),
+        4 => {
+            let t = cpu.read32(s + QB_CLOCK).wrapping_add(0x180);
+            cpu.write32(s + QB_CLOCK, t);
+            let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0xffa0_0000, 0xffd0_0000, t));
+            cpu.write32(s + QB_POS + 4, v);
+            if (cpu.read32(s + QB_CLOCK) as i32) < 0x1_0000 {
+                return;
+            }
+            cpu.write32(s + QB_CLOCK, 0);
+            qb_step_on(cpu, s);
+        }
+        5 => {
+            let t = cpu.read32(s + QB_CLOCK).wrapping_add(0x200);
+            cpu.write32(s + QB_CLOCK, t);
+            let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0xffd0_0000, 0xff60_0000, t));
+            cpu.write32(s + QB_POS + 4, v);
+            let t = cpu.read32(s + QB_CLOCK);
+            let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0, 0xfff0_0000, t));
+            cpu.write32(s + QB_POS + 8, v);
+            if (cpu.read32(s + QB_CLOCK) as i32) < 0x1_0000 {
+                return;
+            }
+            let b = cpu.read8(s + QB_BITS) & 0xfe;
+            cpu.write8(s + QB_BITS, b);
+            cpu.write32(s + QB_CLOCK, 0);
+            qb_step_on(cpu, s);
+        }
+        6 => {
+            let t = cpu.read32(s + QB_CLOCK).wrapping_add(1);
+            cpu.write32(s + QB_CLOCK, t);
+            if t != 1 {
+                return;
+            }
+            cpu.write32(s + QB_CLOCK, 0);
+            qb_step_on(cpu, s);
+        }
+        7 => {
+            let t = cpu.read32(s + QB_CLOCK).wrapping_add(0x180);
+            cpu.write32(s + QB_CLOCK, t);
+            if t == 0xff00 {
+                nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 0x67));
+            }
+            let t = cpu.read32(s + QB_CLOCK);
+            nested!(cpu, 0x060a_3674, qb_keys_ease(cpu, s, QB_KEYS_RISE, t));
+            if cpu.read32(s + QB_CLOCK) as i32 <= 0x2_0000 {
+                return;
+            }
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 0x68));
+            qb_step_on(cpu, s);
+            let t = cpu.read32(s + QB_CLOCK) & 0xffff;
+            cpu.write32(s + QB_CLOCK, t);
+        }
+        _ => qb_entrance_end(cpu, s),
+    }
+}
+
+/// The entrance's step 3: the clock 0x20 on; the place on a circle of the reach by the angle at
+/// +0x8a (x by the sine, y by minus the cosine of 0x600000); the sway clock (+0x8c) and every
+/// eighth frame four shots of the arm's (round the circle by 0x4000, power 10, or 8 at the start
+/// and the first level), the angle on by the swing and the sound 0x6f; from the second level bursts
+/// at set clocks; at 0x10000 the wings' parts moved on (0x41 or 0 for the first, 0x40 or 1 for the
+/// second), the place's x 0 and the step on.
+fn qb_entrance_circle(cpu: &mut Cpu, s: u32) {
+    let clock = cpu.read32(s + QB_CLOCK).wrapping_add(0x20);
+    cpu.write32(s + QB_CLOCK, clock);
+    let reach = cpu.read32(s + QB_REACH);
+    let a = signed_word(cpu, s + QB_CLOCK + 2);
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let x = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, sin, reach));
+    cpu.write32(s + QB_POS, x);
+    let a = signed_word(cpu, s + QB_CLOCK + 2);
+    let cos = nested!(cpu, 0x0606_9a30, math::sl_cos(cpu, a));
+    let y = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, cos, 0x60_0000));
+    cpu.write32(s + QB_POS + 4, y.wrapping_neg());
+    let phase = cpu.read32(s + QB_PHASE).wrapping_add(1);
+    cpu.write32(s + QB_PHASE, phase);
+    if phase & 7 == 0 {
+        let mut angle = signed_word(cpu, s + QB_FIRE);
+        let power = if cpu.read32(QB_LEVEL) as i32 <= 0 || phase & 8 != 0 { 8 } else { 10 };
+        for _ in 0..4 {
+            cpu.call(QB_FIRE_SHOT, &[s, angle, power]);
+            angle = angle.wrapping_add(0x4000) as i16 as i32 as u32;
+        }
+        let f = cpu.read16(s + QB_FIRE).wrapping_add(cpu.read16(s + QB_SWING));
+        cpu.write16(s + QB_FIRE, f);
+        nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 0x6f));
+    }
+    if cpu.read32(QB_LEVEL) as i32 > 1 {
+        let v = cpu.read32(s + QB_CLOCK);
+        qb_burst(cpu, s, v, [0x7b00, 0x7d00, 0x7f00, 0x8100, 0x8300, 0x8500]);
+    }
+    if cpu.read32(s + QB_CLOCK) as i32 <= 0xffff {
+        return;
+    }
+    let a = cpu.read32(s + QB_WING_A);
+    let mut b0 = 1;
+    if a != 0 {
+        b0 = 0;
+        cpu.call(QB_PART_MOVE, &[a, 0x18_0000, 0xffd0_0000, 0x41]);
+        for at in [0x8_0000u32, 0xfff8_0000, 0xffe8_0000] {
+            let w = cpu.read32(s + QB_WING_A);
+            cpu.call(QB_PART_MOVE, &[w, at, 0xffd0_0000, 0]);
+        }
+    }
+    let b = cpu.read32(s + QB_WING_B);
+    if b != 0 {
+        let flag = b0 | 0x40;
+        cpu.call(QB_PART_MOVE, &[b, 0x18_0000, 0xffd0_0000, flag]);
+        for at in [0x8_0000u32, 0xfff8_0000, 0xffe8_0000] {
+            let w = cpu.read32(s + QB_WING_B);
+            cpu.call(QB_PART_MOVE, &[w, at, 0xffd0_0000, 0]);
+        }
+    }
+    cpu.write32(s + QB_POS, 0);
+    qb_step_on(cpu, s);
+    cpu.write32(s + QB_CLOCK, 0);
+}
+
+/// The entrance's step 8: the turns by the clock (y from -0x1800 to 0, x from 0x8000 to 0), the
+/// place eased in two halves (y first, then all of it with the tilt +0x74 to 0x3800); the clock 0xc0
+/// on and at 0x10000 the mode 2, step 0, the place (0, -0x450000, 0), the turns (0xfa00, 0, 0) and
+/// the object at +0xa8 started if there is one.
+fn qb_entrance_end(cpu: &mut Cpu, s: u32) {
+    let t = cpu.read32(s + QB_CLOCK);
+    let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0xffff_e800, 0, t));
+    cpu.write16(s + QB_ROT_Y, v as u16);
+    let t = cpu.read32(s + QB_CLOCK);
+    let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x8000, 0, t));
+    cpu.write16(s + QB_ROT_Z, v as u16);
+    let t = cpu.read32(s + QB_CLOCK);
+    if t as i32 <= 0x8000 {
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0xffca_0000, 0xff80_0000, t.wrapping_mul(2)));
+        cpu.write32(s + QB_POS + 4, v);
+    } else {
+        let t2 = t.wrapping_add(0xffff_8000).wrapping_mul(2);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x117_0000, 0, t2));
+        cpu.write32(s + QB_POS, v);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0xff80_0000, 0xffbb_0000, t2));
+        cpu.write32(s + QB_POS + 4, v);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0x120_0000, 0, t2));
+        cpu.write32(s + QB_POS + 8, v);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0, 0x3800, t2));
+        cpu.write16(s + 0x74, v as u16);
+    }
+    let t = cpu.read32(s + QB_CLOCK).wrapping_add(0xc0);
+    cpu.write32(s + QB_CLOCK, t);
+    if t as i32 <= 0xffff {
+        return;
+    }
+    cpu.write8(s + QB_MODE, 2);
+    cpu.write8(s + QB_STEP, 0);
+    cpu.write32(s + QB_POS, 0);
+    cpu.write32(s + QB_POS + 4, 0xffbb_0000);
+    cpu.write32(s + QB_POS + 8, 0);
+    cpu.write16(s + QB_ROT_X, 0xfa00);
+    cpu.write16(s + QB_ROT_Z, 0);
+    cpu.write16(s + QB_ROT_Y, 0);
+    if cpu.read32(s + QB_CHILD) != 0 {
+        cpu.call(QB_CHILD_START, &[s]);
+    }
+}
+
+/// The boss's next script entry (the object `s`; entries of 8 bytes at +0xb4: a byte (-1 ends the
+/// script), the arms' mode (+0x3d, from the byte at +1), a word (the arm part's +0x6e, +2), a long
+/// (the clock, +4)): the place +0x6e on, the pose and counters cleared, both arms (+0xac, +0xb0:
+/// their part's +0x70 and +0x6c cleared) given the entry's, the clock and the shot angle set;
+/// at the end entry both arms' parts set (0 and 0x3c), the step 0 and mode 3.
+pub fn qb_script_next(cpu: &mut Cpu, s: u32) {
+    let n = cpu.read8(s + QB_SCRIPT_AT).wrapping_add(1);
+    cpu.write8(s + QB_SCRIPT_AT, n);
+    cpu.write8(s + QB_POSE, 0);
+    cpu.write32(s + QB_PHASE, 0);
+    cpu.write32(s + QB_CLOCK_B, 0);
+    cpu.write32(s + QB_COUNT + 4, 0);
+    cpu.write32(s + QB_COUNT, 0);
+    for at in [QB_ARM_A, QB_ARM_B] {
+        let arm = cpu.read32(s + at);
+        if arm == 0 {
+            continue;
+        }
+        let entry = qb_entry(cpu, s);
+        let b = cpu.read8(entry + 1);
+        cpu.write8(arm + 0x3d, b);
+        let arm = cpu.read32(s + at);
+        let part = cpu.read32(arm + QB_ARM_PART);
+        cpu.write32(part + 0x70, 0);
+        let arm = cpu.read32(s + at);
+        let part = cpu.read32(arm + QB_ARM_PART);
+        cpu.write8(part + QB_MODE, 0);
+        let arm = cpu.read32(s + at);
+        let part = cpu.read32(arm + QB_ARM_PART);
+        let entry = qb_entry(cpu, s);
+        let w = cpu.read16(entry + 2);
+        cpu.write16(part + 0x6e, w);
+    }
+    let entry = qb_entry(cpu, s);
+    let v = cpu.read32(entry + 4);
+    cpu.write32(s + QB_CLOCK, v);
+    cpu.write16(s + QB_FIRE, 0);
+    let entry = qb_entry(cpu, s);
+    if cpu.read8(entry) as i8 == -1 {
+        for (at, to) in [(QB_ARM_A, 0), (QB_ARM_B, 0x3c)] {
+            let arm = cpu.read32(s + at);
+            if arm != 0 {
+                let part = cpu.read32(arm + QB_ARM_PART);
+                cpu.call(QB_ARM_SET, &[part, to]);
+            }
+        }
+        cpu.write8(s + QB_STEP, 0);
+        cpu.write8(s + QB_MODE, 3);
+    }
+}
+
+/// The script's entry now (+0xb4 and 8 bytes for each of +0x6e).
+fn qb_entry(cpu: &mut Cpu, s: u32) -> u32 {
+    let i = cpu.read8(s + QB_SCRIPT_AT) as i8 as i32;
+    let script = cpu.read32(s + QB_SCRIPT);
+    script.wrapping_add((i * 8) as u32)
+}
+
+/// The arms' contact word (+0x72) set to 0x80.
+pub fn qb_contact_set(cpu: &mut Cpu, s: u32) {
+    cpu.write16(s + QB_CONTACT, 0x80);
+}
+
+/// The arms opening (the object `s`, pose +0x118: 0 then 1): the pose 1; the clock (+0x8c) 0x100
+/// on; while twice it is up to 0x10000 both reaches (+0x134, +0x138) eased from 0 to 0x140000, then
+/// the flag +0x6f bit 0 and both arms' parts' +0x33 set to 9; the arms' angles (+0x11e, +0x120) by
+/// the sine of the clock's high half, 0x5000 and its minus.
+pub fn qb_reach_open(cpu: &mut Cpu, s: u32) {
+    let pose = cpu.read8(s + QB_POSE) as i8;
+    if pose == 0 {
+        cpu.write8(s + QB_POSE, 1);
+    } else if pose != 1 {
+        return;
+    }
+    let t = cpu.read32(s + QB_PHASE).wrapping_add(0x100);
+    cpu.write32(s + QB_PHASE, t);
+    let t2 = t.wrapping_mul(2);
+    if t2 as i32 <= 0x1_0000 {
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, 0, 0x14_0000, t2));
+        cpu.write32(s + QB_REACH, v);
+        cpu.write32(s + QB_REACH + 4, v);
+    } else {
+        let b = cpu.read8(s + QB_BITS) | 1;
+        cpu.write8(s + QB_BITS, b);
+        for at in [QB_ARM_A, QB_ARM_B] {
+            let arm = cpu.read32(s + at);
+            if arm != 0 {
+                let part = cpu.read32(arm + QB_ARM_PART);
+                cpu.write8(part + 0x33, 9);
+            }
+        }
+    }
+    qb_swing_sine(cpu, s, 0x5000, 0);
+}
+
+/// The arms' angles (+0x11e, +0x120) set to `amount` times the sine of the clock's high half (+0x8e)
+/// plus `base`, and to its minus.
+fn qb_swing_sine(cpu: &mut Cpu, s: u32, amount: u32, base: u32) {
+    let a = signed_word(cpu, s + QB_PHASE + 2);
+    let sin = nested!(cpu, 0x0606_9a0c, math::sl_sin(cpu, a));
+    let v = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, sin, amount)).wrapping_add(base);
+    cpu.write16(s + QB_SWING, v as u16);
+    cpu.write16(s + QB_SWING + 2, v.wrapping_neg() as u16);
+}
+
+/// The arms' angles and reaches eased from their starts to their ends by the clock (+0x8c): the
+/// angles (+0x11e, +0x120) from +0x122, +0x124 to +0x126, +0x128 and the reaches (+0x134, +0x138)
+/// from +0x13c, +0x140 to +0x144, +0x148.
+pub fn qb_swing_blend(cpu: &mut Cpu, s: u32) {
+    for k in 0..2u32 {
+        let to = signed_word(cpu, s + QB_SWING_TO + 2 * k);
+        let t = cpu.read32(s + QB_PHASE);
+        let from = signed_word(cpu, s + QB_SWING_FROM + 2 * k);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, from, to, t));
+        cpu.write16(s + QB_SWING + 2 * k, v as u16);
+    }
+    for k in 0..2u32 {
+        let to = cpu.read32(s + QB_REACH_TO + 4 * k);
+        let t = cpu.read32(s + QB_PHASE);
+        let from = cpu.read32(s + QB_REACH_FROM + 4 * k);
+        let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, from, to, t));
+        cpu.write32(s + QB_REACH + 4 * k, v);
+    }
+}
+
+/// How an arm swing sets up and runs (see `qb_swing`): the end angles, the reach, whether the
+/// contact word is set (the first swing), where the clock goes at the end of the blend, and the
+/// sway (the clock's step, the amount and the base of the angle).
+struct QbSwing {
+    to_a: u16,
+    to_b: u16,
+    reach: u32,
+    contact: bool,
+    wrap: u32,
+    step: u32,
+    amount: u32,
+    base: u32,
+}
+
+/// An arm swing's pose machine (the object `s`): pose 0 keeps the angles and reaches as the blend's
+/// starts and sets its ends (and the contact word if `contact`), pose 1 blends (the clock 0x400 on,
+/// `wrap` at 0x10000 and the next pose), pose 2 sways the angles by the clock's sine.
+fn qb_swing(cpu: &mut Cpu, s: u32, p: &QbSwing) {
+    let pose = cpu.read8(s + QB_POSE) as i8;
+    if pose == 2 {
+        let t = cpu.read32(s + QB_PHASE).wrapping_add(p.step) & 0xffff;
+        cpu.write32(s + QB_PHASE, t);
+        qb_swing_sine(cpu, s, p.amount, p.base);
+        return;
+    }
+    if pose != 1 {
+        if pose != 0 {
+            return;
+        }
+        let v = cpu.read16(s + QB_SWING);
+        cpu.write16(s + QB_SWING_FROM, v);
+        let v = cpu.read16(s + QB_SWING + 2);
+        cpu.write16(s + QB_SWING_FROM + 2, v);
+        let v = cpu.read32(s + QB_REACH);
+        cpu.write32(s + QB_REACH_FROM, v);
+        let v = cpu.read32(s + QB_REACH + 4);
+        cpu.write32(s + QB_REACH_FROM + 4, v);
+        cpu.write16(s + QB_SWING_TO, p.to_a);
+        cpu.write16(s + QB_SWING_TO + 2, p.to_b);
+        cpu.write32(s + QB_REACH_TO + 4, p.reach);
+        cpu.write32(s + QB_REACH_TO, p.reach);
+        if p.contact {
+            nested!(cpu, 0x060a_40cc, qb_contact_set(cpu, s));
+        }
+        let n = cpu.read8(s + QB_POSE).wrapping_add(1);
+        cpu.write8(s + QB_POSE, n);
+    }
+    let t = cpu.read32(s + QB_PHASE).wrapping_add(0x400);
+    cpu.write32(s + QB_PHASE, t);
+    nested!(cpu, 0x060a_41b8, qb_swing_blend(cpu, s));
+    if cpu.read32(s + QB_PHASE) == 0x1_0000 {
+        cpu.write32(s + QB_PHASE, p.wrap);
+        let n = cpu.read8(s + QB_POSE).wrapping_add(1);
+        cpu.write8(s + QB_POSE, n);
+    }
+}
+
+/// The first arm swing (the object `s`): to +-(0x6000, 0xa000) and reach 0x1e0000, the contact word
+/// set; the clock 0x4000 when it is through the blend; the sway 0x180 a frame by 0x6000.
+pub fn qb_swing_a(cpu: &mut Cpu, s: u32) {
+    let p = QbSwing { to_a: 0x6000, to_b: 0xa000, reach: 0x1e_0000, contact: true, wrap: 0x4000, step: 0x180, amount: 0x6000, base: 0 };
+    qb_swing(cpu, s, &p);
+}
+
+/// The second arm swing: to (0x4000, 0xc000), reach 0x140000, the clock 0 after the blend, the sway
+/// 0x100 a frame by 0x800 round 0x4000.
+pub fn qb_swing_b(cpu: &mut Cpu, s: u32) {
+    let p = QbSwing { to_a: 0x4000, to_b: 0xc000, reach: 0x14_0000, contact: false, wrap: 0, step: 0x100, amount: 0x800, base: 0x4000 };
+    qb_swing(cpu, s, &p);
+}
+
+/// The third arm swing: to (0x3800, 0xc800), reach 0x180000, the sway 0x100 a frame by 0x200 round 0x3800.
+pub fn qb_swing_c(cpu: &mut Cpu, s: u32) {
+    let p = QbSwing { to_a: 0x3800, to_b: 0xc800, reach: 0x18_0000, contact: false, wrap: 0, step: 0x100, amount: 0x200, base: 0x3800 };
+    qb_swing(cpu, s, &p);
+}
+
+/// The second swing with a shot: the swing; from the second level, every 4th frame of the clock
+/// (+0x88) a shot at the angle +0x7c (power 10), the angle 0x810 on and, on every 8th, the sound 0x6f.
+pub fn qb_swing_b_shoot(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x060a_4360, qb_swing_b(cpu, s));
+    if cpu.read32(QB_LEVEL) as i32 > 1 && cpu.read32(s + QB_CLOCK) & 3 == 0 {
+        let a = signed_word(cpu, s + QB_FIRE);
+        cpu.call(QB_FIRE_SHOT, &[s, a, 10]);
+        let f = cpu.read16(s + QB_FIRE).wrapping_add(0x810);
+        cpu.write16(s + QB_FIRE, f);
+        if cpu.read32(s + QB_CLOCK) & 4 != 0 {
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 0x6f));
+        }
+    }
+}
+
+/// A shot at a random angle (the object `s`): the overlay's aim (arm 5) and a random turn of up to
+/// 0x6000 (less 0x3000) added, with a power of 6 to 13 by chance; the sound 0x6f.
+pub fn qb_fire_random(cpu: &mut Cpu, s: u32) {
+    let aim = cpu.call(QB_AIM, &[s, 5]);
+    let r = nested!(cpu, 0x0604_5d90, math::random(cpu, 0)) as u16 as u32;
+    let turn = nested!(cpu, 0x0606_e26c, math::sl_mul_fx(cpu, r, 0x6000));
+    let angle = aim.wrapping_add(0xffff_d000).wrapping_add(turn) as i16 as i32 as u32;
+    let power = ((nested!(cpu, 0x0604_5d90, math::random(cpu, 0)) & 7) + 6) as i16 as i32 as u32;
+    cpu.call(QB_FIRE_SHOT, &[s, angle, power]);
+    nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 0x6f));
+}
+
+/// The shots at the clock's masks (`masks`, by level 1 to 4: 0x1f, 0xf, ... a shot at a random angle
+/// when the clock (+0x88) is 0 under it), and from the second level every 4th frame a shot at +0x7c
+/// (0x1020 more each time, power 10).
+fn qb_rattle(cpu: &mut Cpu, s: u32, masks: [u32; 4]) {
+    if cpu.read32(QB_LEVEL) as i32 > 1 && cpu.read32(s + QB_CLOCK) & 3 == 0 {
+        let a = cpu.read16(s + QB_FIRE).wrapping_add(0x1020);
+        cpu.write16(s + QB_FIRE, a);
+        cpu.call(QB_FIRE_SHOT, &[s, a as i16 as i32 as u32, 10]);
+    }
+    let level = cpu.read32(QB_LEVEL).wrapping_sub(1);
+    if level <= 3 {
+        let v = cpu.read32(s + QB_CLOCK) & masks[level as usize];
+        if v == 0 {
+            nested!(cpu, 0x060a_44ec, qb_fire_random(cpu, s));
+        }
+    }
+}
+
+/// Every 4th frame the sound counter (+0x70, 0-9) on and the overlay's hit sound of its table's
+/// entry played.
+fn qb_pulse(cpu: &mut Cpu, s: u32) {
+    if cpu.read32(GAME_FRAMES) & 3 != 0 {
+        return;
+    }
+    let n = cpu.read8(s + QB_PULSE).wrapping_add(1);
+    cpu.write8(s + QB_PULSE, n);
+    if n as i8 > 9 {
+        cpu.write8(s + QB_PULSE, 0);
+    }
+    let i = cpu.read8(s + QB_PULSE) as i8 as i32 as u32;
+    let sound = cpu.read8(QB_PULSE_SOUNDS.wrapping_add(i)) as i8 as i16 as u16 as u32;
+    cpu.call(QB_HIT_SOUND, &[sound]);
+}
+
+/// The second swing, set up first (the contact word) and with its rattle and sound.
+pub fn qb_swing_b_rattle(cpu: &mut Cpu, s: u32) {
+    if cpu.read8(s + QB_POSE) as i8 == 0 {
+        nested!(cpu, 0x060a_40cc, qb_contact_set(cpu, s));
+    }
+    nested!(cpu, 0x060a_4360, qb_swing_b(cpu, s));
+    qb_rattle(cpu, s, [0x1f, 0xf, 7, 3]);
+    qb_pulse(cpu, s);
+}
+
+/// The second swing with its shot and sound.
+pub fn qb_swing_b_pulse(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x060a_4474, qb_swing_b_shoot(cpu, s));
+    qb_pulse(cpu, s);
+}
+
+/// A burst of the arms' shots by the clock's low byte (+0x88): 0, 0x10, 0x20 the first arm's three
+/// ways, 0x80, 0x90, 0xa0 the second's.
+pub fn qb_burst_low(cpu: &mut Cpu, s: u32) {
+    let v = cpu.read32(s + QB_CLOCK) & 0xff;
+    qb_burst(cpu, s, v, [0, 0x10, 0x20, 0x80, 0x90, 0xa0]);
+}
+
+/// The third swing and, from the second level, its bursts.
+pub fn qb_swing_c_burst(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x060a_46a4, qb_swing_c(cpu, s));
+    if cpu.read32(QB_LEVEL) as i32 > 1 {
+        nested!(cpu, 0x060a_47b8, qb_burst_low(cpu, s));
+    }
+}
+
+/// The key swing's step (the object `s`, `k` 0 or 1 for the arm, `keys` a table of 8-byte entries
+/// from 0x060b0bc4 and so on: a long, a word, the step, a long, a word): the arm's counter
+/// (+0x12c + 4k, the entry in its high half) on by the entry's step, the angle (+0x11e + 2k)
+/// eased from the entry's word to the next's by the low half, the reach (+0x134 + 4k) the same.
+pub fn qb_key_swing(cpu: &mut Cpu, s: u32, k: u32, keys: u32) {
+    cpu.write32(cpu.stack(), s);
+    let at = s.wrapping_add(k.wrapping_mul(4));
+    let count = cpu.read32(at + QB_COUNT);
+    let i = ((count as i32) >> 16) as i16 as i32;
+    let step = signed_word(cpu, keys.wrapping_add((i * 8) as u32).wrapping_add(6));
+    let count = step.wrapping_add(count);
+    cpu.write32(at + QB_COUNT, count);
+    let j = ((count as i32) >> 16) as i16 as i32;
+    let t = count & 0xffff;
+    let entry = keys.wrapping_add((j * 8) as u32);
+    let b = signed_word(cpu, entry + 12);
+    let a = signed_word(cpu, entry + 4);
+    let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, a, b, t));
+    cpu.write16(s + 2 * k + QB_SWING, v as u16);
+    let a = cpu.read32(entry);
+    let b = cpu.read32(entry + 8);
+    let v = nested!(cpu, 0x0606_2ebc, math::ease(cpu, a, b, t));
+    cpu.write32(at + QB_REACH, v);
+}
+
+/// The key sweep (the object `s`, pose +0x118): 0 keeps the angles and reaches as the blend's starts,
+/// sets its ends (0x5000, 0xe800, reaches 0x120000 and 0x1c0000) and goes on; 1 blends (the clock
+/// 0x400 on; at 0x10000 the clock and counters 0 and 0x10000 in +0x130, the next pose); 2 runs both
+/// arms' key swings from 0x060b0bc4, the second arm's angle negated, the counters taken down by
+/// 0x20000 when past it.
+pub fn qb_sweep(cpu: &mut Cpu, s: u32) {
+    let pose = cpu.read8(s + QB_POSE) as i8;
+    if pose == 2 {
+        for k in 0..2u32 {
+            cpu.write32(cpu.stack(), 0x2_0000);
+            nested!(cpu, 0x060a_4870, qb_key_swing(cpu, s, k, QB_ARM_KEYS));
+            let limit = cpu.read32(cpu.stack());
+            if k != 0 {
+                let a = (cpu.read16(s + QB_SWING + 2 * k) as i16).wrapping_neg();
+                cpu.write16(s + QB_SWING + 2 * k, a as u16);
+            }
+            let c = cpu.read32(s + 4 * k + QB_COUNT);
+            if c as i32 > limit as i32 {
+                cpu.write32(s + 4 * k + QB_COUNT, c.wrapping_sub(limit));
+            }
+        }
+        return;
+    }
+    if pose != 1 {
+        if pose != 0 {
+            return;
+        }
+        let v = cpu.read16(s + QB_SWING);
+        cpu.write16(s + QB_SWING_FROM, v);
+        let v = cpu.read16(s + QB_SWING + 2);
+        cpu.write16(s + QB_SWING_FROM + 2, v);
+        let v = cpu.read32(s + QB_REACH);
+        cpu.write32(s + QB_REACH_FROM, v);
+        let v = cpu.read32(s + QB_REACH + 4);
+        cpu.write32(s + QB_REACH_FROM + 4, v);
+        cpu.write16(s + QB_SWING_TO, 0x5000);
+        cpu.write16(s + QB_SWING_TO + 2, 0xe800);
+        cpu.write32(s + QB_REACH_TO, 0x12_0000);
+        cpu.write32(s + QB_REACH_TO + 4, 0x1c_0000);
+        let n = cpu.read8(s + QB_POSE).wrapping_add(1);
+        cpu.write8(s + QB_POSE, n);
+    }
+    let t = cpu.read32(s + QB_PHASE).wrapping_add(0x400);
+    cpu.write32(s + QB_PHASE, t);
+    nested!(cpu, 0x060a_41b8, qb_swing_blend(cpu, s));
+    if cpu.read32(s + QB_PHASE) == 0x1_0000 {
+        cpu.write32(s + QB_PHASE, 0);
+        cpu.write32(s + QB_COUNT, 0);
+        cpu.write32(s + QB_COUNT + 4, 0x1_0000);
+        let n = cpu.read8(s + QB_POSE).wrapping_add(1);
+        cpu.write8(s + QB_POSE, n);
+    }
+}
+
+/// The key sweep and, from the second level, its bursts.
+pub fn qb_sweep_burst(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x060a_490c, qb_sweep(cpu, s));
+    if cpu.read32(QB_LEVEL) as i32 > 1 {
+        nested!(cpu, 0x060a_47b8, qb_burst_low(cpu, s));
+    }
+}
+
+/// The last move (the object `s`, pose +0x118: 0..4): 0 keeps the reaches and angles as the first
+/// swing's keys (0x060b0be4, 0x060b0c24) and starts it, then 1 clears the clock and counters; 2
+/// waits 0x81 frames; 3 runs both arms' key swings (counting the clock) and at 0x66 and 0x1b2 (the
+/// first arm) and 0xcc and 0x14c (the second) sends the arm's part its mode (2 or 4) with the
+/// sound 0x71, and at 0x2b2 clears the clock and counters and goes on.
+pub fn qb_hold(cpu: &mut Cpu, s: u32) {
+    let pose = cpu.read8(s + QB_POSE) as i8 as i32 as u32;
+    if pose > 4 {
+        return;
+    }
+    if pose == 0 {
+        let v = cpu.read32(s + QB_REACH);
+        cpu.write32(QB_SWEEP_KEYS[0], v);
+        let v = cpu.read16(s + QB_SWING);
+        cpu.write16(QB_SWEEP_KEYS[0] + 4, v);
+        let v = cpu.read32(s + QB_REACH + 4);
+        cpu.write32(QB_SWEEP_KEYS[1], v);
+        let v = cpu.read16(s + QB_SWING + 2);
+        cpu.write16(QB_SWEEP_KEYS[1] + 4, v);
+        nested!(cpu, 0x060a_40cc, qb_contact_set(cpu, s));
+        qb_pose_on(cpu, s);
+    }
+    if pose <= 1 {
+        cpu.write32(s + QB_PHASE, 0);
+        cpu.write32(s + QB_COUNT, 0);
+        cpu.write32(s + QB_COUNT + 4, 0);
+        qb_pose_on(cpu, s);
+        return;
+    }
+    match pose {
+        2 => {
+            let t = cpu.read32(s + QB_PHASE).wrapping_add(1);
+            cpu.write32(s + QB_PHASE, t);
+            if t != 0x81 {
+                return;
+            }
+            cpu.write32(s + QB_PHASE, 0);
+            qb_pose_on(cpu, s);
+        }
+        3 => {
+            let t = cpu.read32(s + QB_PHASE).wrapping_add(1);
+            cpu.write32(s + QB_PHASE, t);
+            nested!(cpu, 0x060a_4870, qb_key_swing(cpu, s, 0, QB_SWEEP_KEYS[0]));
+            nested!(cpu, 0x060a_4870, qb_key_swing(cpu, s, 1, QB_SWEEP_KEYS[1]));
+            let t = cpu.read32(s + QB_PHASE);
+            let (arm, mode) = match t {
+                0x66 => (QB_ARM_A, 2),
+                0xcc => (QB_ARM_B, 4),
+                0x14c => (QB_ARM_A, 4),
+                0x1b2 => (QB_ARM_B, 2),
+                0x2b2 => {
+                    cpu.write32(s + QB_PHASE, 0);
+                    cpu.write32(s + QB_COUNT, 0);
+                    cpu.write32(s + QB_COUNT + 4, 0);
+                    qb_pose_on(cpu, s);
+                    return;
+                }
+                _ => return,
+            };
+            let a = cpu.read32(s + arm);
+            if a == 0 {
+                return;
+            }
+            nested!(cpu, 0x0600_50d4, sound::se_set(cpu, 0x71));
+            let a = cpu.read32(s + arm);
+            let part = cpu.read32(a + QB_ARM_PART);
+            cpu.write8(part + QB_MODE, mode);
+        }
+        _ => {}
+    }
+}
+
+/// The pose byte (+0x118) one more.
+fn qb_pose_on(cpu: &mut Cpu, s: u32) {
+    let n = cpu.read8(s + QB_POSE).wrapping_add(1);
+    cpu.write8(s + QB_POSE, n);
+}
+
+/// The last move with its rattle (shots at a clock's masks 0x1f, 0xf, 0xf, 0x7).
+pub fn qb_hold_rattle(cpu: &mut Cpu, s: u32) {
+    nested!(cpu, 0x060a_4b68, qb_hold(cpu, s));
+    qb_rattle(cpu, s, [0x1f, 0xf, 0xf, 7]);
+}
