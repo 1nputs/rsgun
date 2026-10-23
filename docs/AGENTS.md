@@ -142,6 +142,12 @@ into the next brief for that overlay.
   own compare runs' reports.
 - **Shell**: never `pkill -f`/`pgrep -f` with a pattern your own shell's command line matches
   (`rsgun --[h]eadless`); no foreground `sleep`; wait with a background `until` loop.
+- **rustc crashes now and then** (SIGSEGV in the release build, the large `rewrites!` blocks;
+  .cargo/config.toml's RUST_MIN_STACK made it rarer, not gone): `cargo check` shows real errors,
+  a rerun builds. A failed build leaves the old target/release/rsgun: confirm "Finished" before
+  copying it for a compare (the orchestrator once started runs on a stale binary).
+- **Rebase, then rerun.** A batch checked before its rebase onto merged shared fixes is rerun on
+  the rebased tree before merging (two STG03 batches were checked without the stale-stack fixes).
 - **Usage limits**: long-lived agents hit them; batch agents with short reports do not. If an
   agent stops on a limit, message it to resume rather than starting over.
 
