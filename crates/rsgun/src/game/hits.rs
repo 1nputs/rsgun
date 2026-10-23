@@ -1036,6 +1036,9 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
             break;
         }
         let entry = |cpu: &mut Cpu| base + BOX * cpu.read16(count) as i16 as i32 as u32;
+        // what the SH-2 code holds in r8-r12 (the count's and the list's addresses, the object, 0,
+        // the box): the turning's callee pushes them, and later code reads the slots
+        let regs = [(8, count), (9, base), (10, obj), (11, 0), (12, desc)];
         let kind = cpu.read8(desc + 1);
         let e = entry(cpu);
         cpu.write8(e + KIND, kind);
@@ -1052,7 +1055,7 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
             let sy = cpu.read32(obj + OBJ_SCALE_Y);
             cpu.write32(t + 0x10, sy);
             turn_struct(cpu, obj, t);
-            cpu.call_returning(0x0604_53c8, TURN_POINT, &[t]);
+            cpu.holding(&regs, |cpu| cpu.call_returning(0x0604_53c8, TURN_POINT, &[t]));
             (cpu.read32(t), cpu.read32(t + 4))
         };
         let e = entry(cpu);
@@ -1082,7 +1085,7 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
                 cpu.write32(t, d as u32);
                 cpu.write32(t + 8, d as u32);
                 cpu.write32(t + 4, 0);
-                cpu.call_returning(0x0604_54ee, TURN_POINT, &[t]);
+                cpu.holding(&regs, |cpu| cpu.call_returning(0x0604_54ee, TURN_POINT, &[t]));
                 let a = (cpu.read32(t) as i32).wrapping_abs().wrapping_sub(cpu.read32(t + 8) as i32);
                 cpu.write32(t, a as u32);
                 let b = (cpu.read32(t + 4) as i32).wrapping_abs();
@@ -1092,7 +1095,7 @@ pub fn register_boxes(cpu: &mut Cpu, obj: u32) -> u32 {
                 cpu.write32(t + 4, d as u32);
                 cpu.write32(t + 8, d as u32);
                 cpu.write32(t, 0);
-                cpu.call_returning(0x0604_5534, TURN_POINT, &[t]);
+                cpu.holding(&regs, |cpu| cpu.call_returning(0x0604_5534, TURN_POINT, &[t]));
                 let a = (cpu.read32(t) as i32).wrapping_abs();
                 cpu.write32(t, a as u32);
                 let b = (cpu.read32(t + 4) as i32).wrapping_abs().wrapping_sub(cpu.read32(t + 8) as i32);
