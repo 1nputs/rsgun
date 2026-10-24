@@ -5,14 +5,15 @@
 //! BIOS ROM (the operating time's count, an empty hook, the backup RAM's helpers). The machine's
 //! code, not the game's: read where the BIOS puts it, never copied into the source.
 //!
-//! Left to the SH-2 code: the interrupt layer's entries (0x06001f48-0x06001ff8: each takes an
-//! exception, saves what it uses, calls the handler in the vector table and ends in `rte`, which a
-//! native registered at its entry cannot do: it returns to PR), the ROM routines (natives are
-//! registered in work RAM-H only) and the code that never runs in a game (the pad modes the
-//! cabinet's setting does not select, the service menu's helpers).
+//! The exception stubs (0x06001f48-0x06001ff8) are natives of the exception kind (stv::native):
+//! entered as the CPU takes an interrupt, they end with `rte`.
+//!
+//! Left to the SH-2 code: the code that never runs in a game (the pad modes the cabinet's setting
+//! does not select, the service menu's helpers, the stubs of vectors no game uses).
 
 use super::system::bios;
 use super::{nested, Cpu};
+use stv::sh2::{Bus, Sh2, SR_MASK};
 
 /// The BIOS's work area.
 const DATA: u32 = 0x0600_0700;
@@ -326,6 +327,19 @@ pub fn backup_io(cpu: &mut Cpu, kind: u32, at: u32, value: u32) -> u32 {
     // the SH-2 code's `mova` leaves r0 at the table, which a routine that sets no r0 hands back
     cpu.leave(&[(0, 0x0600_141c)]);
     cpu.call(routine, &[kind << 2, at, value])
+}
+
+/// 0x0600142c: the 16-bit value in the odd bytes from `at`+1 (the first the high byte).
+pub fn backup_read_word(cpu: &mut Cpu, _kind: u32, at: u32) -> u32 {
+    let high = cpu.read8(at + 1) as u32;
+    let low = cpu.read8(at + 3) as u32;
+    high << 8 | low
+}
+
+/// 0x06001458: the low 16 bits of `value` written to the odd bytes from `at`+1 (the high byte first).
+pub fn backup_write_word(cpu: &mut Cpu, _kind: u32, at: u32, value: u32) {
+    cpu.write8(at + 3, value as u8);
+    cpu.write8(at + 1, (value >> 8) as u8);
 }
 
 /// 0x0600143e: the 32-bit value in the odd bytes from `at`+1 (the first the highest).
@@ -848,4 +862,267 @@ pub fn shift_right_signed_regs(cpu: &mut Cpu) -> u32 {
 fn shift_right_signed(cpu: &mut Cpu, x: u32, n: u32) -> u32 {
     cpu.leave(&[(0, x), (1, n)]);
     nested!(cpu, 0x0600_2654, shift_right_signed_regs(cpu))
+}
+
+/// The BIOS's exception stubs push r0 and set it to the stub's code (the vector's handler and
+/// priority are found by it), and all share the dispatch at 0x06001ffc: the tables of the
+/// handlers (VECTORS) and of the SR and SCU mask for each (PRIORITIES), indexed by the code.
+const DISPATCH_RETURN: u32 = 0x0600_2030;
+/// The dispatch's table of SR and SCU mask bits for each code (the same entries as PRIORITIES,
+/// which starts at code 64).
+const SR_MASKS: u32 = 0x0600_0980;
+/// SR the dispatch leaves the handler's return with: every interrupt masked.
+const SR_MASKED: u32 = 0xf0;
+
+/// The stubs at 0x06001f48, 0x06001f4e, ... (each `push r0; r0 = code; bra 0x06001ffc`) and the
+/// dispatch at 0x06001ffc: an exception with `code` was taken (SR and PC pushed). It saves r0-r7,
+/// PR, GBR and the SCU's mask, sets SR and the SCU's mask for the exception (SR_MASKS: SR in the
+/// high half, the mask bits to add in the low), calls the handler VECTORS holds (PR
+/// DISPATCH_RETURN, as `jsr` leaves it, which a handler that pushes PR leaves on the stack), then
+/// takes everything back and ends with `rte`. It registers (stv::native::Natives::register_exception)
+/// so that the machine enters it as it takes the exception.
+pub fn exception(sh2: &mut Sh2, bus: &mut dyn Bus, code: u32) {
+    let fp = sh2.r[14];
+    let mut cpu = Cpu { sh2, bus, caller_r14: fp, r14_out: None };
+    let [r0, r1, r2, r3, r4, r5, r6, r7, ..] = cpu.sh2.r;
+    let (pr, gbr) = (cpu.sh2.pr, cpu.sh2.gbr);
+    cpu.push(&[r0]);
+    let offset = code << 2;
+    cpu.push(&[r1]);
+    cpu.push(&[r2]);
+    let mask = cpu.read32(SCU_MASK_COPY);
+    cpu.push(&[r3]);
+    cpu.push(&[mask]);
+    cpu.push(&[r4]);
+    cpu.push(&[r5]);
+    let entry = cpu.read32(SR_MASKS + offset);
+    cpu.sh2.sr = (entry >> 16) & SR_MASK;
+    let mask_now = mask | entry as u16 as i16 as u32;
+    cpu.write32(SCU_MASK_COPY, mask_now);
+    cpu.write32(IMS, mask_now);
+    cpu.push(&[r6]);
+    let handler = cpu.read32(VECTORS + offset);
+    cpu.push(&[r7]);
+    cpu.push(&[pr]);
+    cpu.push(&[gbr]);
+    // what the handler is handed in r0-r6
+    cpu.leave(&[(0, offset), (1, SCU_MASK_COPY), (2, mask_now), (3, VECTORS), (4, entry as u16 as i16 as u32), (5, IMS), (6, handler)]);
+    cpu.call_returning(DISPATCH_RETURN, handler, &[]);
+    let pull = |cpu: &mut Cpu| {
+        let v = cpu.read32(cpu.sh2.r[15]);
+        cpu.pop(4);
+        v
+    };
+    cpu.sh2.gbr = pull(&mut cpu);
+    cpu.sh2.pr = pull(&mut cpu);
+    cpu.sh2.r[7] = pull(&mut cpu);
+    cpu.sh2.r[0] = SR_MASKED;
+    cpu.sh2.r[6] = pull(&mut cpu);
+    cpu.sh2.r[3] = SCU_MASK_COPY;
+    cpu.sh2.r[5] = pull(&mut cpu);
+    cpu.sh2.r[1] = IMS;
+    cpu.sh2.r[4] = pull(&mut cpu);
+    let mask = pull(&mut cpu);
+    cpu.sh2.r[2] = mask;
+    cpu.sh2.sr = SR_MASKED;
+    cpu.write32(SCU_MASK_COPY, mask);
+    cpu.sh2.r[3] = pull(&mut cpu);
+    cpu.write32(IMS, mask);
+    cpu.sh2.r[2] = pull(&mut cpu);
+    cpu.sh2.r[1] = pull(&mut cpu);
+    cpu.sh2.r[0] = pull(&mut cpu);
+    stv::native::rte(cpu.sh2, cpu.bus);
+}
+
+/// The operating time's count, in the BIOS's work RAM: a 32-bit sum that wraps.
+const TIME_COUNT: u32 = 0x0600_0758;
+/// What the ROM's time routine adds to the count each time it is called.
+const TIME_STEP: u32 = 0x5592_9fad;
+const READ_LONG_ROUTINE: u32 = 0x0600_143e;
+const WRITE_LONG_ROUTINE: u32 = 0x0600_1464;
+
+/// 0x00000efc (the ROM's table at 0x000010e8, called each frame): the operating time's count
+/// (TIME_COUNT) goes up by TIME_STEP; when the signed sum overflows, the backup RAM's 32-bit value
+/// at its start (read with 0x0600143e) is run through `saturating_add` with 3 and written back
+/// (0x06001464).
+pub fn time_count(cpu: &mut Cpu) {
+    let (sum, overflow) = (cpu.read32(TIME_COUNT) as i32).overflowing_add(TIME_STEP as i32);
+    cpu.write32(TIME_COUNT, sum as u32);
+    if !overflow {
+        return;
+    }
+    let (kind, link) = (cpu.reg(4), 0x0000_0f12);
+    let v = cpu.call_returning(link, READ_LONG_ROUTINE, &[kind, BACKUP]);
+    let n = clamp_add(v, 3);
+    cpu.call_returning(0x0000_0f20, WRITE_LONG_ROUTINE, &[v, BACKUP, n]);
+}
+
+/// 0x00000ecc: `a` + `b` for a non-negative `a`; for a negative `a` the sum, but -1 where it comes
+/// out non-negative (a count that ran below 0 and is brought back to none).
+fn clamp_add(a: u32, b: u32) -> u32 {
+    let sum = a.wrapping_add(b);
+    if (a as i32) >= 0 || (sum as i32) < 0 { sum } else { u32::MAX }
+}
+
+/// 0x0000372c (the ROM's area routine): the address in the backup RAM of the settings block of the
+/// region byte at REGION (0x0f00 bytes each). Leaves r2 and r3 (its address base and the size).
+pub fn area(cpu: &mut Cpu) -> u32 {
+    const BASE: u32 = 0x2018_0100;
+    const SIZE: u32 = 0x0f00;
+    let region = cpu.read8(REGION) as u32;
+    cpu.leave(&[(2, BASE), (3, SIZE)]);
+    BASE.wrapping_add((region * SIZE) as i16 as u32)
+}
+
+/// 0x000044fc: the ROM's empty hook (a function of the tables that nothing hooks into).
+pub fn empty_hook(_cpu: &mut Cpu) {}
+
+/// 0x00004dc0: the 8 bytes of the region's block in the BIOS's settings table at 0x0600079c (10
+/// bytes each, the first two skipped) copied to `dest`. Leaves the registers its loop ends with.
+pub fn settings_copy(cpu: &mut Cpu, dest: u32) {
+    const TABLE: u32 = 0x0600_079c;
+    let region = cpu.read8(REGION) as i8 as i32;
+    let offset = region.wrapping_mul(10) as i8 as i32;
+    let mut from = TABLE.wrapping_add(offset as u32).wrapping_add(2);
+    let mut to = dest;
+    let mut last = (0, 0);
+    for _ in 0..4 {
+        let a = cpu.read8(from);
+        cpu.write8(to, a);
+        let b = cpu.read8(from + 1);
+        last = (b as u32, to.wrapping_add(1));
+        cpu.write8(to + 1, b);
+        from = from.wrapping_add(2);
+        to = to.wrapping_add(2);
+    }
+    cpu.leave(&[(1, last.0), (2, TABLE), (3, last.1), (4, to), (5, 0), (6, from)]);
+    cpu.leave_t(true);
+}
+
+/// The BIOS's table entries the ROM's routines call through: a service that answers the running
+/// count (0x06000640), the checksum of a block of the backup RAM (0x06000600).
+const BIOS_COUNT: u32 = 0x0600_0640;
+const BIOS_CRC: u32 = 0x0600_0600;
+/// The count as the BIOS last took it, and the counts at the starts of up to 16 plays (a word each).
+const COUNT_AT_STOP: u32 = DATA + 0x140;
+const COUNT_AT_START: u32 = DATA + 0x130;
+/// The backup RAM's totals (counters in 32-bit values): the running time, and by setting (a block of
+/// 64 bytes each, BACKUP_BY_SETTING) the time at +36 and +44 and the longest at +20 and +28.
+const BACKUP_TIME: u32 = BACKUP + 0x3d54;
+
+/// 0x00003842 (called by the game): the running time's bookkeeping, for the operation `op` (its
+/// low nibble `n`, its next the kind). Kind 0, n 0: the count taken now is kept as the count at stop;
+/// n 1: the count since then added (the sum clamps) to the backup RAM's total time and to this
+/// setting's. Kind 1: the count taken now kept as the start of play `n`. Kind 2: the count since play
+/// `n` started added to the totals as for kind 0, and made the setting's longest time if it is
+/// longer (in two of them, the second also when it is 0). All end by the BIOS's backup-changed
+/// service, jumped to with the caller's return address.
+pub fn play_counts(cpu: &mut Cpu, op: u32) {
+    let caller = cpu.pr();
+    let low = op & 15;
+    let region = cpu.read8(REGION) as u32;
+    let setting = BACKUP_BY_SETTING + (region << 6);
+    // the backup service, read from the BIOS's table at each use as the SH-2 code does
+    let io = |cpu: &mut Cpu, pr: u32, kind: u32, at: u32, value: u32| {
+        let f = cpu.read32(BIOS_BACKUP_IO);
+        cpu.call_returning(pr, f, &[kind, at, value])
+    };
+    match op >> 4 {
+        0 => match low {
+            0 => {
+                let f = cpu.read32(BIOS_COUNT);
+                let now = cpu.call_returning(0x0000_3884, f, &[]);
+                cpu.write32(COUNT_AT_STOP, now);
+            }
+            1 => {
+                let f = cpu.read32(BIOS_COUNT);
+                let now = cpu.call_returning(0x0000_3892, f, &[]);
+                let pushed = cpu.read32(BIOS_BACKUP_IO);
+                let delta = now.wrapping_sub(cpu.read32(COUNT_AT_STOP));
+                cpu.push(&[pushed]);
+                let total = io(cpu, 0x0000_38ac, READ_LONG, BACKUP_TIME, 0);
+                let sum = clamp_add(total, delta);
+                cpu.pop(4);
+                cpu.call_returning(0x0000_38be, pushed, &[WRITE_LONG, BACKUP_TIME, sum]);
+                let f = cpu.read32(BIOS_BACKUP_IO);
+                cpu.push(&[f]);
+                let total = io(cpu, 0x0000_38ce, READ_LONG, setting + 44, 0);
+                let sum = clamp_add(total, delta);
+                cpu.pop(4);
+                cpu.call_returning(0x0000_38e0, f, &[WRITE_LONG, setting + 44, sum]);
+            }
+            _ => {}
+        },
+        1 => {
+            let f = cpu.read32(BIOS_COUNT);
+            let now = cpu.call_returning(0x0000_3928, f, &[]);
+            cpu.write32(COUNT_AT_START + 4 * low, now);
+        }
+        2 => {
+            let f = cpu.read32(BIOS_COUNT);
+            let now = cpu.call_returning(0x0000_3932, f, &[]);
+            let started = cpu.read32(COUNT_AT_START + 4 * low);
+            let pushed = cpu.read32(BIOS_BACKUP_IO);
+            let delta = now.wrapping_sub(started);
+            cpu.push(&[pushed]);
+            let total = io(cpu, 0x0000_3950, READ_LONG, setting + 36, 0);
+            let sum = clamp_add(total, delta);
+            cpu.pop(4);
+            cpu.call_returning(0x0000_3962, pushed, &[WRITE_LONG, setting + 36, sum]);
+            let longest = io(cpu, 0x0000_396e, READ_LONG, setting + 20, 0);
+            if longest < delta {
+                io(cpu, 0x0000_3980, WRITE_LONG, setting + 20, delta);
+            }
+            let longest = io(cpu, 0x0000_398c, READ_LONG, setting + 28, 0);
+            if longest == 0 || longest > delta {
+                io(cpu, 0x0000_39a2, WRITE_LONG, setting + 28, delta);
+            }
+        }
+        _ => {}
+    }
+    // the SH-2 code's tail: its frame (8 words) is let go and the service jumped to, as for the caller
+    let mark = cpu.read32(BIOS_MARK_DIRTY);
+    cpu.pop(32);
+    cpu.call_returning(caller, mark, &[]);
+}
+
+/// 0x00003a9c (called by the game): the backup RAM's settings block for the region written with the
+/// defaults (0x00004908), then the checksum of the block (the BIOS's service, 0x17c bytes) written
+/// as its first word and the first 96 words copied to the mirror.
+pub fn backup_reset(cpu: &mut Cpu) {
+    cpu.write32(cpu.stack(), BACKUP_MIRROR);
+    let region = cpu.read8(REGION) as u32;
+    nested!(cpu, 0x0000_4908, returning 0x0000_3aca, backup_defaults(cpu, region, BACKUP_BY_SETTING + (region << 6)));
+    let io = cpu.read32(BIOS_BACKUP_IO);
+    let crc = cpu.read32(BIOS_CRC);
+    let sum = cpu.call_returning(0x0000_3ada, crc, &[BACKUP_CHECK + 4, BACKUP_CHECKED_BYTES]);
+    cpu.call_returning(0x0000_3ae2, io, &[WRITE_WORD, BACKUP_CHECK, sum & 0xffff]);
+    for i in 0..BACKUP_MIRRORED {
+        let v = cpu.read32(BACKUP_CHECK + 4 * i);
+        cpu.write32(BACKUP_MIRROR + 4 * i, v);
+    }
+}
+
+/// The words the defaults' first word is taken from (one for each region), and the ROM's block of
+/// 60 bytes the rest is copied from.
+const DEFAULT_WORDS: u32 = 0x0600_06b8;
+const DEFAULTS: u32 = 0x0000_67b8;
+
+/// 0x00004908: the backup RAM's settings block at `dest` for `region` initialised: the region's word
+/// written by the service (a 16-bit write), then the ROM's 60 bytes of defaults copied after it
+/// from `dest`+4.
+pub fn backup_defaults(cpu: &mut Cpu, region: u32, dest: u32) {
+    let frame = cpu.stack();
+    cpu.write32(frame, region);
+    cpu.write32(frame + 8, DEFAULTS);
+    cpu.write32(frame + 4, dest);
+    let f = cpu.read32(BIOS_BACKUP_IO);
+    let word = cpu.read16(DEFAULT_WORDS + 2 * region) as u32;
+    cpu.call_returning(0x0000_4932, f, &[WRITE_WORD, dest, word]);
+    for i in 0..30 {
+        let v = cpu.read16(DEFAULTS + 2 * i);
+        cpu.write16(dest + 4 + 2 * i, v);
+    }
+    cpu.write32(frame + 4, dest + 64);
+    cpu.write32(frame + 8, DEFAULTS + 60);
 }

@@ -10,7 +10,7 @@ default unchanged); see "The native boot, built" (section before 6). Next: make 
 accept, the BIOS-menu path.
 
 **Now (22 October 2026, afternoon).** Everything the game runs is readable Rust now but its stage
-overlays (and, on purpose, the .control interrupt layer and the BIOS's own services). The work is
+overlays. The work is
 split as docs/AGENTS.md describes: this session orchestrates, two Sonnet agents do one batch each.
 
 Overlays (fingerprint, game mode, marathon segments, worktree and branch, where it stands):
@@ -60,24 +60,37 @@ two overlays run, check your own compare runs' reports. How each function is don
 step 1, "The overlay loop". The branch is main.
 
 Before the overlays (history in `git log`): the main image's game code, the game's part of
-.control but its interrupt layer, SGL's library and core, and Sega's sound library's set-up were
+.control, SGL's library and core, and Sega's sound library's set-up were
 rewritten and checked; after the BIOS's handover a native run interprets nothing of the game's or
 SGL's code (section 6, step 4). The last whole-game check before the overlay work
 (`check_marathon.sh 7`, reports in out/port/marathon-898fd01, the reference the overlay work
 reads) had every call equal in all 21 segments. The native check runs play1 and the attract mode
 at `--cpu-speed 16` against the interpreter's pictures. `check.sh` is the quick gate on main.
-The BIOS (23 October; PLAN.md has the decision): after the handover a native run interprets only
-the BIOS ROM's 0x0efc (each frame: the operating-time count at 0x06000758), 0x44fc (an empty hook,
-three times a frame, also through the RAM stubs 0x0600143e/0x06001464) and, rarely, 0x372c (area),
-0x4dc0 (settings), 0x3842 (players), 0x3a9c (backup clear); its RAM code (0x06000c00-0x06003000,
-the service table at 0x06000200-0x06000800 points into it: interrupts, SCU mask, vblank hook,
-coins, credits, continue, backup I/O) is 41 functions called, 40 of them mechanical translations.
-Next: rewrite those in bios.rs (compare mode, as the overlays), then the native boot (the handover
+The BIOS (23 October; PLAN.md has the decision): after the handover a native run passes nothing to
+the interpreter (play1, 3600 frames: 0 calls). All of it is readable Rust in bios.rs, checked call
+by call: the RAM code (0x06000c00-0x06003000, the service table at 0x06000200-0x06000800 points
+into it: interrupts, SCU mask, vblank hook, coins, credits, continue, backup I/O) as 33 functions;
+the exception stubs 0x06001f48 ... 0x06001ff8 (ten of the 30 are registered: the ones a run
+reaches, codes 64, 65, 66, 67, 68, 71, 73, 74, 75, 77) as natives of the exception kind
+(stv::native: registered with `register_exception`, entered as the CPU takes the exception, ending
+in `native::rte` like the SH-2 code, compare mode taking their return from the stack the exception
+pushed; checked by the registers and memory they leave, Keeps(0xffff)); and the BIOS ROM's
+routines (natives can be registered in the ROM too): 0x0efc (the operating-time count, each
+frame; it bsrf's into the RAM functions 0x0600143e/0x06001464, called as the SH-2 code does, and
+inlines 0x0ecc), 0x372c (area), 0x44fc (an empty hook), 0x4dc0 (settings), 0x3842 (play-time
+counts), 0x3a9c (backup reset) and 0x4908 (the defaults it writes). The game's interrupt layer
+in .control (SGL's, interrupts.rs: 0x06064f68, 0x06065064, 0x0606515c, 0x06065194, 0x060651e0,
+0x060651f0, and the vector 3 stub 0x0606521e with the common code at 0x060652c0 it jumps to) is
+rewritten too; not reached by any run, so left to the translation: the getter 0x06064f94 and
+0x060650f0 and the other 29 vector stubs (0x0606520c + 6n, same body with n). The interrupt
+mask lowered by `ldc` in native code takes effect at the next tick point (a handler's `wait`/
+`spend`, or a call into the interpreter), not at the next instruction as in the SH-2.
+Next: the native boot (the handover
 state is mapped in "The native boot: the handover state", before section 6; native_boot.rs builds
 work RAM, the CPUs, the devices and the sound side equal to it, `--native-boot-check`; `--native-boot`
 starts a run from it). Left for the boot: see "The native boot, built" (what is not equal, other
 EEPROMs, making it the default).
-Left besides the overlays: the BIOS's services (the machine's code, not the game's), and a
+Left besides the overlays: a
 readable pass over the routines asm2sm.py generated (the slave's polygon pipeline, the VDP
 set-up). When the overlays are done, run the whole-game check again on main.
 
@@ -881,7 +894,7 @@ and making it the default.
 4. The rewrite, by calls in the marathon (the evidence's `t ... c FROM TO COUNT` lines summed by
    TO, less the entries in `rewrites!`; `calls.py` for one function's callers). On wip-b6: the
    game's part of .control (0x06040000-0x06066000) is done but for the interrupt layer
-   (0x06064f68-0x06065200 and the vector stub 0x0606521e, left on purpose); the main image's game
+   (0x06064f68-0x06065200 and the vector stub 0x0606521e: done, interrupts.rs); the main image's game
    code is done (0x06003000-0x06033000: GCC's shift helpers too, `clib::ashiftrt_r4`, which keep
    their value in r4); below that is the BIOS's code in RAM, which is the machine's, not the
    game's (a question for later: the BIOS's services would want their own implementation, in the

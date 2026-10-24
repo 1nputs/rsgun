@@ -27,6 +27,7 @@ mod gouraud;
 mod ground;
 mod hits;
 mod hud;
+mod interrupts;
 mod kinds;
 mod logos;
 mod main_loop;
@@ -329,7 +330,7 @@ impl Prologue {
         let mut words = [None; 16];
         let mut pc = entry;
         for _ in 0..16 {
-            let op = bus.read16(pc);
+            let op = bus.fetch16(pc);
             let n = ((op >> 8) & 0xF) as usize;
             let m = ((op >> 4) & 0xF) as u8;
             let branch = matches!(op, 0x000B | 0x002B)
@@ -348,12 +349,16 @@ impl Prologue {
                 p.pushes.push(PR_PUSH);
             } else if op == 0x4F13 {
                 p.pushes.push(GBR_PUSH);
+            } else if op == 0x4F02 {
+                p.pushes.push(MACH_PUSH);
+            } else if op == 0x4F12 {
+                p.pushes.push(MACL_PUSH);
             } else if op & 0xFF00 == 0x7F00 {
                 p.locals = (op as u8 as i8 as i32).wrapping_neg() as u32;
                 break;
             } else if op & 0xF000 == 0x9000 {
                 let at = pc + 4 + 2 * (op & 0xFF) as u32;
-                words[n] = Some(bus.read16(at) as i16 as i32);
+                words[n] = Some(bus.fetch16(at) as i16 as i32);
             } else if op & 0xFF0F == 0x3F0C {
                 if let Some(w) = words[m as usize] {
                     p.locals = w.wrapping_neg() as u32;
@@ -403,7 +408,9 @@ pub(crate) use nested;
 /// (`-> ()` for none), arguments and result as u32. The SH-2 entry for each makes its SH-2
 /// function's prologue (its pushes and frame, [`Prologue`]: its callees get the stack where the
 /// SH-2 code had it; some hand the video chips' DMA a buffer of theirs on it), moves the
-/// arguments from r4-r7 and the result to r0, and returns to PR.
+/// arguments from r4-r7 and the result to r0, and returns to PR. `-> regs` and `-> regs_void`
+/// (for the BIOS's assembly, whose callers may read any register) have every register r0-r15
+/// checked at the end, so the rewrite must leave r1-r7 as the SH-2 code does (`Cpu::leave`).
 macro_rules! rewrites {
     // the overlay window's code the client names $o (states::overlay_name)
     ($n:ident; overlay $o:literal; $($entry:literal => $f:path [$($arg:ident),* $(; $($sarg:ident),+)?] -> $ret:tt),* $(,)?) => {
@@ -452,9 +459,12 @@ macro_rules! rewrites {
     };
     (@result $sh2:ident, $v:ident, ()) => { let () = $v; };
     (@result $sh2:ident, $v:ident, slave) => { let () = $v; };
+    (@result $sh2:ident, $v:ident, regs_void) => { let () = $v; };
     (@result $sh2:ident, $v:ident, $t:tt) => { $sh2.r[0] = $v; };
     (@contract ()) => { Contract::AbiVoid };
     (@contract slave) => { Contract::Keeps(SLAVE_KEEPS) };
+    (@contract regs) => { Contract::Keeps(0xffff) };
+    (@contract regs_void) => { Contract::Keeps(0xffff) };
     (@contract $t:tt) => { Contract::Abi };
 }
 
@@ -1320,6 +1330,16 @@ pub fn register(n: &mut Natives) {
         0x0603_5070 => system::set_interrupt_mask[mask] -> (),
         0x0600_136a => system::next_unless_end[n] -> u32,
     }
+    // SGL's interrupt layer (interrupts.rs)
+    rewrites! { n;
+        0x0606_4f68 => interrupts::set_handler[vector, handler] -> (),
+        0x0606_5064 => interrupts::install[vector, handler] -> (),
+        0x0606_515c => interrupts::mask_level[] -> u32,
+        0x0606_5194 => interrupts::set_mask_level[level] -> (),
+        0x0606_51e0 => interrupts::set_sr[value] -> (),
+        0x0606_51f0 => interrupts::get_sr[] -> u32,
+        0x0606_521e => interrupts::vector_3[] -> (),
+    }
     // the BIOS's code in work RAM-H (bios.rs)
     rewrites! { n;
         0x0600_0c00 => bios::scu_mask_set[mask] -> (),
@@ -1334,7 +1354,9 @@ pub fn register(n: &mut Natives) {
         0x0600_13bc => bios::crc_bytes[at, count] -> u32,
         0x0600_13e6 => bios::crc_words[at, bytes] -> u32,
         0x0600_1412 => bios::backup_io[kind, at, value] -> u32,
+        0x0600_142c => bios::backup_read_word[kind, at] -> u32,
         0x0600_143e => bios::backup_read_long[kind, at] -> u32,
+        0x0600_1458 => bios::backup_write_word[kind, at, value] -> (),
         0x0600_1464 => bios::backup_write_long[kind, at, value] -> u32,
         0x0600_14a8 => bios::set_interrupt[vector, handler] -> (),
         0x0600_14c0 => bios::set_priorities[from] -> (),
@@ -1352,6 +1374,34 @@ pub fn register(n: &mut Natives) {
         0x0600_22dc => bios::pad_two[pad, extra] -> (),
         0x0600_249c => bios::sound_switches[n] -> (),
         0x0600_2654 => bios::shift_right_signed_regs[] -> u32,
+    }
+    // the BIOS ROM's routines the game reaches (bios.rs)
+    rewrites! { n;
+        0x0000_0efc => bios::time_count[] -> (),
+        0x0000_372c => bios::area[] -> regs,
+        0x0000_3842 => bios::play_counts[op] -> (),
+        0x0000_3a9c => bios::backup_reset[] -> (),
+        0x0000_44fc => bios::empty_hook[] -> regs_void,
+        0x0000_4908 => bios::backup_defaults[region, dest] -> (),
+        0x0000_4dc0 => bios::settings_copy[dest] -> regs_void,
+    }
+    // the BIOS's exception stubs (bios.rs): entered as the CPU takes the exception, ending in rte
+    macro_rules! stubs {
+        ($($entry:literal => $code:literal),* $(,)?) => {
+            $( n.register_exception($entry, |sh2: &mut Sh2, bus: &mut dyn Bus| bios::exception(sh2, bus, $code), concat!("exception_", $code), Contract::Keeps(0xffff)); )*
+        };
+    }
+    stubs! {
+        0x0600_1f48 => 64,
+        0x0600_1f4e => 65,
+        0x0600_1f54 => 67,
+        0x0600_1f5a => 68,
+        0x0600_1f6c => 71,
+        0x0600_1f78 => 73,
+        0x0600_1f7e => 74,
+        0x0600_1f84 => 75,
+        0x0600_1f90 => 77,
+        0x0600_1ff8 => 66,
     }
     // TITLE.BIN's code (the logo mode's)
     rewrites! { n; overlay "TITLE";
