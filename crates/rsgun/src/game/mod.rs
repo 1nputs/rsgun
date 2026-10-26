@@ -1386,22 +1386,15 @@ pub fn register(n: &mut Natives) {
         0x0000_4dc0 => bios::settings_copy[dest] -> regs_void,
     }
     // the BIOS's exception stubs (bios.rs): entered as the CPU takes the exception, ending in rte
+    // Not registered for now: with all ten exception stubs native the game ran silent and a native
+    // run did not start from the handover (any five of them were fine: a timing effect of native
+    // handlers taking no time, not a wrong result; compare mode, which runs the SH-2 code, saw
+    // nothing). The SH-2 stubs run until that is fixed (HANDOFF, the BIOS paragraph).
+    #[allow(unused_macros)]
     macro_rules! stubs {
         ($($entry:literal => $code:literal),* $(,)?) => {
             $( n.register_exception($entry, |sh2: &mut Sh2, bus: &mut dyn Bus| bios::exception(sh2, bus, $code), concat!("exception_", $code), Contract::Keeps(0xffff)); )*
         };
-    }
-    stubs! {
-        0x0600_1f48 => 64,
-        0x0600_1f4e => 65,
-        0x0600_1f54 => 67,
-        0x0600_1f5a => 68,
-        0x0600_1f6c => 71,
-        0x0600_1f78 => 73,
-        0x0600_1f7e => 74,
-        0x0600_1f84 => 75,
-        0x0600_1f90 => 77,
-        0x0600_1ff8 => 66,
     }
     // TITLE.BIN's code (the logo mode's)
     rewrites! { n; overlay "TITLE";
