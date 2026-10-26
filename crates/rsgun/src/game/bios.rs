@@ -867,11 +867,14 @@ fn shift_right_signed(cpu: &mut Cpu, x: u32, n: u32) -> u32 {
 /// The BIOS's exception stubs push r0 and set it to the stub's code (the vector's handler and
 /// priority are found by it), and all share the dispatch at 0x06001ffc: the tables of the
 /// handlers (VECTORS) and of the SR and SCU mask for each (PRIORITIES), indexed by the code.
+#[allow(dead_code)] // not registered for now (mod.rs: the stubs)
 const DISPATCH_RETURN: u32 = 0x0600_2030;
 /// The dispatch's table of SR and SCU mask bits for each code (the same entries as PRIORITIES,
 /// which starts at code 64).
+#[allow(dead_code)] // not registered for now (mod.rs: the stubs)
 const SR_MASKS: u32 = 0x0600_0980;
 /// SR the dispatch leaves the handler's return with: every interrupt masked.
+#[allow(dead_code)] // not registered for now (mod.rs: the stubs)
 const SR_MASKED: u32 = 0xf0;
 
 /// The stubs at 0x06001f48, 0x06001f4e, ... (each `push r0; r0 = code; bra 0x06001ffc`) and the
@@ -881,6 +884,7 @@ const SR_MASKED: u32 = 0xf0;
 /// DISPATCH_RETURN, as `jsr` leaves it, which a handler that pushes PR leaves on the stack), then
 /// takes everything back and ends with `rte`. It registers (stv::native::Natives::register_exception)
 /// so that the machine enters it as it takes the exception.
+#[allow(dead_code)] // not registered for now (mod.rs: the stubs)
 pub fn exception(sh2: &mut Sh2, bus: &mut dyn Bus, code: u32) {
     let fp = sh2.r[14];
     let mut cpu = Cpu { sh2, bus, caller_r14: fp, r14_out: None };
