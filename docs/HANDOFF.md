@@ -82,7 +82,12 @@ counts), 0x3a9c (backup reset) and 0x4908 (the defaults it writes). The game's i
 in .control (SGL's, interrupts.rs: 0x06064f68, 0x06065064, 0x0606515c, 0x06065194, 0x060651e0,
 0x060651f0, and the vector 3 stub 0x0606521e with the common code at 0x060652c0 it jumps to) is
 rewritten too; not reached by any run, so left to the translation: the getter 0x06064f94 and
-0x060650f0 and the other 29 vector stubs (0x0606520c + 6n, same body with n). The interrupt
+0x060650f0 and the other 29 vector stubs (0x0606520c + 6n, same body with n). The BIOS's exception stubs
+(0x06001f48-0x06001ff8, `bios::exception`) are written and pass compare mode but are NOT
+registered: with all ten native, native play went silent once the game started and a native run
+did not start from the handover (any five were fine): native handlers take no time, so something
+timed (likely the sound commands' handshake) breaks; the fix belongs in how exception natives
+spend cycles. The interrupt
 mask lowered by `ldc` in native code takes effect at the next tick point (a handler's `wait`/
 `spend`, or a call into the interpreter), not at the next instruction as in the SH-2.
 Next: the native boot (the handover

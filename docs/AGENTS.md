@@ -89,6 +89,13 @@ into the next brief for that overlay.
   orchestrator registered it again). Extra scenarios (patched states, scripted inputs) are worth
   it only when asked: that batch spent 640k tokens, twice a normal batch, building them.
 
+9. A change to how native code runs (the runtime's natives, interrupt or exception handlers,
+   anything that changes timing) is also checked natively, not only in compare mode, which runs
+   the SH-2 code: a native play1 run's sound against the interpreter's (`--native --wav` vs
+   `--wav`, from the same boot state: equal loudness through the game) and a native start from the
+   handover (`--native --native-boot`: the title loads). The BIOS's exception stubs, registered
+   native, passed every compare check and left the game silent and the native boot stuck.
+
 ## What worked
 
 - Compare mode as the arbiter: Sonnet batches came back with real bugs found and fixed by the
